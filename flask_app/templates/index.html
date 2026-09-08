@@ -1,0 +1,3021 @@
+{% extends "base.html" %}
+
+{% block title %}Data Analysis Results{% endblock %}
+
+{% block extra_css %}
+    <style>
+        .container-fluid {
+            padding: 20px;
+        }
+        .table-responsive {
+            margin-top: 20px;
+        }
+        .table {
+            width: 100%;
+            margin-bottom: 0;
+        }
+        .add-data-form {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .selected-rows-toolbar .toolbar-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.4rem 0.45rem;
+            margin-bottom: 0.55rem;
+        }
+        .selected-rows-toolbar .toolbar-row:last-child {
+            margin-bottom: 0;
+        }
+        .selected-rows-toolbar .toolbar-label {
+            flex: 0 0 6rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .selected-rows-toolbar form {
+            display: inline;
+        }
+        .entry-row {
+            border: 1px solid #dee2e6;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            background: white;
+        }
+        .entry-row:hover {
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .is-invalid {
+            border-color: #dc3545;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+            font-weight: bold;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+            font-weight: bold;
+        }
+        .alert-warning {
+            background-color: #fff3cd;
+            border-color: #ffeaa7;
+            color: #856404;
+            font-weight: bold;
+        }
+        /* Sticky horizontal scrollbar */
+        .table-scroll-wrapper {
+            position: relative;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        .table-scroll-container {
+            overflow-x: auto;
+            overflow-y: auto;
+            width: 100%;
+            max-height: calc(100vh - 300px); /* Adjust based on your header height */
+        }
+        /* Freeze header rows with cell-level sticky. Do not make thead/tr sticky:
+           that creates a containing block so left-frozen header cells scroll away. */
+        #mainDataTable {
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+        #mainDataTable thead tr:first-child th {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            position: sticky;
+            top: 0;
+            z-index: 12;
+            box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+        }
+        #mainDataTable thead tr.filter-row th {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            position: sticky;
+            top: var(--means-header-row-height, 40px);
+            z-index: 11;
+            box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+        }
+        .table-scroll-container::-webkit-scrollbar {
+            height: 12px;
+        }
+        .table-scroll-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 6px;
+        }
+        .table-scroll-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 6px;
+        }
+        .table-scroll-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        /* Fixed scrollbar at bottom of viewport */
+        .fixed-scrollbar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 20px;
+            background: #f8f9fa;
+            border-top: 2px solid #dee2e6;
+            z-index: 1000;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 0;
+        }
+        .fixed-scrollbar::-webkit-scrollbar {
+            height: 16px;
+        }
+        .fixed-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 8px;
+        }
+        .fixed-scrollbar::-webkit-scrollbar-thumb {
+            background: #007bff;
+            border-radius: 8px;
+        }
+        .fixed-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #0056b3;
+        }
+        .fixed-scrollbar-content {
+            height: 1px;
+            /* Width will be set to match table scroll width */
+        }
+        /* Ensure table container scrollbar is visible */
+        .table-scroll-container {
+            scrollbar-width: thin;
+            scrollbar-color: #888 #f1f1f1;
+        }
+        /* Filter row styling */
+        .filter-row {
+            background-color: #f8f9fa;
+        }
+        .filter-row th {
+            padding: 8px 4px !important;
+            vertical-align: middle;
+        }
+        .filter-row input,
+        .filter-row select {
+            width: 100%;
+            padding: 6px 8px;
+            font-size: 0.9em;
+            border: 2px solid #dee2e6;
+            border-radius: 4px;
+            background-color: white;
+            transition: all 0.2s;
+        }
+        .filter-row input:focus,
+        .filter-row select:focus {
+            border-color: #007bff;
+            outline: 0;
+            box-shadow: 0 0 0 0.2rem rgba(0,123,255,.15);
+            background-color: #fff;
+        }
+        .filter-row input:not(:placeholder-shown) {
+            border-color: #28a745;
+            background-color: #f0fff4;
+        }
+        .filter-row input::placeholder {
+            color: #6c757d;
+            font-style: italic;
+        }
+        .filter-status {
+            background-color: #e7f3ff;
+            padding: 12px 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .filter-status strong {
+            color: #0056b3;
+            font-size: 1.05em;
+        }
+        .filter-help {
+            font-size: 0.9em;
+            color: #495057;
+            margin-top: 8px;
+            padding: 8px 12px;
+            background-color: #ffffff;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+            line-height: 1.6;
+        }
+        .filter-help code {
+            background-color: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+            color: #d63384;
+        }
+        .filter-help-toggle {
+            cursor: pointer;
+            color: #007bff;
+            text-decoration: underline;
+            font-size: 0.85em;
+            margin-left: 10px;
+        }
+        .filter-help-toggle:hover {
+            color: #0056b3;
+        }
+        .row-hidden {
+            display: none;
+        }
+        .filter-icon {
+            color: #28a745;
+            margin-right: 4px;
+        }
+        /* Wider columns for Test Cond and Notes to prevent text wrapping */
+        #mainDataTable th.wide-column,
+        #mainDataTable td.wide-column {
+            min-width: 180px !important;
+            white-space: normal !important;
+            word-wrap: break-word;
+        }
+        /* Specifically target Notes column - make it even wider */
+        #mainDataTable th[data-column-name*="notes"],
+        #mainDataTable td[data-column-name*="notes"],
+        #mainDataTable th[data-column-name*="Notes"],
+        #mainDataTable td[data-column-name*="Notes"] {
+            min-width: 220px !important;
+            width: 220px !important;
+        }
+        /* Target Test Cond columns */
+        #mainDataTable th[data-column-name*="test_condition"],
+        #mainDataTable td[data-column-name*="test_condition"],
+        #mainDataTable th[data-column-name*="test_cond"],
+        #mainDataTable td[data-column-name*="test_cond"],
+        #mainDataTable th[data-column-name*="Test_Cond"],
+        #mainDataTable td[data-column-name*="Test_Cond"] {
+            min-width: 180px !important;
+            width: 180px !important;
+            white-space: normal !important;
+        }
+        /* Sticky identity columns on horizontal scroll */
+        #mainDataTable th.col-sticky,
+        #mainDataTable td.col-sticky {
+            position: sticky;
+            background: #fff;
+            z-index: 4;
+            overflow: hidden;
+        }
+        #mainDataTable thead tr:first-child th.col-sticky {
+            background: #f8f9fa;
+            z-index: 22;
+        }
+        #mainDataTable thead tr.filter-row th.col-sticky {
+            background: #f8f9fa;
+            z-index: 21;
+        }
+        #mainDataTable th.col-sticky-check, #mainDataTable td.col-sticky-check {
+            left: var(--sticky-left-check, 0px);
+            min-width: 36px;
+            width: 36px;
+        }
+        #mainDataTable th.col-sticky-idx, #mainDataTable td.col-sticky-idx {
+            left: var(--sticky-left-idx, 36px);
+            min-width: 40px;
+            width: 40px;
+        }
+        #mainDataTable th.col-sticky-file, #mainDataTable td.col-sticky-file {
+            left: var(--sticky-left-file, 76px);
+            min-width: 140px;
+        }
+        #mainDataTable th.col-sticky-ds, #mainDataTable td.col-sticky-ds {
+            left: var(--sticky-left-ds, 216px);
+            min-width: 56px;
+        }
+        #mainDataTable th.col-sticky-start, #mainDataTable td.col-sticky-start {
+            left: var(--sticky-left-start, 272px);
+            min-width: 64px;
+        }
+        #mainDataTable th.col-sticky-end, #mainDataTable td.col-sticky-end {
+            left: var(--sticky-left-end, 336px);
+            min-width: 64px;
+            box-shadow: 4px 0 6px -4px rgba(0,0,0,0.25);
+        }
+        #mainDataTable.table-striped tbody tr:nth-of-type(odd) td.col-sticky { background-color: #f2f2f2; }
+        .import-notices {
+            max-height: 7.5em;
+            overflow-y: auto;
+            margin: 0 0 1rem 0;
+        }
+        .import-notices .alert {
+            white-space: normal;
+            word-wrap: break-word;
+            overflow-wrap: anywhere;
+            font-weight: normal;
+            margin-bottom: 0.5rem;
+        }
+        #reviewNewEntriesModal .modal-body {
+            max-height: calc(100vh - 180px);
+            overflow-y: auto;
+        }
+        #reviewNewEntriesTable {
+            font-size: 0.85rem;
+            margin-bottom: 0;
+            width: auto;
+            min-width: 100%;
+        }
+        #reviewNewEntriesTable th,
+        #reviewNewEntriesTable td {
+            vertical-align: middle;
+            padding: 0.28rem 0.3rem;
+            white-space: nowrap;
+        }
+        #reviewNewEntriesTable .form-control-sm {
+            height: calc(1.5em + 0.4rem + 2px);
+            padding: 0.15rem 0.3rem;
+            min-width: 0;
+            width: 100%;
+        }
+        #reviewNewEntriesTable input[type="number"] {
+            appearance: textfield;
+            -moz-appearance: textfield;
+        }
+        #reviewNewEntriesTable input[type="number"]::-webkit-inner-spin-button,
+        #reviewNewEntriesTable input[type="number"]::-webkit-outer-spin-button {
+            appearance: none;
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        #reviewNewEntriesTable .col-file {
+            min-width: 13rem;
+            max-width: 18rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        #reviewNewEntriesTable .col-num {
+            width: 1%;
+        }
+        #reviewNewEntriesTable .col-compact {
+            width: 1%;
+            max-width: 4.25rem;
+            white-space: normal;
+            line-height: 1.15;
+            text-align: center;
+        }
+        #reviewNewEntriesTable td.col-compact .form-control-sm {
+            width: 2.9rem;
+            min-width: 2.6rem;
+            max-width: 3.1rem;
+            margin: 0 auto;
+            text-align: center;
+        }
+        #reviewNewEntriesTable .col-climate .form-control-sm {
+            min-width: 5.75rem;
+            width: 5.75rem;
+        }
+        #reviewNewEntriesTable .col-select .form-control-sm {
+            min-width: 4.4rem;
+            width: 4.4rem;
+        }
+        #reviewNewEntriesTable .col-text .form-control-sm {
+            min-width: 4.6rem;
+            width: 4.8rem;
+        }
+        #reviewNewEntriesTable .col-cop .form-control-sm {
+            min-width: 4.2rem;
+            width: 4.2rem;
+        }
+    </style>
+    <script>
+        // Set wider widths for Test Cond and Notes columns based on header text
+        document.addEventListener('DOMContentLoaded', function() {
+            function syncStickyColumnOffsets() {
+                const table = document.getElementById('mainDataTable');
+                const headerRow = table && table.querySelector('thead tr:first-child');
+                if (!table || !headerRow) return;
+                const order = [
+                    ['col-sticky-check', '--sticky-left-check'],
+                    ['col-sticky-idx', '--sticky-left-idx'],
+                    ['col-sticky-file', '--sticky-left-file'],
+                    ['col-sticky-ds', '--sticky-left-ds'],
+                    ['col-sticky-start', '--sticky-left-start'],
+                    ['col-sticky-end', '--sticky-left-end'],
+                ];
+                let left = 0;
+                order.forEach(([cls, varName]) => {
+                    table.style.setProperty(varName, left + 'px');
+                    const cell = headerRow.querySelector('th.' + cls);
+                    if (cell) left += cell.offsetWidth;
+                });
+                table.style.setProperty('--means-header-row-height', headerRow.offsetHeight + 'px');
+            }
+
+            function applyWideColumns() {
+                const headers = document.querySelectorAll('#mainDataTable thead tr:first-child th');
+                let testLabelWidth = null;
+                let testCondIndex = null;
+                let notesIndex = null;
+                
+                // First pass: find Test Label width and identify Test Cond and Notes columns
+                headers.forEach((th, index) => {
+                    if (index < 2) return;
+                    
+                    const text = th.textContent.trim().toLowerCase();
+                    const columnName = th.getAttribute('data-column-name') || '';
+                    const innerHTML = th.innerHTML.toLowerCase();
+                    
+                    // Find Test Label column to get its width
+                    if ((text.includes('test label') || text.includes('test_label') || 
+                         columnName.toLowerCase().includes('test_label')) && testLabelWidth === null) {
+                        // Get the actual rendered width of Test Label column
+                        const rect = th.getBoundingClientRect();
+                        testLabelWidth = rect.width + 'px';
+                        console.log('Found Test Label column at index', index, 'with width:', testLabelWidth);
+                    }
+                    
+                    // Identify Test Cond column
+                    if (text.includes('test cond') || text.includes('test condition') || 
+                        columnName.toLowerCase().includes('test_condition') || 
+                        columnName.toLowerCase().includes('test_cond') ||
+                        columnName.toLowerCase().includes('dev_test_condition') ||
+                        innerHTML.includes('test cond') || innerHTML.includes('test condition')) {
+                        testCondIndex = index;
+                    }
+                    
+                    // Identify Notes column
+                    if (text.includes('notes') || columnName.toLowerCase().includes('notes') ||
+                        innerHTML.includes('notes')) {
+                        notesIndex = index;
+                    }
+                });
+                
+                // Second pass: apply widths
+                headers.forEach((th, index) => {
+                    if (index < 2) return;
+                    
+                    // Apply Test Cond width (match Test Label if found, otherwise use 120px)
+                    if (index === testCondIndex) {
+                        const widthToUse = testLabelWidth || '80px';
+                        th.style.minWidth = widthToUse;
+                        th.style.width = widthToUse;
+                        th.style.whiteSpace = 'normal';
+                        th.style.maxWidth = 'none';
+                        // Apply to all corresponding td cells
+                        const tds = document.querySelectorAll(`#mainDataTable tbody td:nth-child(${index + 1})`);
+                        tds.forEach(td => {
+                            td.style.minWidth = widthToUse;
+                            td.style.width = widthToUse;
+                            td.style.whiteSpace = 'normal';
+                            td.style.maxWidth = 'none';
+                        });
+                        // Also apply to filter row
+                        const filterTh = document.querySelector(`#mainDataTable thead tr.filter-row th:nth-child(${index + 1})`);
+                        if (filterTh) {
+                            filterTh.style.minWidth = widthToUse;
+                            filterTh.style.width = widthToUse;
+                        }
+                        console.log('Applied Test Cond column width:', widthToUse, 'at index', index);
+                    }
+                    
+                    // Apply Notes width (double: 220px * 2 = 440px)
+                    if (index === notesIndex) {
+                        const doubledWidth = '440px';
+                        th.style.minWidth = doubledWidth;
+                        th.style.width = doubledWidth;
+                        th.style.whiteSpace = 'normal';
+                        th.style.maxWidth = 'none';
+                        // Apply to all corresponding td cells
+                        const tds = document.querySelectorAll(`#mainDataTable tbody td:nth-child(${index + 1})`);
+                        tds.forEach(td => {
+                            td.style.minWidth = doubledWidth;
+                            td.style.width = doubledWidth;
+                            td.style.whiteSpace = 'normal';
+                            td.style.maxWidth = 'none';
+                        });
+                        // Also apply to filter row
+                        const filterTh = document.querySelector(`#mainDataTable thead tr.filter-row th:nth-child(${index + 1})`);
+                        if (filterTh) {
+                            filterTh.style.minWidth = doubledWidth;
+                            filterTh.style.width = doubledWidth;
+                        }
+                        console.log('Applied Notes column width:', doubledWidth, 'at index', index);
+                    }
+                });
+                syncStickyColumnOffsets();
+            }
+            
+            // Run immediately
+            applyWideColumns();
+            
+            // Also run after a short delay in case table is loaded dynamically
+            setTimeout(applyWideColumns, 100);
+            setTimeout(applyWideColumns, 500);
+            window.addEventListener('resize', syncStickyColumnOffsets);
+            const table = document.getElementById('mainDataTable');
+            if (table && typeof ResizeObserver !== 'undefined') {
+                new ResizeObserver(syncStickyColumnOffsets).observe(table);
+            }
+        });
+    </script>
+    </style>
+{% endblock %}
+
+{% block content %}
+    <div class="container-fluid">
+        <!-- Hidden data element for JavaScript -->
+        <div id="restore-data" 
+             data-has-selections="{% if last_selected %}true{% else %}false{% endif %}"
+             data-selections="{{ last_selected | tojson | safe }}"
+             style="display: none;"></div>
+        
+        <h1 class="mt-3">Data Analysis Results</h1>
+        
+        {% if import_notices %}
+        <div class="import-notices" id="pageImportNotices">
+            {% for item in import_notices %}
+            <div class="alert alert-{{ item.category }} alert-dismissible fade show" role="alert">
+                {{ item.message }}
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- Selected rows -->
+        <div class="add-data-form selected-rows-toolbar">
+            <h3>Selected rows</h3>
+            <div class="toolbar-row">
+                <span class="toolbar-label">Selection</span>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAll()">Select All</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectNone()">Select None</button>
+            </div>
+            <div class="toolbar-row">
+                <span class="toolbar-label">Update</span>
+                <button type="button" class="btn btn-sm btn-danger" onclick="deleteSelected()" id="deleteSelectedBtn" disabled>
+                    <i class="fas fa-trash"></i> Delete Selected (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="recalculateSelected()" id="recalculateSelectedBtn" disabled>
+                    <i class="fas fa-sync-alt"></i> Recalculate Selected (<span class="selectedCount">0</span>)
+                </button>
+                <form action="{{ url_for('recalculate_all_derived') }}" method="POST">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary" onclick="return confirm('This will recalculate all derived columns (Gutegrad, Pump Correction, Power BUH, etc.) for all entries. Continue?');">
+                        <i class="fas fa-calculator"></i> Recalculate All Derived Columns
+                    </button>
+                </form>
+                <a href="{{ url_for('recalc_history') }}" class="btn btn-sm btn-outline-secondary">
+                    <i class="fas fa-list"></i> View Recalc History
+                </a>
+            </div>
+            <div class="toolbar-row">
+                <span class="toolbar-label">Plot</span>
+                <button type="button" class="btn btn-sm btn-primary" onclick="showPlotOptions()" id="plotSelectedBtn" disabled>
+                    <i class="fas fa-chart-line"></i> Plot (Original Time) (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="showNormalizedPlotOptions()" id="notebookPlotBtn" disabled>
+                    <i class="fas fa-chart-line"></i> Plot (Normalized Time) (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="importSelected()" id="importSelectedBtn" disabled>
+                    <i class="fas fa-download"></i> Import Selected (<span class="selectedCount">0</span>)
+                </button>
+            </div>
+            <div class="toolbar-row">
+                <span class="toolbar-label">Sets</span>
+                <button type="button" class="btn btn-sm btn-success" onclick="toggleDataset('COP_Dataset', 'add')" id="addCOPBtn" disabled>
+                    <i class="fas fa-plus"></i> Add to COP Dataset (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleDataset('COP_Dataset', 'remove')" id="removeCOPBtn" disabled>
+                    <i class="fas fa-minus"></i> Remove from COP Dataset (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-success" onclick="toggleDataset('scatter_dataset', 'add')" id="addScatterBtn" disabled>
+                    <i class="fas fa-plus"></i> Add to Scatter Dataset (<span class="selectedCount">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleDataset('scatter_dataset', 'remove')" id="removeScatterBtn" disabled>
+                    <i class="fas fa-minus"></i> Remove from Scatter Dataset (<span class="selectedCount">0</span>)
+                </button>
+            </div>
+        </div>
+
+        <!-- Plot Options Modal -->
+        <div class="modal fade" id="plotModal" tabindex="-1" role="dialog">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Plot Options</h5>
+                        <button type="button" class="close" data-dismiss="modal">
+                            <span>&times;</span>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="plotForm" method="POST" action="{{ url_for('plot_selected') }}">
+                            <!-- Matrix Layout Options -->
+                            <div class="form-group">
+                                <label class="form-label"><strong>Figure Layout:</strong></label>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="matrix_layout" value="1" id="layout_1col">
+                                            <label class="form-check-label" for="layout_1col">1 Column</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="matrix_layout" value="2" id="layout_2col" checked>
+                                            <label class="form-check-label" for="layout_2col">2 Columns</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Choose 1 column for vertical stacking or 2 columns for side-by-side layout.</small>
+                            </div>
+                            
+                            <!-- Legend Options -->
+                            <div class="form-group">
+                                <label class="form-label"><strong>Legend Options:</strong></label>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="legend_style" value="auto" id="legend_auto">
+                                            <label class="form-check-label" for="legend_auto">Auto (Lab1, Lab2, Lab3...)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="legend_style" value="filename" id="legend_filename" checked>
+                                            <label class="form-check-label" for="legend_filename">Use Filenames</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="legend_style" value="custom" id="legend_custom">
+                                            <label class="form-check-label" for="legend_custom">Custom Labels</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="legend_style" value="none" id="legend_none">
+                                            <label class="form-check-label" for="legend_none">No Legend</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Choose how to label the different data series in your plots.</small>
+                            </div>
+                            
+                            <!-- Custom Legend Labels -->
+                            <div class="form-group" id="custom_legend_group" style="display: none;">
+                                <label for="custom_legend_labels"><strong>Custom Legend Labels:</strong></label>
+                                <textarea class="form-control" id="custom_legend_labels" name="custom_legend_labels" rows="3" 
+                                    placeholder="Enter one label per line, e.g.:&#10;Lab1&#10;Lab2&#10;Lab3&#10;Test A&#10;Test B"></textarea>
+                                <small class="text-muted">Enter one label per line. The number of labels must match the number of selected entries.</small>
+                                <div id="legend_count_info" class="text-info mt-1" style="display: none;">
+                                    <small><strong>Selected entries: <span id="selected_count">0</span></strong> - Please provide exactly this many labels.</small>
+                                </div>
+                            </div>
+                            
+                            <hr>
+                            
+                            <div class="form-group">
+                                <label>Select Variables to Plot:</label>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_outdoor (DB)" id="plot_t_db">
+                                            <label class="form-check-label" for="plot_t_db">T_outdoor (DB)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_outdoor (WB)" id="plot_t_wb">
+                                            <label class="form-check-label" for="plot_t_wb">T_outdoor (WB)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_supply" id="plot_t_supply">
+                                            <label class="form-check-label" for="plot_t_supply">T_supply</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_return_emu" id="plot_t_return">
+                                            <label class="form-check-label" for="plot_t_return">T_return_emu</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_mean_log" id="plot_t_mean_log">
+                                            <label class="form-check-label" for="plot_t_mean_log">T_mean_log (20 °C + LMTD)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="dT_ln" id="plot_dt_ln">
+                                            <label class="form-check-label" for="plot_dt_ln">dT_ln (LMTD vs 20 °C)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="dT_HP" id="plot_dt_hp">
+                                            <label class="form-check-label" for="plot_dt_hp">dT_HP (Heat pump temp diff)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="dTreturn" id="plot_dtret">
+                                            <label class="form-check-label" for="plot_dtret">dTreturn (Return temp diff)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_return_calc" id="plot_t_return_calc">
+                                            <label class="form-check-label" for="plot_t_return_calc">T_return_calc</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_B_calc" id="plot_t_b_calc">
+                                            <label class="form-check-label" for="plot_t_b_calc">T_B_calc</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="T_H_calc" id="plot_t_h_calc">
+                                            <label class="form-check-label" for="plot_t_h_calc">T_H_calc</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Q_HB" id="plot_q_hb">
+                                            <label class="form-check-label" for="plot_q_hb">Q_HB</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Q_BA" id="plot_q_ba">
+                                            <label class="form-check-label" for="plot_q_ba">Q_BA</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Heating Capacity (corrected)" id="plot_heat_corr">
+                                            <label class="form-check-label" for="plot_heat_corr">Heating Capacity (corrected)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Heating Capacity (without corr)" id="plot_heat_uncorr">
+                                            <label class="form-check-label" for="plot_heat_uncorr">Heating Capacity (without corr)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Electric Power Input (corrected)" id="plot_power_corr">
+                                            <label class="form-check-label" for="plot_power_corr">Electric Power Input (corrected)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Electric Power Input (without correction)" id="plot_power_uncorr">
+                                            <label class="form-check-label" for="plot_power_uncorr">Electric Power Input (without corr)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="normalised_Electric Power Input (corrected)" id="plot_normalised_power">
+                                            <label class="form-check-label" for="plot_normalised_power">Normalised Power</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="abs_pressure_difference" id="plot_dp_hp">
+                                            <label class="form-check-label" for="plot_dp_hp">Pressure difference (bar)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="mass flow" id="plot_mass_flow">
+                                            <label class="form-check-label" for="plot_mass_flow">Mass flow</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="volume flow" id="plot_volume">
+                                            <label class="form-check-label" for="plot_volume">Volume flow (m³/h)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Pressure difference" id="plot_pressure">
+                                            <label class="form-check-label" for="plot_pressure">Pressure difference (original)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="Electrical power input BUH" id="plot_buh_power">
+                                            <label class="form-check-label" for="plot_buh_power">Electrical power input BUH</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="COP (without corr)" id="plot_cop_uncorr">
+                                            <label class="form-check-label" for="plot_cop_uncorr">COP (without corr)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="COP (corrected)" id="plot_cop_corr">
+                                            <label class="form-check-label" for="plot_cop_corr">COP (corrected)</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="plot_columns" value="COP (with BUH)" id="plot_cop_buh">
+                                            <label class="form-check-label" for="plot_cop_buh">COP (with BUH)</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <button type="button" class="btn btn-outline-primary btn-sm" onclick="selectAllPlotColumns()">Select All</button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm" onclick="selectNonePlotColumns()">Select None</button>
+                            </div>
+                            
+                            <div id="yAxisLimitsSection" class="form-group mt-3 border-top pt-3" style="display: none;">
+                                <label class="form-label"><strong>Y-axis range (optional)</strong></label>
+                                <small class="form-text text-muted d-block mb-2">Each row below is for <strong>one plotted variable</strong>. Set Y min and/or Y max for that variable only; leave blank for auto.</small>
+                                <div id="yAxisLimitsList"></div>
+                            </div>
+            </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-success" onclick="submitPlot()">
+                            <i class="fas fa-chart-line"></i> Generate Plot
+                        </button>
+                    </div>
+                    </div>
+                    </div>
+                </div>
+
+        <!-- Edit Entry Modal -->
+        <div class="modal fade" id="editEntryModal" tabindex="-1" role="dialog">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Edit Entry</h5>
+                        <button type="button" class="close" data-dismiss="modal">
+                            <span>&times;</span>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>Warning:</strong> Changing the start time or end time will trigger a full recalculation of all values for this entry, including:
+                            <ul class="mb-0 mt-2">
+                                <li>All calculated mean values</li>
+                                <li>Mean values page data</li>
+                                <li>Permissible deviations page data</li>
+                                <li>All derived columns</li>
+                            </ul>
+                        </div>
+                        <form id="editEntryForm" method="POST" action="{{ url_for('edit_entry') }}">
+                            <input type="hidden" id="edit_old_file_name" name="old_file_name" value="">
+                            <input type="hidden" id="edit_old_data_set" name="old_data_set" value="">
+                            <input type="hidden" id="edit_old_start_time" name="old_start_time" value="">
+                            <input type="hidden" id="edit_old_end_time" name="old_end_time" value="">
+                            
+                            <div class="form-group">
+                                <label for="edit_file_name"><strong>File Name:</strong></label>
+                                <input type="text" class="form-control" id="edit_file_name" name="file_name" required>
+                                <small class="form-text text-muted">Enter the file name (must exist in the data directory)</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="edit_data_set"><strong>Data Set:</strong></label>
+                                <input type="number" class="form-control" id="edit_data_set" name="data_set" step="1" required>
+                                <small class="form-text text-muted">Enter the data set number</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="edit_start_time"><strong>Start Time:</strong></label>
+                                <input type="number" class="form-control" id="edit_start_time" name="start_time" required>
+                                <small class="form-text text-muted">Enter the new start time value</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="edit_end_time"><strong>End Time:</strong></label>
+                                <input type="number" class="form-control" id="edit_end_time" name="end_time" required>
+                                <small class="form-text text-muted">Enter the new end time value</small>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" onclick="submitEditEntry()">
+                            <i class="fas fa-save"></i> Save Changes & Recalculate
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Review New Entries Modal -->
+        <div class="modal fade" id="reviewNewEntriesModal" tabindex="-1" role="dialog" aria-labelledby="reviewNewEntriesTitle" aria-hidden="true">
+            <div class="modal-dialog modal-xl" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="reviewNewEntriesTitle">Review new entries (auto-filled)</h5>
+                        <button type="button" class="close" data-dismiss="modal">
+                            <span>&times;</span>
+                        </button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="reviewImportNotices" class="import-notices"></div>
+                        <div class="alert alert-info">
+                            Fields below are auto-filled from the filename and defaults. Adjust anything that is wrong before Confirm.
+                            Climate (Average / Warmer / Colder) and application (LT / MT / HT) select Table 3 leaving-water and mean-water setpoints.
+                            <strong>COP dataset</strong> also sets Scatter dataset to the same value here; you can split them later on the Data page.
+                            After you confirm, the app recomputes derived quantities and deviation statistics.
+                            <strong>Notes</strong> must contain <code>drop</code> or <code>ramp</code> for defrost (A/B/E/F) and on/off (C/D) windows so Period Statistics can split sub-periods; use something else (for example <code>other</code>) only when the window has no compressor transition.
+                        </div>
+                        <div id="reviewNewEntriesError" class="alert alert-danger" style="display:none;"></div>
+                        <div class="form-group mb-3">
+                            <label class="font-weight-bold mb-1" for="reviewBatchProfile">Unit profile</label>
+                            <select id="reviewBatchProfile" class="form-control form-control-sm" style="max-width:28rem;"></select>
+                            <small class="form-text text-muted">
+                                Required. One profile for every row in this batch (same unit).
+                                Filename patterns are matched when possible; otherwise pick a profile or
+                                <a href="{{ url_for('profiles_page') }}">create one on Profiles</a>.
+                                The profile also auto-fills <b>hp_id</b> for grouping in scatter plots and dTreturn insights.
+                            </small>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-bordered" id="reviewNewEntriesTable">
+                                <thead class="thead-light">
+                                    <tr>
+                                        <th class="col-file">File</th>
+                                        <th class="col-num">DS</th>
+                                        <th class="col-num">Start</th>
+                                        <th class="col-num">End</th>
+                                        <th class="col-compact">Test cond</th>
+                                        <th class="col-compact" title="From the filename (A–G); usually the same as Test cond">Test label</th>
+                                        <th class="col-climate">Climate</th>
+                                        <th class="col-select">Application</th>
+                                        <th class="col-select">Flow</th>
+                                        <th class="col-compact">Lab ID</th>
+                                        <th class="col-compact" title="Filled from the unit profile; used for grouping in scatter and dTreturn">HP ID</th>
+                                        <th class="col-text" title="Signal used to mark cycle start/end">Indicator</th>
+                                        <th class="col-text" title="Use drop or ramp to split defrost/on-off windows into sub-periods">Notes</th>
+                                        <th class="col-cop">COP dataset</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="reviewNewEntriesTbody">
+                                    <tr><td colspan="14" class="text-muted">Loading…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal">Later</button>
+                        <button type="button" class="btn btn-primary" id="confirmNewEntriesBtn">
+                            <i class="fas fa-check"></i> Confirm &amp; Calculate
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Template-to-JS bridge (keeps JS linters happy) -->
+        <script type="application/json" id="newEntryRowidsJson">{{ (last_inserted_rowids or []) | tojson }}</script>
+        <script type="application/json" id="importNoticesJson">{{ (import_notices or []) | tojson }}</script>
+
+        <!-- Add new data form -->
+        <div class="add-data-form">
+            <h3>Add Data</h3>
+            
+            <!-- Data Entry Form -->
+            <div class="mb-4">
+                <div class="alert alert-info">
+                    <p class="mb-2">Copy your data from Excel and paste below. You can add single entries or multiple entries at once.</p>
+                    <p class="mb-1"><strong>Format:</strong> File Name, Data Set, Start Time, End Time (one per line)</p>
+                    <p class="mb-0"><strong>Examples:</strong></p>
+                    <code class="d-block mt-1 p-2 bg-light">
+                        <!-- Single entry -->
+                        HPT_RRT1_Lab02_D.xlsx	1	0	3600<br>
+                        <!-- Multiple entries -->
+                        HPT_RRT2_Lab04_E.xlsx	1	10	4000<br>
+                        HPT_RRT2_Lab04_E.xlsx	2	4010	8000
+                    </code>
+                </div>
+                <form action="{{ url_for('add_bulk_data') }}" method="POST">
+                    <div class="form-group">
+                        <label for="bulk-data"><strong>Enter your data:</strong></label>
+                        <textarea class="form-control" id="bulk-data" name="bulk_data" rows="4" placeholder="Paste your data here... (single entry or multiple entries)"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <button type="submit" class="btn btn-success btn-lg">
+                            <i class="fas fa-plus-circle"></i> Add Data
+                        </button>
+                    </div>
+            </form>
+            </div>
+        </div>
+
+        {% macro show_float(val) -%}
+          {%- if val is none -%}
+            -
+          {%- elif val is string -%}
+            {{ val }}
+          {%- else -%}
+            {{ "%.4f"|format(val) }}
+          {%- endif -%}
+        {%- endmacro %}
+
+        {% macro format_column_name(col_name) -%}
+          {%- set col_map = {
+            'file_name': 'File Name',
+            'data_set': 'Data Set',
+            'start_time': 'Start Time',
+            'end_time': 'End Time',
+            'avg_heating_capacity_uncorr': 'Avg Heat Cap (Uncor)',
+            'avg_power_input_uncorr': 'Avg Power In (Uncor)',
+            'cop_uncorr': 'COP (Uncor)',
+            'avg_heating_capacity_corr': 'Avg Heat Cap (Corr)',
+            'avg_power_input_corr': 'Avg Power In (Corr)',
+            'cop_corr': 'COP (Corr)',
+            'avg_heating_capacity_bam_corr': 'Avg Heat Cap (BAM corr)',
+            'avg_power_input_bam_corr': 'Avg Power In (BAM corr)',
+            'cop_bam_corr': 'COP (BAM corr)',
+            'avg_t_db': 'Avg T (DB)',
+            'avg_t_wb': 'Avg T (WB)',
+            'db_setpoint': 'Setpoint (DB)',
+            'wb_setpoint': 'Setpoint (WB)',
+            'mean_db_deviation': 'Mean DB Dev (K)',
+            'mean_wb_deviation': 'Mean WB Dev (K)',
+            'avg_t_supply': 'Avg T Supply',
+            'avg_t_return_emu': 'Avg T Ret Emu',
+            'avg_t_return_calc': 'Avg T Ret Calc',
+            'avg_t_b_calc': 'Avg T B Calc',
+            'avg_t_h_calc': 'Avg T H Calc',
+            'avg_q_hb': 'Avg Q HB',
+            'avg_q_ba': 'Avg Q BA',
+            'avg_volume_flow': 'Avg Vol Fl',
+            'avg_mass_flow': 'Avg Mass Fl',
+            'avg_dp': 'Avg DP',
+            'avg_adj_dp': 'Avg Adj DP',
+            'avg_P_hyd': 'Avg P_hyd',
+            'avg_eff_pump': 'Avg Eff Pump',
+            'avg_qcorr_bam': 'Avg Qcorr BAM',
+            'avg_pcorr_bam': 'Avg Pcorr BAM',
+            'avg_power_buh': 'Avg Power BUH',
+            'avg_power_buh_from_ts': 'Avg Power BUH from Ts',
+            'avg_t_sup_buh': 'Avg T Sup BUH',
+            'avg_lab_air_db': 'Avg Lab Air (DB)',
+            'avg_lab_atm_pressure': 'Avg Lab Atm Pressure',
+            'avg_cp_out_sink': 'Avg cp Out Sink',
+            'avg_cp_in_sink': 'Avg cp In Sink',
+            'avg_density_sink': 'Avg Density Sink',
+            'avg_compressor_frequency': 'Avg Compressor Freq',
+            'avg_fan_speed': 'Avg Fan Speed',
+            'avg_voltage': 'Avg Voltage',
+            'avg_current': 'Avg Current',
+            'avg_frequency': 'Avg Frequency',
+            'avg_cos_phi': 'Avg cos phi',
+            'avg_real_buh_power': 'Avg Real BUH Power',
+            'avg_t_in_cond': 'Avg T In Cond',
+            'avg_t_out_cond': 'Avg T Out Cond',
+            'avg_t_in_evap': 'Avg T In Evap',
+            'avg_t_out_evap': 'Avg T Out Evap',
+            'QCorrwBUH': 'Q corr w BUH',
+            'PCorrwBUH': 'P corr w BUH',
+            'COPCorrwBUH': 'COP corr w BUH',
+            'Ts_buh': 'Ts BUH',
+            'profile_id': 'Profile',
+            'HP_ID': 'HP ID',
+            'Lab_ID': 'Lab ID',
+            'test_cond': 'Test Cond',
+            'flow_config': 'Flow',
+            'COP_dataset': 'COP Dataset',
+          } -%}
+          {{- col_map.get(col_name, col_name.replace('_', ' ').title()) -}}
+        {%- endmacro %}
+
+        <!-- Filter Status Bar -->
+        <div class="d-flex flex-wrap align-items-center mb-2" style="gap: 1rem;">
+            <div class="form-check mb-0">
+                <input class="form-check-input" type="checkbox" id="showMonitoringColumns"
+                       {% if show_monitoring_columns %}checked{% endif %}>
+                <label class="form-check-label" for="showMonitoringColumns">Show monitoring columns</label>
+            </div>
+            <small class="text-muted">Optional lab channels (air, electrical, condenser/evaporator). Same store as Manage Columns.</small>
+        </div>
+        <div class="filter-status" id="filterStatus" style="display: none;">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <i class="fas fa-filter filter-icon"></i>
+                    <strong>Showing <span id="filteredCount">0</span> of <span id="totalCount">{{ results|length }}</span> rows</strong>
+                    <span class="filter-help-toggle" onclick="toggleFilterHelp()" id="filterHelpToggle">
+                        <i class="fas fa-question-circle"></i> Show filter help
+                    </span>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-danger" onclick="clearAllFilters()">
+                    <i class="fas fa-times"></i> Clear All Filters
+                </button>
+            </div>
+            <div class="filter-help mt-2" id="filterHelpContent" style="display: none;">
+                <strong><i class="fas fa-lightbulb"></i> Quick Filter Guide:</strong><br>
+                <strong>Text Filters:</strong>
+                Type any text to search (e.g., <code>HP1</code> finds all rows containing "HP1")<br>
+                <code>*</code> = any characters (e.g., <code>HP*</code>), 
+                <code>?</code> = single character (e.g., <code>HP?</code>), 
+                <code>=text</code> or <code>"text"</code> = exact match, 
+                <code>^text</code> = starts with, 
+                <code>text$</code> = ends with<br>
+                <strong>Number Filters:</strong>
+                <code>&gt;10</code> = greater than, 
+                <code>&lt;10</code> = less than, 
+                <code>10-20</code> = range, 
+                <code>=10</code> = exact value
+            </div>
+        </div>
+
+        <div class="table-scroll-wrapper">
+            <div class="table-scroll-container" id="tableScrollContainer">
+                <table class="table table-bordered table-striped" id="mainDataTable">
+                <thead>
+                    <tr>
+                        <th class="col-sticky col-sticky-check"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th>
+                        <th class="col-sticky col-sticky-idx">#</th>
+                        {% for col in ordered_columns %}
+                        {% set sticky = 'col-sticky col-sticky-file' if col == 'file_name' else ('col-sticky col-sticky-ds' if col == 'data_set' else ('col-sticky col-sticky-start' if col == 'start_time' else ('col-sticky col-sticky-end' if col == 'end_time' else ''))) %}
+                        <th class="{{ sticky }}{% if 'test_condition' in col.lower() or 'notes' in col.lower() %} wide-column{% endif %}" data-column-name="{{ col }}">
+                            {{ format_column_name(col) }}
+                            {% if columns_info.get(col) and columns_info[col]['type'] in ['REAL', 'INTEGER'] and col not in ['data_set', 'start_time', 'end_time'] %}
+                            <br><button type="button" class="btn btn-sm btn-outline-primary update-column-btn" data-column="{{ col }}" title="Update this column">Update</button>
+                            {% endif %}
+                        </th>
+                        {% endfor %}
+                        <th>Time Series</th>
+                        <th>Actions</th>
+                    </tr>
+                    <tr class="filter-row">
+                        <th class="col-sticky col-sticky-check"></th>
+                        <th class="col-sticky col-sticky-idx"></th>
+                        {% for col in ordered_columns %}
+                        {% set sticky = 'col-sticky col-sticky-file' if col == 'file_name' else ('col-sticky col-sticky-ds' if col == 'data_set' else ('col-sticky col-sticky-start' if col == 'start_time' else ('col-sticky col-sticky-end' if col == 'end_time' else ''))) %}
+                        <th class="{{ sticky }}">
+                            {% if columns_info.get(col) and columns_info[col].get('type') == 'TEXT' %}
+                                <input type="text" class="column-filter" data-column="{{ col }}" 
+                                       placeholder="Type to filter..." 
+                                       title="Filter this column - type text, use * for wildcards, = for exact match"
+                                       onkeyup="applyFilters()">
+                            {% elif col == 'file_name' %}
+                                <input type="text" class="column-filter" data-column="{{ col }}" 
+                                       placeholder="Filter files..." 
+                                       title="Filter file names - use * for wildcards (e.g., HP1*)"
+                                       onkeyup="applyFilters()">
+                            {% elif columns_info.get(col) and columns_info[col].get('type') in ['REAL', 'INTEGER'] and col not in ['data_set', 'start_time', 'end_time'] %}
+                                <input type="text" class="column-filter" data-column="{{ col }}" 
+                                       placeholder="Filter numbers..." 
+                                       title="Filter numbers - use &gt;10, &lt;10, 10-20, or =10"
+                                       onkeyup="applyFilters()">
+                            {% else %}
+                                <input type="text" class="column-filter" data-column="{{ col }}" 
+                                       placeholder="Type to filter..." 
+                                       title="Filter this column"
+                                       onkeyup="applyFilters()">
+                            {% endif %}
+                        </th>
+                        {% endfor %}
+                        <th></th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in results %}
+                    <tr class="data-row" data-row-index="{{ loop.index0 }}" data-rowid="{{ row.get('rowid', '') }}">
+                        <td class="col-sticky col-sticky-check"><input type="checkbox" class="row-checkbox" data-file="{{ row['file_name'] }}" data-dataset="{{ row['data_set'] }}" onchange="updateDeleteButton()"></td>
+                        <td class="col-sticky col-sticky-idx"><strong>{{ loop.index }}</strong></td>
+                        {% for col in ordered_columns %}
+                        {% set sticky = 'col-sticky col-sticky-file' if col == 'file_name' else ('col-sticky col-sticky-ds' if col == 'data_set' else ('col-sticky col-sticky-start' if col == 'start_time' else ('col-sticky col-sticky-end' if col == 'end_time' else ''))) %}
+                        <td class="{{ sticky }}{% if 'test_condition' in col.lower() or 'notes' in col.lower() %} wide-column{% endif %}" data-column-name="{{ col }}">
+                            {% if col in ['data_set', 'start_time', 'end_time'] %}
+                                {{ row[col] | show_time }}
+                            {% elif col == 'file_name' %}
+                                {{ row[col] }}
+                            {% elif col == 'db_setpoint' or col == 'wb_setpoint' %}
+                                {% if row.get(col) is not none %}
+                                    {{ "%.1f"|format(row[col]) }}°C
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            {% elif col == 'mean_db_deviation' or col == 'mean_wb_deviation' %}
+                                {% if row.get(col) is not none %}
+                                    {{ "%.2f"|format(row[col]) }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            {% elif col in (optional_mean_columns or []) %}
+                                {# Optional monitoring means: absent series stays n/a, never 0 #}
+                                {% if row.get(col) is not none %}
+                                    {{ show_float(row.get(col)) }}
+                                {% else %}
+                                    <span class="text-muted">n/a</span>
+                                {% endif %}
+                            {% elif columns_info.get(col) and columns_info[col].get('type') == 'TEXT' %}
+                                {{ row.get(col, '-') }}
+                            {% else %}
+                                {{ show_float(row.get(col)) }}
+                            {% endif %}
+                        </td>
+                        {% endfor %}
+                        <td>
+                            {% if row['has_time_series'] %}
+                                <span class="badge badge-success">✅ Available</span>
+                            {% else %}
+                                <span class="badge badge-warning">❌ Excel only</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <a href="{{ url_for('view_timeseries', file_name=row['file_name'], data_set=row['data_set']) }}" 
+                                   class="btn btn-primary btn-sm" title="View time series details">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                                <button type="button" class="btn btn-success btn-sm edit-entry-btn" 
+                                        data-file="{{ row['file_name'] }}" 
+                                        data-dataset="{{ row['data_set'] }}"
+                                        data-start-time="{{ row['start_time'] }}"
+                                        data-end-time="{{ row['end_time'] }}"
+                                        title="Edit entry (change start/end time)">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                                <button type="button" class="btn btn-warning btn-sm recalculate-btn" 
+                                        data-file="{{ row['file_name'] }}" 
+                                        data-dataset="{{ row['data_set'] }}" 
+                                        title="Recalculate this entry">
+                                    <i class="fas fa-sync-alt"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm move-up-btn" 
+                                        data-file="{{ row['file_name'] }}" 
+                                        data-dataset="{{ row['data_set'] }}" 
+                                        data-rowid="{{ row.get('rowid', '') }}"
+                                        data-visual-position="{{ loop.index }}"
+                                        title="Move up">
+                                    <i class="fas fa-arrow-up"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm move-down-btn" 
+                                        data-file="{{ row['file_name'] }}" 
+                                        data-dataset="{{ row['data_set'] }}" 
+                                        data-rowid="{{ row.get('rowid', '') }}"
+                                        data-visual-position="{{ loop.index }}"
+                                        title="Move down">
+                                    <i class="fas fa-arrow-down"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-info btn-sm move-to-position-btn" 
+                                        data-file="{{ row['file_name'] }}" 
+                                        data-dataset="{{ row['data_set'] }}" 
+                                        data-rowid="{{ row.get('rowid', '') }}"
+                                        data-visual-position="{{ loop.index }}"
+                                        title="Move to specific position">
+                                    <i class="fas fa-location-arrow"></i>
+                                </button>
+                                {% if not row['has_time_series'] %}
+                                    <form action="{{ url_for('import_time_series_route') }}" method="POST" style="display: inline;">
+                                        <input type="hidden" name="file_name" value="{{ row['file_name'] }}">
+                                        <input type="hidden" name="data_set" value="{{ row['data_set'] }}">
+                                        <button type="submit" class="btn btn-info btn-sm" title="Import time series data">
+                                            <i class="fas fa-download"></i>
+                                        </button>
+                                    </form>
+                                {% endif %}
+                                <form action="{{ url_for('delete_data') }}" method="POST" style="display: inline;">
+                                    <input type="hidden" name="file_name" value="{{ row['file_name'] }}">
+                                    <input type="hidden" name="data_set" value="{{ row['data_set'] }}">
+                                    <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this entry?')" title="Delete entry">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+        
+        <!-- Fixed scrollbar at bottom of viewport -->
+        <div class="fixed-scrollbar" id="fixedScrollbar">
+            <div class="fixed-scrollbar-content" id="fixedScrollbarContent"></div>
+        </div>
+    </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+            // Bulk selection functions
+            function selectAll() {
+                const checkboxes = document.querySelectorAll('.row-checkbox');
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = true;
+                });
+                document.getElementById('selectAllCheckbox').checked = true;
+                updateDeleteButton();
+            }
+            
+            function selectNone() {
+                const checkboxes = document.querySelectorAll('.row-checkbox');
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = false;
+                });
+                document.getElementById('selectAllCheckbox').checked = false;
+                updateDeleteButton();
+            }
+            
+            function toggleSelectAll() {
+                const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+                // Only select/deselect visible (non-filtered) rows
+                const visibleCheckboxes = document.querySelectorAll('.data-row:not(.row-hidden) .row-checkbox');
+                visibleCheckboxes.forEach(checkbox => {
+                    checkbox.checked = selectAllCheckbox.checked;
+                });
+                updateDeleteButton();
+            }
+            
+            /** Append SQLite rowid for each selected row so the server can disambiguate duplicate file_name + data_set. */
+            function appendRowIdsForSelectedRows(form) {
+                document.querySelectorAll('.row-checkbox:checked').forEach(checkbox => {
+                    const row = checkbox.closest('tr');
+                    const rid = (row && row.dataset.rowid) ? row.dataset.rowid : '';
+                    const rowIdInput = document.createElement('input');
+                    rowIdInput.type = 'hidden';
+                    rowIdInput.name = 'row_ids';
+                    rowIdInput.value = rid;
+                    form.appendChild(rowIdInput);
+                });
+            }
+            
+            function updateDeleteButton() {
+                const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+                const deleteBtn = document.getElementById('deleteSelectedBtn');
+                const plotBtn = document.getElementById('plotSelectedBtn');
+                const importBtn = document.getElementById('importSelectedBtn');
+                const notebookPlotBtn = document.getElementById('notebookPlotBtn');
+                const recalculateBtn = document.getElementById('recalculateSelectedBtn');
+                const countSpans = document.querySelectorAll('.selectedCount');
+                countSpans.forEach(span => span.textContent = checkboxes.length);
+                deleteBtn.disabled = checkboxes.length === 0;
+                plotBtn.disabled = checkboxes.length === 0;
+                importBtn.disabled = checkboxes.length === 0;
+                notebookPlotBtn.disabled = checkboxes.length === 0;
+                recalculateBtn.disabled = checkboxes.length === 0;
+                
+                // Enable/disable dataset management buttons
+                const addCOPBtn = document.getElementById('addCOPBtn');
+                const removeCOPBtn = document.getElementById('removeCOPBtn');
+                const addScatterBtn = document.getElementById('addScatterBtn');
+                const removeScatterBtn = document.getElementById('removeScatterBtn');
+                if (addCOPBtn) addCOPBtn.disabled = checkboxes.length === 0;
+                if (removeCOPBtn) removeCOPBtn.disabled = checkboxes.length === 0;
+                if (addScatterBtn) addScatterBtn.disabled = checkboxes.length === 0;
+                if (removeScatterBtn) removeScatterBtn.disabled = checkboxes.length === 0;
+            }
+            
+            function deleteSelected() {
+                const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+                if (checkboxes.length === 0) {
+                    alert('Please select at least one row to delete.');
+                    return;
+                }
+                
+                const confirmMessage = `Are you sure you want to delete ${checkboxes.length} selected record(s)? This action cannot be undone.`;
+                if (!confirm(confirmMessage)) {
+                    return;
+                }
+                
+                // Create a form to submit all selected records
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '{{ url_for("bulk_delete_data") }}';
+                
+                checkboxes.forEach(checkbox => {
+                    const fileInput = document.createElement('input');
+                    fileInput.type = 'hidden';
+                    fileInput.name = 'file_names';
+                    fileInput.value = checkbox.dataset.file;
+                    form.appendChild(fileInput);
+                    
+                    const datasetInput = document.createElement('input');
+                    datasetInput.type = 'hidden';
+                    datasetInput.name = 'data_sets';
+                    datasetInput.value = checkbox.dataset.dataset;
+                    form.appendChild(datasetInput);
+                });
+                appendRowIdsForSelectedRows(form);
+                
+                document.body.appendChild(form);
+                form.submit();
+            }
+            
+        function importSelected() {
+            const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('Please select at least one row to import time series data.');
+                return;
+            }
+            
+            const confirmMessage = `Are you sure you want to import time series data for ${checkboxes.length} selected record(s)? This may take a few minutes.`;
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            // Create a form to submit all selected records
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '{{ url_for("bulk_import_time_series") }}';
+            
+            checkboxes.forEach(checkbox => {
+                const fileInput = document.createElement('input');
+                fileInput.type = 'hidden';
+                fileInput.name = 'file_names';
+                fileInput.value = checkbox.dataset.file;
+                form.appendChild(fileInput);
+                
+                const datasetInput = document.createElement('input');
+                datasetInput.type = 'hidden';
+                datasetInput.name = 'data_sets';
+                datasetInput.value = checkbox.dataset.dataset;
+                form.appendChild(datasetInput);
+            });
+            appendRowIdsForSelectedRows(form);
+            
+            document.body.appendChild(form);
+            form.submit();
+        }
+        
+        function openEditEntryModal(fileName, dataSet, startTime, endTime) {
+            // Convert to integers (handle float values like "20275.0")
+            const startTimeInt = Math.floor(parseFloat(startTime));
+            const endTimeInt = Math.floor(parseFloat(endTime));
+            const dataSetNum = parseFloat(dataSet);
+            
+            // Populate modal fields with current values
+            document.getElementById('edit_file_name').value = fileName;
+            document.getElementById('edit_data_set').value = dataSetNum;
+            document.getElementById('edit_start_time').value = startTimeInt;
+            document.getElementById('edit_end_time').value = endTimeInt;
+            
+            // Store old values in hidden fields
+            document.getElementById('edit_old_file_name').value = fileName;
+            document.getElementById('edit_old_data_set').value = dataSetNum;
+            document.getElementById('edit_old_start_time').value = startTimeInt;
+            document.getElementById('edit_old_end_time').value = endTimeInt;
+            
+            // Show modal
+            $('#editEntryModal').modal('show');
+        }
+        
+        function submitEditEntry() {
+            const form = document.getElementById('editEntryForm');
+            const fileName = document.getElementById('edit_file_name').value.trim();
+            const dataSet = parseFloat(document.getElementById('edit_data_set').value);
+            const startTime = parseInt(document.getElementById('edit_start_time').value);
+            const endTime = parseInt(document.getElementById('edit_end_time').value);
+            const oldFileName = document.getElementById('edit_old_file_name').value.trim();
+            const oldDataSet = parseFloat(document.getElementById('edit_old_data_set').value);
+            const oldStartTime = parseInt(document.getElementById('edit_old_start_time').value);
+            const oldEndTime = parseInt(document.getElementById('edit_old_end_time').value);
+            
+            // Validate inputs
+            if (!fileName) {
+                alert('Please enter a file name.');
+                return;
+            }
+            
+            if (isNaN(dataSet)) {
+                alert('Please enter a valid numeric value for data set.');
+                return;
+            }
+            
+            if (isNaN(startTime) || isNaN(endTime)) {
+                alert('Please enter valid numeric values for start time and end time.');
+                return;
+            }
+            
+            if (startTime >= endTime) {
+                alert('Start time must be less than end time.');
+                return;
+            }
+            
+            // Check if values actually changed
+            const hasChanges = fileName !== oldFileName || 
+                              Math.abs(dataSet - oldDataSet) > 0.001 || 
+                              startTime !== oldStartTime || 
+                              endTime !== oldEndTime;
+            
+            if (!hasChanges) {
+                alert('No changes detected. All values are the same as before.');
+                return;
+            }
+            
+            // Build confirmation message
+            let changes = [];
+            if (fileName !== oldFileName) {
+                changes.push(`File Name: ${oldFileName} → ${fileName}`);
+            }
+            if (Math.abs(dataSet - oldDataSet) > 0.001) {
+                changes.push(`Data Set: ${oldDataSet} → ${dataSet}`);
+            }
+            if (startTime !== oldStartTime || endTime !== oldEndTime) {
+                changes.push(`Time Range: ${oldStartTime}-${oldEndTime} → ${startTime}-${endTime}`);
+            }
+            
+            const confirmMessage = `Are you sure you want to update this entry?\n\n` +
+                `Changes:\n${changes.join('\n')}\n\n` +
+                `This will trigger a full recalculation of all values.`;
+            
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            // Submit form
+            form.submit();
+        }
+        
+        function recalculateEntry(fileName, dataSet) {
+            if (!confirm(`Are you sure you want to recalculate ${fileName}, dataset ${dataSet}? This will update all calculated values.`)) {
+                return;
+            }
+            
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '{{ url_for("recalculate_entry") }}';
+            
+            const fileInput = document.createElement('input');
+            fileInput.type = 'hidden';
+            fileInput.name = 'file_name';
+            fileInput.value = fileName;
+            form.appendChild(fileInput);
+            
+            const datasetInput = document.createElement('input');
+            datasetInput.type = 'hidden';
+            datasetInput.name = 'data_set';
+            datasetInput.value = dataSet;
+            form.appendChild(datasetInput);
+
+            // attach selected columns
+            const selectedCols = Array.from(document.querySelectorAll('.recalc-col:checked')).map(el => el.value);
+            selectedCols.forEach(col => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'recalc_columns';
+                input.value = col;
+                form.appendChild(input);
+            });
+            
+            document.body.appendChild(form);
+            form.submit();
+        }
+        
+        function toggleDataset(columnName, action) {
+            const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('Please select at least one entry');
+                return;
+            }
+            
+            // Get rowids from the table rows
+            const entryIds = [];
+            checkboxes.forEach(checkbox => {
+                const row = checkbox.closest('tr');
+                if (row && row.dataset.rowid) {
+                    entryIds.push(parseInt(row.dataset.rowid));
+                }
+            });
+            
+            if (entryIds.length === 0) {
+                alert('Could not identify selected entries');
+                return;
+            }
+            
+            const actionText = action === 'add' ? 'add' : 'remove';
+            const columnDisplay = columnName === 'COP_Dataset' ? 'COP Dataset' : 'Scatter Dataset';
+            
+            if (!confirm(`${actionText === 'add' ? 'Add' : 'Remove'} ${entryIds.length} selected entries ${actionText === 'add' ? 'to' : 'from'} ${columnDisplay}?`)) {
+                return;
+            }
+            
+            // Disable buttons during request
+            const buttons = document.querySelectorAll('#addCOPBtn, #removeCOPBtn, #addScatterBtn, #removeScatterBtn');
+            buttons.forEach(btn => btn.disabled = true);
+            
+            fetch('/toggle_column_value_bulk', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    entry_ids: entryIds,
+                    column_name: columnName,
+                    action: action
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                buttons.forEach(btn => btn.disabled = false);
+                if (data.success) {
+                    alert(data.message);
+                    // Reload page to update displays
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                buttons.forEach(btn => btn.disabled = false);
+                console.error('Error:', error);
+                alert('An error occurred while updating dataset');
+            });
+        }
+        
+        function recalculateSelected() {
+            const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('Please select at least one row to recalculate.');
+                return;
+            }
+            
+            const confirmMessage = `Are you sure you want to recalculate ${checkboxes.length} selected record(s)? This will update all calculated values and may take a few minutes.`;
+            if (!confirm(confirmMessage)) {
+                return;
+            }
+            
+            // Create a form to submit all selected records
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '{{ url_for("bulk_recalculate") }}';
+            
+            checkboxes.forEach(checkbox => {
+                const fileInput = document.createElement('input');
+                fileInput.type = 'hidden';
+                fileInput.name = 'file_names';
+                fileInput.value = checkbox.dataset.file;
+                form.appendChild(fileInput);
+                
+                const datasetInput = document.createElement('input');
+                datasetInput.type = 'hidden';
+                datasetInput.name = 'data_sets';
+                datasetInput.value = checkbox.dataset.dataset;
+                form.appendChild(datasetInput);
+            });
+            appendRowIdsForSelectedRows(form);
+
+            // attach selected columns
+            const selectedCols = Array.from(document.querySelectorAll('.recalc-col:checked')).map(el => el.value);
+            selectedCols.forEach(col => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'recalc_columns';
+                input.value = col;
+                form.appendChild(input);
+            });
+            
+            document.body.appendChild(form);
+            form.submit();
+        }
+
+        function selectAllRecalcCols() {
+            document.querySelectorAll('.recalc-col').forEach(cb => cb.checked = true);
+        }
+        function selectNoneRecalcCols() {
+            document.querySelectorAll('.recalc-col').forEach(cb => cb.checked = false);
+        }
+        
+        function moveEntry(fileName, dataSet, direction, rowid, visualPosition) {
+            console.log('moveEntry called:', {fileName, dataSet, direction, rowid, visualPosition});
+            
+            // Convert dataSet to integer (handle string, float, etc.)
+            let dataSetNum;
+            if (typeof dataSet === 'string') {
+                dataSetNum = parseInt(dataSet, 10);
+            } else if (typeof dataSet === 'number') {
+                dataSetNum = Math.floor(dataSet);  // Convert float to int
+            } else {
+                dataSetNum = dataSet;
+            }
+            
+            const requestData = {
+                file_name: fileName,
+                data_set: dataSetNum,
+                direction: direction,
+                rowid: rowid ? parseInt(rowid, 10) : null,
+                current_visual_position: visualPosition ? parseInt(visualPosition, 10) : null
+            };
+            
+            console.log('Sending move_entry request:', requestData);
+            
+            fetch('/move_entry', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestData)
+            })
+            .then(response => {
+                console.log('Response status:', response.status);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Response data:', data);
+                if (data.success) {
+                    // Reload the page to show new order
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error moving entry:', error);
+                alert('Error moving entry: ' + error.message);
+            });
+        }
+        
+        function moveToPosition(fileName, dataSet, rowid, visualPosition) {
+            console.log('=== moveToPosition called ===');
+            console.log('Parameters:', {fileName, dataSet, rowid, visualPosition});
+            
+            if (!fileName || !dataSet) {
+                alert('Error: Missing file name or data set. Cannot proceed.');
+                console.error('Missing required parameters:', {fileName, dataSet});
+                return;
+            }
+            
+            // Get total number of rows
+            const totalRows = document.querySelectorAll('tbody tr').length;
+            console.log('Total rows:', totalRows);
+            
+            if (totalRows === 0) {
+                alert('Error: No rows found in table.');
+                return;
+            }
+            
+            const position = prompt(
+                `Move entry to which position?\n\n` +
+                `Enter a number between 1 and ${totalRows}.\n` +
+                `Position 1 = top of table\n` +
+                `Position ${totalRows} = bottom of table`,
+                '1'
+            );
+            
+            console.log('User entered position:', position);
+            
+            if (position === null) {
+                console.log('User cancelled prompt');
+                return; // User cancelled
+            }
+            
+            if (position === '') {
+                alert('Error: Position cannot be empty.');
+                return;
+            }
+            
+            const targetPosition = parseInt(position);
+            console.log('Target position:', targetPosition);
+            
+            if (isNaN(targetPosition) || targetPosition < 1 || targetPosition > totalRows) {
+                alert(`Invalid position. Please enter a number between 1 and ${totalRows}.`);
+                return;
+            }
+            
+            // Convert dataSet to integer (handle string, float, etc.)
+            let dataSetNum;
+            if (typeof dataSet === 'string') {
+                dataSetNum = parseInt(dataSet, 10);
+            } else if (typeof dataSet === 'number') {
+                dataSetNum = Math.floor(dataSet);  // Convert float to int
+            } else {
+                dataSetNum = dataSet;
+            }
+            console.log('Sending request:', {file_name: fileName, data_set: dataSetNum, position: targetPosition});
+            
+            const requestData = {
+                file_name: fileName,
+                data_set: dataSetNum,
+                position: targetPosition,
+                rowid: rowid ? parseInt(rowid, 10) : null,
+                current_visual_position: visualPosition ? parseInt(visualPosition, 10) : null
+            };
+            console.log('Sending fetch request with data:', requestData);
+            
+            fetch('/set_entry_position', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestData)
+            })
+            .then(response => {
+                console.log('Response received. Status:', response.status, 'Status text:', response.statusText);
+                if (!response.ok) {
+                    // Try to get error message from response
+                    return response.text().then(text => {
+                        console.error('Error response body:', text);
+                        throw new Error(`HTTP error! status: ${response.status}, body: ${text}`);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Response JSON data:', data);
+                if (data && data.success) {
+                    alert('Entry moved successfully! The page will reload in a moment...');
+                    // Small delay to ensure database commit is complete
+                    console.log('Move successful, waiting 500ms before reload...');
+                    setTimeout(() => {
+                        console.log('Reloading page now...');
+                        // Force a hard reload to bypass cache
+                        window.location.href = window.location.href.split('#')[0].split('?')[0] + '?t=' + Date.now();
+                    }, 500);
+                } else {
+                    const errorMsg = data && data.message ? data.message : 'Unknown error occurred';
+                    alert('Error: ' + errorMsg);
+                    console.error('Move failed:', data);
+                }
+            })
+            .catch(error => {
+                console.error('Fetch error:', error);
+                console.error('Error stack:', error.stack);
+                alert('Error moving entry: ' + error.message + '\n\nCheck the browser console (F12) for more details.');
+            });
+        }
+        
+        function updateColumn(columnName) {
+            console.log(`=== UPDATE COLUMN CALLED: ${columnName} ===`);
+            console.log(`This should ONLY update column: ${columnName}`);
+            console.log(`This should NOT load Excel files or recalculate all derived columns`);
+
+            // If user selected rows, update only those; otherwise update all.
+            const selectedRowIds = Array.from(document.querySelectorAll('.row-checkbox:checked'))
+                .map(cb => {
+                    const row = cb.closest('tr');
+                    return row && row.dataset && row.dataset.rowid ? parseInt(row.dataset.rowid) : null;
+                })
+                .filter(x => Number.isFinite(x));
+
+            const scopeText = selectedRowIds.length > 0 ? `${selectedRowIds.length} selected entr${selectedRowIds.length === 1 ? 'y' : 'ies'}` : 'all entries';
+
+            if (confirm(`Update ${columnName} for ${scopeText}? This will recalculate ONLY this column using its stored formula (no Excel files will be loaded).`)) {
+                // Show loading state
+                const buttons = document.querySelectorAll(`[data-column="${columnName}"]`);
+                buttons.forEach(btn => {
+                    btn.disabled = true;
+                    btn.textContent = 'Updating...';
+                });
+                
+                console.log(`Sending request to /recalculate_column for column: ${columnName}`);
+                console.log(`Request body:`, JSON.stringify({column: columnName, entry_ids: selectedRowIds}));
+                const startTime = Date.now();
+                
+                // Send request to backend
+                fetch('/recalculate_column', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        column: columnName,
+                        entry_ids: selectedRowIds
+                    })
+                })
+                .then(response => {
+                    console.log(`Raw response:`, response);
+                    console.log(`Response status: ${response.status}`);
+                    console.log(`Response headers:`, [...response.headers.entries()]);
+                    return response;
+                })
+                .then(response => {
+                    console.log(`Response received: status=${response.status}`);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                    console.log(`Update completed in ${elapsed}s:`, data);
+                    console.log(`Updated ONLY column: ${columnName}`);
+                    
+                    if (data.success) {
+                        // Show success message
+                        const message = `Successfully updated ${columnName} for ${data.updated_count} entries in ${elapsed}s.`;
+                        alert(message);
+                        // Reload the page to show updated values
+                        // Note: The backend only updates the requested column, not all derived columns
+                        console.log('Reloading page to show updated values...');
+                        location.reload();
+                    } else {
+                        alert(`Error updating ${columnName}: ${data.message}`);
+                        // Reset button state on error
+                        buttons.forEach(btn => {
+                            btn.disabled = false;
+                            btn.textContent = 'Update';
+                        });
+                    }
+                })
+                .catch(error => {
+                    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                    console.error(`Error after ${elapsed}s:`, error);
+                    alert(`Error updating ${columnName}: ${error.message}\n\nCheck browser console (F12) for details.`);
+                    // Reset button state on error
+                    buttons.forEach(btn => {
+                        btn.disabled = false;
+                        btn.textContent = 'Update';
+                    });
+                });
+            }
+        }
+        
+        function showNormalizedPlotOptions() {
+            const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('Please select at least one row to plot.');
+                return;
+            }
+            
+            // Show the modal for column selection
+            $('#plotModal').modal('show');
+            updateYAxisLimitsSection();
+            
+            // Store the plot type for later use
+            window.currentPlotType = 'normalized';
+        }
+        
+        function plotNotebookStyle() {
+            const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('Please select at least one row to plot.');
+                return;
+            }
+            
+            // Create a form to submit all selected records
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '{{ url_for("plot_notebook_style") }}';
+            
+            checkboxes.forEach(checkbox => {
+                const fileInput = document.createElement('input');
+                fileInput.type = 'hidden';
+                fileInput.name = 'file_names';
+                fileInput.value = checkbox.dataset.file;
+                form.appendChild(fileInput);
+                
+                const datasetInput = document.createElement('input');
+                datasetInput.type = 'hidden';
+                datasetInput.name = 'data_sets';
+                datasetInput.value = checkbox.dataset.dataset;
+                form.appendChild(datasetInput);
+            });
+            appendRowIdsForSelectedRows(form);
+            
+            document.body.appendChild(form);
+            form.submit();
+        }
+            
+            // Plotting functions
+            function showPlotOptions() {
+                const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+                if (checkboxes.length === 0) {
+                    alert('Please select at least one row to plot.');
+                    return;
+                }
+                
+                // Set plot type for original time
+                window.currentPlotType = 'original';
+                
+                $('#plotModal').modal('show');
+                updateYAxisLimitsSection();
+            }
+            
+            function updateYAxisLimitsSection() {
+                const checkboxes = document.querySelectorAll('#plotModal input[name="plot_columns"]:checked');
+                const container = document.getElementById('yAxisLimitsList');
+                const section = document.getElementById('yAxisLimitsSection');
+                if (!container || !section) return;
+                container.innerHTML = '';
+                if (checkboxes.length === 0) {
+                    section.style.display = 'none';
+                    return;
+                }
+                section.style.display = 'block';
+                checkboxes.forEach(function(cb) {
+                    const col = cb.value;
+                    const row = document.createElement('div');
+                    row.className = 'row align-items-center mb-2 border-bottom pb-2';
+                    const labelDiv = document.createElement('div');
+                    labelDiv.className = 'col-md-5';
+                    const label = document.createElement('label');
+                    label.className = 'mb-0 small font-weight-bold text-primary';
+                    label.textContent = col;
+                    label.title = 'Y-axis limits below apply to this variable';
+                    labelDiv.appendChild(label);
+                    const minDiv = document.createElement('div');
+                    minDiv.className = 'col-md-3';
+                    const minLabel = document.createElement('label');
+                    minLabel.className = 'mb-0 small text-muted';
+                    minLabel.textContent = 'Y min';
+                    minDiv.appendChild(minLabel);
+                    const minInput = document.createElement('input');
+                    minInput.type = 'number';
+                    minInput.className = 'form-control form-control-sm';
+                    minInput.name = 'y_min_' + col;
+                    minInput.step = 'any';
+                    minInput.placeholder = 'auto';
+                    minInput.title = 'Min Y for ' + col;
+                    minDiv.appendChild(minInput);
+                    const maxDiv = document.createElement('div');
+                    maxDiv.className = 'col-md-3';
+                    const maxLabel = document.createElement('label');
+                    maxLabel.className = 'mb-0 small text-muted';
+                    maxLabel.textContent = 'Y max';
+                    maxDiv.appendChild(maxLabel);
+                    const maxInput = document.createElement('input');
+                    maxInput.type = 'number';
+                    maxInput.className = 'form-control form-control-sm';
+                    maxInput.name = 'y_max_' + col;
+                    maxInput.step = 'any';
+                    maxInput.placeholder = 'auto';
+                    maxInput.title = 'Max Y for ' + col;
+                    maxDiv.appendChild(maxInput);
+                    row.appendChild(labelDiv);
+                    row.appendChild(minDiv);
+                    row.appendChild(maxDiv);
+                    container.appendChild(row);
+                });
+            }
+            
+            function selectAllPlotColumns() {
+                const plotCheckboxes = document.querySelectorAll('#plotModal input[name="plot_columns"]');
+                plotCheckboxes.forEach(checkbox => {
+                    checkbox.checked = true;
+                });
+                updateYAxisLimitsSection();
+            }
+            
+            function selectNonePlotColumns() {
+                const plotCheckboxes = document.querySelectorAll('#plotModal input[name="plot_columns"]');
+                plotCheckboxes.forEach(checkbox => {
+                    checkbox.checked = false;
+                });
+                updateYAxisLimitsSection();
+            }
+            
+            function submitPlot() {
+                const plotCheckboxes = document.querySelectorAll('input[name="plot_columns"]:checked');
+                if (plotCheckboxes.length === 0) {
+                    alert('Please select at least one variable to plot.');
+                    return;
+                }
+                
+                // Validate custom legend labels if using custom option
+                const legendStyle = document.querySelector('input[name="legend_style"]:checked').value;
+                if (legendStyle === 'custom') {
+                    const customLabels = document.getElementById('custom_legend_labels').value;
+                    const selectedRecords = document.querySelectorAll('.row-checkbox:checked');
+                    
+                    if (customLabels.trim()) {
+                        const labels = customLabels.split('\n').filter(line => line.trim());
+                        if (labels.length !== selectedRecords.length) {
+                            alert(`Custom legend labels count (${labels.length}) does not match selected records (${selectedRecords.length}). Please provide exactly ${selectedRecords.length} labels.`);
+                            return;
+                        }
+                    }
+                }
+                
+                // Determine which route to use based on plot type
+                const plotType = window.currentPlotType || 'original';
+                const actionUrl = plotType === 'normalized' ? '{{ url_for("plot_notebook_style") }}' : '{{ url_for("plot_selected") }}';
+                
+                const form = document.getElementById('plotForm');
+                form.action = actionUrl;
+                
+                // Add selected records to form
+                const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+                checkboxes.forEach(checkbox => {
+                    const fileInput = document.createElement('input');
+                    fileInput.type = 'hidden';
+                    fileInput.name = 'file_names';
+                    fileInput.value = checkbox.dataset.file;
+                    form.appendChild(fileInput);
+                    
+                    const datasetInput = document.createElement('input');
+                    datasetInput.type = 'hidden';
+                    datasetInput.name = 'data_sets';
+                    datasetInput.value = checkbox.dataset.dataset;
+                    form.appendChild(datasetInput);
+                });
+                appendRowIdsForSelectedRows(form);
+                
+                form.submit();
+            }
+
+            // Validation for bulk data
+            function validateBulkData() {
+            const bulkData = document.getElementById('bulk-data').value.trim();
+            if (!bulkData) {
+                alert('Please enter some data first.');
+                document.getElementById('bulk-data').focus();
+                return false;
+            }
+            
+            // Split into lines and validate each line
+            const lines = bulkData.split('\n').filter(line => line.trim());
+            const errors = [];
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                // Try to split by tab first, then by multiple spaces
+                let parts;
+                if (line.includes('\t')) {
+                    // Split by tab
+                    parts = line.split('\t').map(part => part.trim()).filter(part => part);
+                } else {
+                    // Split by multiple spaces (but preserve single spaces in filename)
+                    parts = line.split(/\s{2,}/).map(part => part.trim()).filter(part => part);
+                    // If that didn't work, try splitting by single spaces but take last 3 as numbers
+                    if (parts.length < 4) {
+                        const allParts = line.split(/\s+/);
+                        if (allParts.length >= 4) {
+                            const fileName = allParts.slice(0, -3).join(' ');
+                            const lastThree = allParts.slice(-3);
+                            parts = [fileName, ...lastThree];
+                        }
+                    }
+                }
+                
+                if (parts.length < 4) {
+                    errors.push(`Line ${i + 1}: Not enough values. Expected 4 values (File Name, Data Set, Start Time, End Time)`);
+                    continue;
+                }
+                
+                // Check if data set, start time, and end time are numbers
+                const dataSet = parts[1];
+                const startTime = parts[2];
+                const endTime = parts[3];
+                
+                console.log(`Line ${i + 1}:`, {line, parts, dataSet, startTime, endTime});
+                
+                if (isNaN(dataSet) || isNaN(startTime) || isNaN(endTime)) {
+                    errors.push(`Line ${i + 1}: Invalid numeric values - '${line}'`);
+                }
+            }
+            
+            if (errors.length > 0) {
+                alert('Errors in ' + errors.length + ' lines:\n' + errors.join('\n'));
+                return false;
+            }
+            
+            return true;
+        }
+        
+        // Add validation to the bulk data form
+        // Legend options functionality
+        function toggleCustomLegend() {
+            const customLegendGroup = document.getElementById('custom_legend_group');
+            const customLegendRadio = document.getElementById('legend_custom');
+            const legendCountInfo = document.getElementById('legend_count_info');
+            const selectedCount = document.getElementById('selected_count');
+            
+            if (customLegendRadio.checked) {
+                customLegendGroup.style.display = 'block';
+                // Show count of selected entries
+                const selectedRecords = document.querySelectorAll('.row-checkbox:checked');
+                selectedCount.textContent = selectedRecords.length;
+                legendCountInfo.style.display = 'block';
+            } else {
+                customLegendGroup.style.display = 'none';
+                legendCountInfo.style.display = 'none';
+            }
+        }
+        
+        // Add event listeners for legend options
+        document.addEventListener('DOMContentLoaded', function() {
+            // Legend radio button listeners
+            const legendRadios = document.querySelectorAll('input[name="legend_style"]');
+            legendRadios.forEach(radio => {
+                radio.addEventListener('change', toggleCustomLegend);
+            });
+            
+            // When plot variable checkboxes change, update the Y-axis limits section (only selected variables)
+            const plotModal = document.getElementById('plotModal');
+            if (plotModal) {
+                plotModal.addEventListener('change', function(e) {
+                    if (e.target && e.target.name === 'plot_columns') {
+                        updateYAxisLimitsSection();
+                    }
+                });
+            }
+            
+            // Bulk form validation
+            const bulkForm = document.querySelector('form[action*="add_bulk_data"]');
+            if (bulkForm) {
+                bulkForm.addEventListener('submit', function(e) {
+                    if (!validateBulkData()) {
+                        e.preventDefault();
+                    }
+                });
+            }
+            
+            // Edit entry button listeners
+            const editEntryBtns = document.querySelectorAll('.edit-entry-btn');
+            editEntryBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const fileName = this.dataset.file;
+                    const dataSet = this.dataset.dataset;
+                    const startTime = this.dataset.startTime;
+                    const endTime = this.dataset.endTime;
+                    openEditEntryModal(fileName, dataSet, startTime, endTime);
+                });
+            });
+            
+            // Recalculate button listeners
+            const recalculateBtns = document.querySelectorAll('.recalculate-btn');
+            recalculateBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const fileName = this.dataset.file;
+                    const dataSet = this.dataset.dataset;
+                    recalculateEntry(fileName, dataSet);
+                });
+            });
+            
+            // Column update button listeners
+            const updateColumnBtns = document.querySelectorAll('.update-column-btn');
+            console.log(`Found ${updateColumnBtns.length} update column buttons`);
+            updateColumnBtns.forEach((btn, idx) => {
+                const column = btn.dataset.column;
+                console.log(`Setting up listener for button ${idx}: column="${column}"`);
+                btn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const column = this.dataset.column;
+                    console.log(`Update button clicked for column: ${column}`);
+                    updateColumn(column);
+                });
+            });
+            
+            // Move up/down button listeners
+            const moveUpBtns = document.querySelectorAll('.move-up-btn');
+            moveUpBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const fileName = this.dataset.file;
+                    let dataSet = this.dataset.dataset;
+                    const rowid = this.dataset.rowid;
+                    const visualPosition = this.dataset.visualPosition;
+                    if (dataSet) {
+                        dataSet = dataSet.trim();
+                    }
+                    console.log('Move up clicked:', {fileName, dataSet, rowid, visualPosition});
+                    moveEntry(fileName, dataSet, 'up', rowid, visualPosition);
+                });
+            });
+            
+            const moveDownBtns = document.querySelectorAll('.move-down-btn');
+            moveDownBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const fileName = this.dataset.file;
+                    let dataSet = this.dataset.dataset;
+                    const rowid = this.dataset.rowid;
+                    const visualPosition = this.dataset.visualPosition;
+                    if (dataSet) {
+                        dataSet = dataSet.trim();
+                    }
+                    console.log('Move down clicked:', {fileName, dataSet, rowid, visualPosition});
+                    moveEntry(fileName, dataSet, 'down', rowid, visualPosition);
+                });
+            });
+            
+            // Move to position button listeners
+            const moveToPositionBtns = document.querySelectorAll('.move-to-position-btn');
+            console.log(`Found ${moveToPositionBtns.length} move-to-position buttons`);
+            moveToPositionBtns.forEach((btn, index) => {
+                btn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log(`Button ${index} clicked!`);
+                    
+                    const fileName = this.dataset.file;
+                    let dataSet = this.dataset.dataset;
+                    const rowid = this.dataset.rowid;
+                    const visualPosition = this.dataset.visualPosition;
+                    
+                    // Trim whitespace and handle empty values
+                    if (dataSet) {
+                        dataSet = dataSet.trim();
+                    }
+                    console.log('Button clicked - raw values:', {
+                        fileName: fileName,
+                        dataSet: dataSet,
+                        rowid: rowid,
+                        visualPosition: visualPosition,
+                        dataSetType: typeof dataSet,
+                        allAttributes: Array.from(this.attributes).map(attr => ({name: attr.name, value: attr.value})),
+                        datasetKeys: Object.keys(this.dataset)
+                    });
+                    
+                    // Log if rowid or visualPosition are missing
+                    if (!rowid) {
+                        console.warn('WARNING: rowid is missing from button data attributes!');
+                    }
+                    if (!visualPosition) {
+                        console.warn('WARNING: visualPosition is missing from button data attributes!');
+                    }
+                    
+                    if (!fileName || !dataSet) {
+                        alert('Error: Missing file name or data set. Check console for details.');
+                        console.error('Missing data:', {fileName, dataSet});
+                        return;
+                    }
+                    
+                    moveToPosition(fileName, dataSet, rowid, visualPosition);
+                });
+            });
+            
+            // Restore selected records if returning from plot
+            const restoreData = document.getElementById('restore-data');
+            if (restoreData && restoreData.dataset.hasSelections === 'true') {
+                restoreSelectedRecords();
+            }
+        });
+        
+        function restoreSelectedRecords() {
+            const restoreData = document.getElementById('restore-data');
+            console.log('Restore data element:', restoreData);
+            console.log('Has selections:', restoreData.dataset.hasSelections);
+            console.log('Selections data:', restoreData.dataset.selections);
+            
+            const lastSelected = JSON.parse(restoreData.dataset.selections || '[]');
+            console.log('Restoring selected records:', lastSelected);
+            
+            // Check all checkboxes that match the last selected records
+            lastSelected.forEach(record => {
+                console.log(`Looking for checkbox with data-file="${record.file_name}" and data-dataset="${record.data_set}"`);
+                
+                // Try both string and numeric data_set values
+                let checkbox = document.querySelector(`input[data-file="${record.file_name}"][data-dataset="${record.data_set}"]`);
+                if (!checkbox) {
+                    // Try with string conversion
+                    checkbox = document.querySelector(`input[data-file="${record.file_name}"][data-dataset="${String(record.data_set)}"]`);
+                }
+                if (!checkbox) {
+                    // Try with numeric conversion
+                    checkbox = document.querySelector(`input[data-file="${record.file_name}"][data-dataset="${Number(record.data_set)}"]`);
+                }
+                
+                console.log('Found checkbox:', checkbox);
+                if (checkbox) {
+                    checkbox.checked = true;
+                    console.log(`Restored selection: ${record.file_name} dataset ${record.data_set}`);
+                } else {
+                    console.log(`Checkbox not found for: ${record.file_name} dataset ${record.data_set}`);
+                    // Debug: show all available checkboxes
+                    const allCheckboxes = document.querySelectorAll('input[data-file][data-dataset]');
+                    console.log('Available checkboxes:', Array.from(allCheckboxes).map(cb => ({
+                        file: cb.dataset.file,
+                        dataset: cb.dataset.dataset
+                    })));
+                }
+            });
+            
+            // Show a message that selections were restored
+            if (lastSelected.length > 0) {
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'alert alert-info alert-dismissible fade show';
+                alertDiv.innerHTML = `
+                    <i class="fas fa-info-circle"></i>
+                    <strong>Selections Restored:</strong> ${lastSelected.length} previously selected records have been restored. 
+                    You can now modify plot settings or create a new plot.
+                    <button type="button" class="close" data-dismiss="alert">
+                        <span>&times;</span>
+                    </button>
+                `;
+                document.querySelector('.container-fluid').insertBefore(alertDiv, document.querySelector('.table-scroll-wrapper'));
+            }
+        }
+        
+        // Sticky/fixed scrollbar functionality
+        (function() {
+            const tableContainer = document.getElementById('tableScrollContainer');
+            const fixedScrollbar = document.getElementById('fixedScrollbar');
+            const fixedScrollbarContent = document.getElementById('fixedScrollbarContent');
+            
+            if (!tableContainer || !fixedScrollbar) return;
+            
+            function updateFixedScrollbar() {
+                const table = document.getElementById('mainDataTable');
+                if (!table) return;
+                
+                // Set the fixed scrollbar content width to match table scroll width
+                const scrollWidth = tableContainer.scrollWidth;
+                const clientWidth = tableContainer.clientWidth;
+                
+                if (scrollWidth > clientWidth) {
+                    // Table is scrollable - show fixed scrollbar
+                    fixedScrollbarContent.style.width = scrollWidth + 'px';
+                    fixedScrollbar.style.display = 'block';
+                    
+                    // Sync scroll positions
+                    const scrollLeft = tableContainer.scrollLeft;
+                    fixedScrollbar.scrollLeft = scrollLeft;
+                } else {
+                    // Table fits - hide fixed scrollbar
+                    fixedScrollbar.style.display = 'none';
+                }
+            }
+            
+            // Sync table scroll to fixed scrollbar
+            tableContainer.addEventListener('scroll', function() {
+                fixedScrollbar.scrollLeft = tableContainer.scrollLeft;
+            });
+            
+            // Sync fixed scrollbar scroll to table
+            fixedScrollbar.addEventListener('scroll', function() {
+                tableContainer.scrollLeft = fixedScrollbar.scrollLeft;
+            });
+            
+            // Update on window resize
+            window.addEventListener('resize', updateFixedScrollbar);
+            
+            // Initial update and periodic check (in case table content changes)
+            updateFixedScrollbar();
+            setTimeout(updateFixedScrollbar, 500);
+            setTimeout(updateFixedScrollbar, 1000);
+            
+            // Update when table might have changed (e.g., after AJAX updates)
+            const observer = new MutationObserver(function() {
+                updateFixedScrollbar();
+            });
+            if (tableContainer) {
+                observer.observe(tableContainer, { childList: true, subtree: true, attributes: true });
+            }
+        })();
+        
+        // ========== FILTERING FUNCTIONALITY ==========
+        
+        // Store filter state for use in scatter plots
+        window.filterState = {
+            active: false,
+            filters: {},
+            filteredRows: []
+        };
+        
+        // Apply filters to table rows
+        function applyFilters() {
+            const filterInputs = document.querySelectorAll('.column-filter');
+            const dataRows = document.querySelectorAll('.data-row');
+            const filterStatus = document.getElementById('filterStatus');
+            const filteredCountSpan = document.getElementById('filteredCount');
+            const totalCount = dataRows.length;
+            
+            // Collect all filter values
+            const filters = {};
+            let hasActiveFilters = false;
+            
+            filterInputs.forEach(input => {
+                const column = input.dataset.column;
+                const value = input.value.trim();
+                if (value) {
+                    filters[column] = value.toLowerCase();
+                    hasActiveFilters = true;
+                }
+            });
+            
+            // Store filter state
+            window.filterState.active = hasActiveFilters;
+            window.filterState.filters = filters;
+            
+            // Filter rows
+            let visibleCount = 0;
+            const visibleRows = [];
+            
+            dataRows.forEach((row, index) => {
+                let matches = true;
+                
+                // Check each filter
+                for (const [column, filterValue] of Object.entries(filters)) {
+                    const colIndex = getColumnIndex(column);
+                    if (colIndex < 0) {
+                        continue; // Column not found, skip this filter
+                    }
+                    const cell = row.querySelector(`td:nth-child(${colIndex + 1})`);
+                    if (!cell) {
+                        matches = false;
+                        break;
+                    }
+                    
+                    const cellText = cell.textContent.trim();
+                    const cellTextLower = cellText.toLowerCase();
+                    const filterValueLower = filterValue.toLowerCase();
+                    
+                    // For numeric columns, try to match as number or range
+                    if (isNumericColumn(column)) {
+                        const cellNum = parseFloat(cellText);
+                        if (!isNaN(cellNum)) {
+                            // Check for range syntax (e.g., ">10", "<5", "10-20", "=10", "!=10")
+                            if (filterValue.startsWith('>=')) {
+                                const threshold = parseFloat(filterValue.substring(2));
+                                matches = matches && !isNaN(threshold) && cellNum >= threshold;
+                            } else if (filterValue.startsWith('<=')) {
+                                const threshold = parseFloat(filterValue.substring(2));
+                                matches = matches && !isNaN(threshold) && cellNum <= threshold;
+                            } else if (filterValue.startsWith('!=') || filterValue.startsWith('<>')) {
+                                const threshold = parseFloat(filterValue.substring(2));
+                                matches = matches && !isNaN(threshold) && Math.abs(cellNum - threshold) >= 0.0001;
+                            } else if (filterValue.startsWith('>')) {
+                                const threshold = parseFloat(filterValue.substring(1));
+                                matches = matches && !isNaN(threshold) && cellNum > threshold;
+                            } else if (filterValue.startsWith('<')) {
+                                const threshold = parseFloat(filterValue.substring(1));
+                                matches = matches && !isNaN(threshold) && cellNum < threshold;
+                            } else if (filterValue.startsWith('=')) {
+                                // Exact match: "=10"
+                                const threshold = parseFloat(filterValue.substring(1));
+                                matches = matches && !isNaN(threshold) && Math.abs(cellNum - threshold) < 0.0001;
+                            } else if (filterValue.includes('-') && !filterValue.includes('*') && !filterValue.includes('?')) {
+                                // Range: "10-20" (but not if it contains wildcards)
+                                const parts = filterValue.split('-');
+                                if (parts.length === 2) {
+                                    const min = parseFloat(parts[0]);
+                                    const max = parseFloat(parts[1]);
+                                    matches = matches && !isNaN(min) && !isNaN(max) && cellNum >= min && cellNum <= max;
+                                } else {
+                                    matches = matches && matchTextWithWildcards(cellTextLower, filterValueLower);
+                                }
+                            } else {
+                                // Try exact match first, then wildcard
+                                const filterNum = parseFloat(filterValue);
+                                if (!isNaN(filterNum)) {
+                                    matches = matches && Math.abs(cellNum - filterNum) < 0.0001;
+                                } else {
+                                    matches = matches && matchTextWithWildcards(cellTextLower, filterValueLower);
+                                }
+                            }
+                        } else {
+                            // Cell is not numeric, try text matching
+                            matches = matches && matchTextWithWildcards(cellTextLower, filterValueLower);
+                        }
+                    } else {
+                        // Text column - use advanced text matching
+                        matches = matches && matchTextWithWildcards(cellTextLower, filterValueLower);
+                    }
+                    
+                    if (!matches) break;
+                }
+                
+                // Show/hide row
+                if (matches) {
+                    row.classList.remove('row-hidden');
+                    visibleCount++;
+                    visibleRows.push(row);
+                } else {
+                    row.classList.add('row-hidden');
+                }
+            });
+            
+            // Update filter status
+            if (hasActiveFilters) {
+                filterStatus.style.display = 'block';
+                filteredCountSpan.textContent = visibleCount;
+            } else {
+                filterStatus.style.display = 'none';
+            }
+            
+            // Store visible rows for scatter plots
+            window.filterState.filteredRows = visibleRows;
+            
+            // Update row numbers
+            updateRowNumbers();
+            
+            // Update select all checkbox
+            updateSelectAllCheckbox();
+        }
+        
+        // Store column information for filtering
+        // Using JSON.parse to avoid linter issues with Jinja2 template syntax
+        window.columnInfo = {
+            ordered: JSON.parse('{{ ordered_columns | tojson | safe }}'),
+            types: JSON.parse('{{ columns_info | tojson | safe }}')
+        };
+        
+        // Get column index (accounting for checkbox and # columns)
+        function getColumnIndex(columnName) {
+            const index = window.columnInfo.ordered.indexOf(columnName);
+            return index >= 0 ? index + 2 : -1; // +2 for checkbox and # columns
+        }
+        
+        // Check if column is numeric
+        function isNumericColumn(columnName) {
+            const colInfo = window.columnInfo.types[columnName];
+            if (!colInfo) return false;
+            return colInfo.type === 'REAL' || colInfo.type === 'INTEGER';
+        }
+        
+        // Advanced text matching with Excel-like features
+        function matchTextWithWildcards(text, pattern) {
+            // Remove quotes if present (for exact match)
+            if ((pattern.startsWith('"') && pattern.endsWith('"')) || 
+                (pattern.startsWith("'") && pattern.endsWith("'"))) {
+                const exactMatch = pattern.slice(1, -1);
+                return text === exactMatch.toLowerCase();
+            }
+            
+            // Exact match with = prefix
+            if (pattern.startsWith('=')) {
+                const exactMatch = pattern.substring(1);
+                return text === exactMatch.toLowerCase();
+            }
+            
+            // Not equal with != or <>
+            if (pattern.startsWith('!=') || pattern.startsWith('<>')) {
+                const notMatch = pattern.substring(2);
+                return text !== notMatch.toLowerCase();
+            }
+            
+            // Begins with (^ prefix or starts with)
+            if (pattern.startsWith('^')) {
+                const beginsWith = pattern.substring(1);
+                return text.startsWith(beginsWith.toLowerCase());
+            }
+            
+            // Ends with ($ suffix)
+            if (pattern.endsWith('$') && !pattern.endsWith('\\$')) {
+                const endsWith = pattern.slice(0, -1);
+                return text.endsWith(endsWith.toLowerCase());
+            }
+            
+            // Wildcard matching: * = any characters, ? = single character
+            // Convert Excel wildcards to regex
+            let regexPattern = pattern
+                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape regex special chars
+                .replace(/\*/g, '.*')  // * becomes .*
+                .replace(/\?/g, '.');   // ? becomes .
+            
+            try {
+                const regex = new RegExp('^' + regexPattern + '$', 'i');
+                return regex.test(text);
+            } catch (e) {
+                // If regex fails, fall back to simple contains
+                return text.includes(pattern);
+            }
+        }
+        
+        // Clear all filters
+        function clearAllFilters() {
+            const filterInputs = document.querySelectorAll('.column-filter');
+            filterInputs.forEach(input => {
+                input.value = '';
+            });
+            applyFilters();
+        }
+        
+        // Toggle filter help
+        function toggleFilterHelp() {
+            const helpContent = document.getElementById('filterHelpContent');
+            const helpToggle = document.getElementById('filterHelpToggle');
+            if (helpContent.style.display === 'none') {
+                helpContent.style.display = 'block';
+                helpToggle.innerHTML = '<i class="fas fa-question-circle"></i> Hide filter help';
+            } else {
+                helpContent.style.display = 'none';
+                helpToggle.innerHTML = '<i class="fas fa-question-circle"></i> Show filter help';
+            }
+        }
+        
+        // Update row numbers after filtering
+        function updateRowNumbers() {
+            const dataRows = document.querySelectorAll('.data-row:not(.row-hidden)');
+            dataRows.forEach((row, index) => {
+                const numberCell = row.querySelector('td:nth-child(2)');
+                if (numberCell) {
+                    numberCell.innerHTML = '<strong>' + (index + 1) + '</strong>';
+                }
+            });
+        }
+        
+        // Update select all checkbox based on visible rows
+        function updateSelectAllCheckbox() {
+            const visibleCheckboxes = document.querySelectorAll('.data-row:not(.row-hidden) .row-checkbox');
+            const checkedVisible = document.querySelectorAll('.data-row:not(.row-hidden) .row-checkbox:checked');
+            const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+            
+            if (visibleCheckboxes.length === 0) {
+                selectAllCheckbox.indeterminate = false;
+                selectAllCheckbox.checked = false;
+            } else if (checkedVisible.length === visibleCheckboxes.length) {
+                selectAllCheckbox.indeterminate = false;
+                selectAllCheckbox.checked = true;
+            } else if (checkedVisible.length > 0) {
+                selectAllCheckbox.indeterminate = true;
+                selectAllCheckbox.checked = false;
+            } else {
+                selectAllCheckbox.indeterminate = false;
+                selectAllCheckbox.checked = false;
+            }
+        }
+        
+        // Get filtered row data for scatter plots
+        function getFilteredRowData() {
+            if (!window.filterState.active) {
+                // No filters active, return all rows
+                return Array.from(document.querySelectorAll('.data-row')).map(row => {
+                    return {
+                        file_name: row.querySelector('.row-checkbox').dataset.file,
+                        data_set: row.querySelector('.row-checkbox').dataset.dataset
+                    };
+                });
+            } else {
+                // Return only visible (filtered) rows
+                return Array.from(document.querySelectorAll('.data-row:not(.row-hidden)')).map(row => {
+                    return {
+                        file_name: row.querySelector('.row-checkbox').dataset.file,
+                        data_set: row.querySelector('.row-checkbox').dataset.dataset
+                    };
+                });
+            }
+        }
+
+        // ---- Option A: Review new entries after adding ----
+        const NEW_ENTRY_ROWIDS = (() => {
+            const el = document.getElementById('newEntryRowidsJson');
+            if (!el) return [];
+            try {
+                return JSON.parse(el.textContent || '[]');
+            } catch (e) {
+                console.warn('Could not parse newEntryRowidsJson:', e);
+                return [];
+            }
+        })();
+        const IMPORT_NOTICES = (() => {
+            const el = document.getElementById('importNoticesJson');
+            if (!el) return [];
+            try {
+                return JSON.parse(el.textContent || '[]');
+            } catch (e) {
+                return [];
+            }
+        })();
+
+        function showReviewNewEntriesError(msg) {
+            const el = document.getElementById('reviewNewEntriesError');
+            if (!el) return;
+            el.textContent = msg || 'Unknown error';
+            el.style.display = 'block';
+        }
+
+        window._reviewProfiles = [];
+
+        function renderImportNoticesInto(container) {
+            if (!container) return;
+            container.innerHTML = '';
+            const notices = IMPORT_NOTICES || [];
+            notices.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'alert alert-' + (item.category || 'warning') + ' alert-dismissible fade show';
+                div.setAttribute('role', 'alert');
+                div.style.whiteSpace = 'normal';
+                div.style.wordWrap = 'break-word';
+                div.appendChild(document.createTextNode(item.message || ''));
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'close';
+                btn.setAttribute('data-dismiss', 'alert');
+                btn.setAttribute('aria-label', 'Close');
+                btn.innerHTML = '<span aria-hidden="true">&times;</span>';
+                div.appendChild(btn);
+                container.appendChild(div);
+            });
+        }
+
+        function fillReviewProfileSelect(profiles, selectedId) {
+            const sel = document.getElementById('reviewBatchProfile');
+            if (!sel) return;
+            const current = selectedId || sel.value || '';
+            sel.innerHTML = '';
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = '(select a unit profile)';
+            sel.appendChild(none);
+            (profiles || []).forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.profile_id;
+                const extra = p.display_name && p.display_name !== p.profile_id ? (' — ' + p.display_name) : '';
+                opt.textContent = p.profile_id + extra;
+                sel.appendChild(opt);
+            });
+            if (current && Array.from(sel.options).some(o => o.value === current)) {
+                sel.value = current;
+            }
+        }
+
+        function applyReviewProfileDefaults() {
+            const sel = document.getElementById('reviewBatchProfile');
+            const id = sel && sel.value;
+            const p = (window._reviewProfiles || []).find(x => x.profile_id === id);
+            if (!p) return;
+            document.querySelectorAll('#reviewNewEntriesTbody [data-key="climate"]').forEach(el => {
+                if (!el.value && p.default_climate) el.value = p.default_climate;
+            });
+            document.querySelectorAll('#reviewNewEntriesTbody [data-key="application"]').forEach(el => {
+                if (!el.value && p.default_application) el.value = p.default_application;
+            });
+            if (p.hp_id != null) {
+                document.querySelectorAll('#reviewNewEntriesTbody [data-key="hp_id"]').forEach(el => {
+                    el.value = p.hp_id;
+                });
+            }
+        }
+
+        function renderReviewNewEntriesTable(entries) {
+            const tbody = document.getElementById('reviewNewEntriesTbody');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            if (!entries || entries.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="14" class="text-muted">No new entries to review.</td></tr>';
+                return;
+            }
+
+            for (const entry of entries) {
+                const v = entry.values || {};
+                const tr = document.createElement('tr');
+                tr.dataset.rowid = entry.rowid;
+
+                const yesNoSelect = (value) => {
+                    const sel = document.createElement('select');
+                    sel.className = 'form-control form-control-sm';
+                    ['YES', 'NO'].forEach(optVal => {
+                        const opt = document.createElement('option');
+                        opt.value = optVal;
+                        opt.textContent = optVal;
+                        if ((value || 'YES').toString().toUpperCase() === optVal) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                    return sel;
+                };
+
+                const flowSelect = (value) => {
+                    const sel = document.createElement('select');
+                    sel.className = 'form-control form-control-sm';
+                    ['var', 'std', 'fixed', 'off'].forEach(optVal => {
+                        const opt = document.createElement('option');
+                        opt.value = optVal;
+                        opt.textContent = optVal;
+                        if ((value || '').toString().toLowerCase() === optVal) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                    return sel;
+                };
+
+                const optionSelect = (value, options) => {
+                    const sel = document.createElement('select');
+                    sel.className = 'form-control form-control-sm';
+                    options.forEach(optVal => {
+                        const opt = document.createElement('option');
+                        opt.value = optVal;
+                        opt.textContent = optVal || '(set)';
+                        if ((value || '').toString() === optVal) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                    return sel;
+                };
+
+                const input = (value, type='text') => {
+                    const inp = document.createElement('input');
+                    inp.type = type;
+                    inp.className = 'form-control form-control-sm';
+                    inp.value = value == null ? '' : value;
+                    return inp;
+                };
+
+                const addCell = (nodeOrText, className) => {
+                    const td = document.createElement('td');
+                    if (className) td.className = className;
+                    if (nodeOrText && nodeOrText.nodeType) td.appendChild(nodeOrText);
+                    else td.textContent = nodeOrText ?? '';
+                    tr.appendChild(td);
+                };
+
+                addCell(entry.file_name || '', 'col-file');
+                if (entry.file_name) tr.lastElementChild.title = entry.file_name;
+                addCell(entry.data_set ?? '', 'col-num');
+                addCell(entry.start_time ?? '', 'col-num');
+                addCell(entry.end_time ?? '', 'col-num');
+
+                const testCond = input(v.test_cond); testCond.dataset.key = 'test_cond'; addCell(testCond, 'col-compact');
+                const testLabel = input(v.test_label); testLabel.dataset.key = 'test_label'; addCell(testLabel, 'col-compact');
+                const climate = optionSelect(v.climate, ['', 'Average', 'Warmer', 'Colder']); climate.dataset.key = 'climate'; addCell(climate, 'col-climate');
+                const application = optionSelect(v.application, ['', 'LT', 'MT', 'HT']); application.dataset.key = 'application'; addCell(application, 'col-select');
+                const flowCfg = flowSelect(v.flow_config); flowCfg.dataset.key = 'flow_config'; addCell(flowCfg, 'col-select');
+                const labId = input(v.lab_id, 'number'); labId.dataset.key = 'lab_id'; addCell(labId, 'col-compact');
+                const hpId = input(v.hp_id, 'number'); hpId.dataset.key = 'hp_id'; addCell(hpId, 'col-compact');
+                const indicator = input(v.indicator || 'Pelec');
+                indicator.dataset.key = 'indicator';
+                indicator.title = 'Signal used to mark cycle start/end (e.g. Pelec, Tsupply)';
+                indicator.placeholder = 'Pelec';
+                addCell(indicator, 'col-text');
+                const notes = input(v.notes);
+                notes.dataset.key = 'notes';
+                notes.title = 'drop = window starts at a power drop; ramp = window starts at a power ramp-up; other = no sub-period split';
+                addCell(notes, 'col-text');
+                const copDs = yesNoSelect(v.cop_dataset); copDs.dataset.key = 'cop_dataset'; addCell(copDs, 'col-cop');
+
+                tbody.appendChild(tr);
+            }
+        }
+
+        async function openReviewNewEntriesModal() {
+            document.getElementById('reviewNewEntriesError').style.display = 'none';
+            try {
+                const res = await fetch('/api/new_entries_preview');
+                const data = await res.json();
+                if (!data.success) {
+                    showReviewNewEntriesError(data.message || 'Failed to load preview');
+                    return;
+                }
+                window._reviewProfiles = data.profiles || [];
+                const suggested = ((data.entries || [])[0] || {}).values || {};
+                fillReviewProfileSelect(window._reviewProfiles, suggested.profile_id || '');
+                const profSel = document.getElementById('reviewBatchProfile');
+                if (profSel && !profSel._boundProfileChange) {
+                    profSel.addEventListener('change', function() {
+                        this.classList.remove('is-invalid');
+                        document.getElementById('reviewNewEntriesError').style.display = 'none';
+                        applyReviewProfileDefaults();
+                    });
+                    profSel._boundProfileChange = true;
+                }
+                renderImportNoticesInto(document.getElementById('reviewImportNotices'));
+                renderReviewNewEntriesTable(data.entries);
+                applyReviewProfileDefaults();
+                $('#reviewNewEntriesModal').modal('show');
+            } catch (e) {
+                showReviewNewEntriesError(String(e));
+            }
+        }
+
+        async function confirmNewEntries() {
+            const tbody = document.getElementById('reviewNewEntriesTbody');
+            const profileId = (document.getElementById('reviewBatchProfile') || {}).value || null;
+            if (!profileId) {
+                const sel = document.getElementById('reviewBatchProfile');
+                if (sel) { sel.focus(); sel.classList.add('is-invalid'); }
+                showReviewNewEntriesError('Please select a unit profile before confirming.');
+                return;
+            }
+            const rows = Array.from(tbody.querySelectorAll('[data-rowid]'));
+            const entries = rows.map(tr => {
+                const rowid = parseInt(tr.dataset.rowid);
+                const values = {};
+                tr.querySelectorAll('[data-key]').forEach(el => {
+                    const key = el.dataset.key;
+                    let val = el.value;
+                    if (key === 'hp_id' || key === 'lab_id') {
+                        val = val === '' ? null : parseInt(val);
+                    } else {
+                        val = (val ?? '').toString().trim();
+                        if (val === '') val = null;
+                    }
+                    values[key] = val;
+                });
+                if (values.cop_dataset) {
+                    values.scatter_dataset = values.cop_dataset;
+                }
+                values.profile_id = profileId || null;
+                return { rowid, values };
+            });
+
+            try {
+                const btn = document.getElementById('confirmNewEntriesBtn');
+                btn.disabled = true;
+                const res = await fetch('/api/apply_new_entries_metadata', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entries }),
+                });
+                const data = await res.json();
+                btn.disabled = false;
+                if (!data.success) {
+                    showReviewNewEntriesError(data.message || 'Failed to apply metadata');
+                    return;
+                }
+                alert(data.message || 'Saved.');
+                location.reload();
+            } catch (e) {
+                showReviewNewEntriesError(String(e));
+                document.getElementById('confirmNewEntriesBtn').disabled = false;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function () {
+            const btn = document.getElementById('confirmNewEntriesBtn');
+            if (btn) btn.addEventListener('click', confirmNewEntries);
+
+            // If a rowid is provided as ?focus_rowid=123, scroll to it and highlight.
+            try {
+                const params = new URLSearchParams(window.location.search);
+                const rid = params.get('focus_rowid');
+                if (rid) {
+                    const row = document.querySelector('.data-row[data-rowid=\"' + rid + '\"]');
+                    if (row) {
+                        row.style.outline = '3px solid #ffc107';
+                        row.style.outlineOffset = '2px';
+                        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                }
+            } catch (e) {}
+
+            if (NEW_ENTRY_ROWIDS && NEW_ENTRY_ROWIDS.length > 0) {
+                // Auto-open after adding new entries
+                openReviewNewEntriesModal();
+            }
+
+            const mon = document.getElementById('showMonitoringColumns');
+            if (mon) {
+                mon.addEventListener('change', function () {
+                    const show = this.checked;
+                    fetch('/toggle_monitoring_columns', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({show: show})
+                    }).then(r => r.json()).then(data => {
+                        if (data.success) {
+                            location.reload();
+                        } else {
+                            alert(data.message || 'Could not update monitoring columns');
+                            this.checked = !show;
+                        }
+                    }).catch(err => {
+                        alert('Error: ' + err);
+                        this.checked = !show;
+                    });
+                });
+            }
+        });
+    </script>
+{% endblock %}

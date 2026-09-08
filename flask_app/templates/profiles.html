@@ -1,0 +1,444 @@
+{% extends "base.html" %}
+{% block title %}Unit profiles & condition sets{% endblock %}
+{% block content %}
+<div class="container-fluid mt-3">
+  <h2>Unit profiles &amp; condition sets</h2>
+  <p class="text-muted">
+    Configuration lives in <code>flask_app/config/</code>.
+    Local profiles are gitignored; shared/examples ship with the tool.
+    Open database: <strong>{{ open_database_label }}</strong>
+    · default condition set: <strong>{{ default_condition_set_display_name or default_condition_set_id }}</strong>
+  </p>
+
+  <div class="row">
+    <div class="col-lg-7">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h4 class="mb-0">Profiles</h4>
+        <button class="btn btn-sm btn-outline-primary" id="btnBackfill">Backfill profile_id on entries</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped" id="profilesTable">
+          <thead>
+            <tr>
+              <th>profile_id</th>
+              <th>type</th>
+              <th>BUH cap</th>
+              <th>Pdesign</th>
+              <th>flow</th>
+              <th>source</th>
+              <th title="Rows in the open database whose profile_id matches this file">entries</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in profiles %}
+            <tr data-profile="{{ p | tojson | forceescape }}" data-entry-count="{{ entry_counts.get(p.profile_id, 0) }}">
+              <td><code>{{ p.profile_id }}</code></td>
+              <td>{{ p.unit_type }}</td>
+              <td>{{ p.buh_power_cap_kw if p.buh_power_cap_kw is not none else '—' }}</td>
+              <td>{{ p.pdesign_kw if p.pdesign_kw is not none else '—' }}</td>
+              <td>
+                {% if p.flow_type and p.flow_set_value is not none %}
+                  {{ p.flow_type }} {{ p.flow_set_value }}
+                {% else %}
+                  {{ p.flow_mode or '—' }}
+                {% endif %}
+              </td>
+              <td><span class="badge badge-secondary">{{ p._source }}</span></td>
+              <td>{% if assignment_available %}{{ entry_counts.get(p.profile_id, 0) }}{% else %}—{% endif %}</td>
+              <td><button type="button" class="btn btn-sm btn-outline-secondary btn-edit-profile">Edit</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if assignment_available %}
+      <p class="mb-1">
+        This database:
+        <strong>{{ assignment_total }}</strong> entries
+        · <strong>{{ unassigned_entry_count }}</strong> with no profile_id
+        {% if orphan_profiles %}
+          · <strong>{{ orphan_entry_count }}</strong> orphaned
+        {% endif %}
+      </p>
+      {% if unassigned_entry_count %}
+      <p class="text-muted small mb-1">
+        {{ unassigned_entry_count }} entries have an empty profile_id. Assign a profile on review, or use Backfill when filename / HP Id can resolve one.
+      </p>
+      {% endif %}
+      {% if orphan_profiles %}
+      <div class="alert alert-warning py-2 small">
+        <strong>Orphan profile_id values</strong> — stamped on entries, but no JSON file uses that id:
+        <ul class="mb-0 pl-3">
+          {% for o in orphan_profiles %}
+          <li><code>{{ o.profile_id }}</code> — {{ o.entry_count }} {{ 'entry' if o.entry_count == 1 else 'entries' }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      {% else %}
+      <p class="text-muted small">Open a database to see how many entries are assigned to each profile.</p>
+      {% endif %}
+      <p class="text-muted small">
+        Counts are the stamped <code>profile_id</code> in the open database, not filename guesses.
+        Changing a profile id on Save is a rename of the JSON file (optional update of these rows).
+      </p>
+
+      <h5 class="mt-4">Edit / create profile</h5>
+      <form id="profileForm" class="border p-3 mb-4">
+        <div class="form-row">
+          <div class="form-group col-md-4">
+            <label>profile_id</label>
+            <input class="form-control" name="profile_id" required>
+          </div>
+          <div class="form-group col-md-4">
+            <label>display_name</label>
+            <input class="form-control" name="display_name">
+          </div>
+          <div class="form-group col-md-4">
+            <label>unit_type</label>
+            <select class="form-control" name="unit_type">
+              {% for tid, t in unit_types.items() %}
+              <option value="{{ tid }}">{{ tid }} — {{ t.display_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-3">
+            <label>buh_power_cap_kw</label>
+            <input class="form-control" name="buh_power_cap_kw" type="number" step="any">
+          </div>
+          <div class="form-group col-md-3">
+            <label>pdesign_kw</label>
+            <input class="form-control" name="pdesign_kw" type="number" step="any">
+          </div>
+          <div class="form-group col-md-3">
+            <label>flow_type</label>
+            <select class="form-control" name="flow_type">
+              <option value="">(none / variable)</option>
+              <option value="volume">volume</option>
+              <option value="mass">mass</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>flow_set_value</label>
+            <input class="form-control" name="flow_set_value" type="number" step="any">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-3">
+            <label>default_climate</label>
+            <select class="form-control" name="default_climate">
+              <option value="">(set per test)</option>
+              <option value="Average">Average</option>
+              <option value="Warmer">Warmer</option>
+              <option value="Colder">Colder</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>default_application</label>
+            <select class="form-control" name="default_application">
+              <option value="">(set per test)</option>
+              <option value="LT">LT</option>
+              <option value="MT">MT</option>
+              <option value="HT">HT</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>flow_mode</label>
+            <select class="form-control" name="flow_mode">
+              <option value="per_test">per_test</option>
+              <option value="variable">variable</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>wb_rule</label>
+            <select class="form-control" name="wb_rule">
+              <option value="db_minus_1k">db_minus_1k</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group col-md-3">
+            <label>owner</label>
+            <input class="form-control" name="owner" placeholder="HPT / BAM / local">
+          </div>
+          <div class="form-group col-md-5">
+            <label>filename_patterns (comma-separated)</label>
+            <input class="form-control" name="filename_patterns" placeholder="UNIT1_*, *_UNIT1_*">
+            <small class="form-text text-muted">Glob patterns matched against the result file name. Use them when the unit cannot be recognised from the HP Id column alone.</small>
+          </div>
+          <div class="form-group col-md-2">
+            <label>hp_id_aliases</label>
+            <input class="form-control" name="hp_id_aliases" placeholder="1, UNIT1">
+            <small class="form-text text-muted">HP Id spellings for this unit (BAM). Leave empty for HPT.</small>
+          </div>
+          <div class="form-group col-md-2">
+            <label>save to</label>
+            <select class="form-control" name="destination">
+              <option value="local">local (gitignored)</option>
+              <option value="shared">shared</option>
+              <option value="examples">examples</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>notes</label>
+          <input class="form-control" name="notes">
+          <small class="form-text text-muted">Free text about the unit itself (documentation only, stored in the profile file). Unrelated to the per-entry Notes column in the database.</small>
+        </div>
+        <button type="submit" class="btn btn-primary">Save profile</button>
+        <button type="button" class="btn btn-outline-secondary" id="btnNewProfile">New profile</button>
+        <span id="profileMsg" class="ml-2"></span>
+        <input type="hidden" name="original_profile_id" value="">
+        <input type="hidden" name="original_destination" value="">
+        <input type="hidden" name="original_entry_count" value="0">
+      </form>
+    </div>
+
+    <div class="col-lg-5">
+      <h4>{{ default_condition_set_display_name or default_condition_set_id }}</h4>
+      {% set cs = condition_sets_doc.condition_sets[default_condition_set_id] %}
+      <p class="text-muted small mb-2">
+        Technical id: <code>{{ default_condition_set_id }}</code>
+        {% if default_condition_set_aliases %}
+          · legacy aliases:
+          {% for a in default_condition_set_aliases %}<code>{{ a }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% endif %}
+      </p>
+      <p>{{ cs.description if cs else '' }}</p>
+      <div class="form-row">
+        <div class="form-group col-6">
+          <label>Climate (default slice)</label>
+          <select class="form-control" id="condClimate">
+            <option value="Average">Average</option>
+            <option value="Warmer">Warmer</option>
+            <option value="Colder">Colder</option>
+          </select>
+        </div>
+        <div class="form-group col-6">
+          <label>Application (default slice)</label>
+          <select class="form-control" id="condApplication">
+            <option value="LT">LT</option>
+            <option value="MT" selected>MT</option>
+            <option value="HT">HT</option>
+          </select>
+        </div>
+      </div>
+      <table class="table table-sm" id="condTable">
+        <thead><tr><th>Letter</th><th>Tdb set (°C)</th><th>Tsup set (°C)</th><th>Tmean set (°C)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button class="btn btn-primary" id="btnSaveConditions">Save this climate × application slice</button>
+      <span id="condMsg" class="ml-2"></span>
+      <p class="text-muted mt-3 small">
+        Saving updates only the selected climate and application. Existing stored results are not recalculated automatically.
+        <code>tmean_set</code> is the Table 3 variable-flow mean target and is used by the Mean Tmean check on the
+        permissible deviation analysis page (variable-flow entries only).
+      </p>
+    </div>
+  </div>
+</div>
+
+<script type="application/json" id="condDocJson">{{ condition_sets_doc | tojson }}</script>
+<script type="application/json" id="condIdJson">{{ default_condition_set_id | tojson }}</script>
+<script>
+(function () {
+  function fillForm(p, entryCount) {
+    const f = document.getElementById('profileForm');
+    f.profile_id.value = p.profile_id || '';
+    f.display_name.value = p.display_name || '';
+    f.unit_type.value = p.unit_type || 'air_water';
+    f.buh_power_cap_kw.value = (p.buh_power_cap_kw != null) ? p.buh_power_cap_kw : '';
+    f.pdesign_kw.value = (p.pdesign_kw != null) ? p.pdesign_kw : '';
+    f.flow_type.value = p.flow_type || '';
+    f.flow_set_value.value = (p.flow_set_value != null) ? p.flow_set_value : '';
+    f.default_climate.value = p.default_climate || '';
+    f.default_application.value = p.default_application || '';
+    f.flow_mode.value = p.flow_mode || 'per_test';
+    f.wb_rule.value = p.wb_rule || 'db_minus_1k';
+    f.owner.value = p.owner || '';
+    f.filename_patterns.value = (p.filename_patterns || []).join(',');
+    f.hp_id_aliases.value = (p.hp_id_aliases || []).join(',');
+    f.notes.value = p.notes || '';
+    f.destination.value = p._source === 'shared' || p._source === 'examples' ? p._source : 'local';
+    f.original_profile_id.value = p.profile_id || '';
+    f.original_destination.value = f.destination.value;
+    f.original_entry_count.value = (entryCount != null && entryCount !== '') ? String(entryCount) : '0';
+  }
+
+  function resetProfileForm() {
+    const f = document.getElementById('profileForm');
+    f.reset();
+    f.original_profile_id.value = '';
+    f.original_destination.value = '';
+    f.original_entry_count.value = '0';
+    document.getElementById('profileMsg').textContent = '';
+  }
+
+  document.querySelectorAll('.btn-edit-profile').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tr = btn.closest('tr');
+      fillForm(JSON.parse(tr.getAttribute('data-profile')), tr.getAttribute('data-entry-count'));
+    });
+  });
+
+  const btnNew = document.getElementById('btnNewProfile');
+  if (btnNew) btnNew.addEventListener('click', resetProfileForm);
+
+  document.getElementById('profileForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    const newId = f.profile_id.value.trim();
+    const oldId = (f.original_profile_id.value || '').trim();
+    const assigned = parseInt(f.original_entry_count.value || '0', 10) || 0;
+    let updateEntries = false;
+    if (oldId && newId && oldId !== newId) {
+      if (!confirm(
+        'Rename profile ' + oldId + ' to ' + newId + '?\n\n' +
+        'The old JSON file will be removed. This is not a copy.'
+      )) {
+        return;
+      }
+      if (assigned > 0) {
+        updateEntries = confirm(
+          assigned + ' entries in this database currently have profile_id ' + oldId + '.\n\n' +
+          'OK = update those rows to ' + newId + '.\n' +
+          'Cancel = leave them as they are (they will show as orphans).'
+        );
+      }
+    }
+    const payload = {
+      profile_id: newId,
+      display_name: f.display_name.value.trim(),
+      unit_type: f.unit_type.value,
+      buh_power_cap_kw: f.buh_power_cap_kw.value,
+      pdesign_kw: f.pdesign_kw.value,
+      flow_type: f.flow_type.value,
+      flow_set_value: f.flow_set_value.value,
+      default_climate: f.default_climate.value || null,
+      default_application: f.default_application.value || null,
+      filename_patterns: f.filename_patterns.value,
+      hp_id_aliases: f.hp_id_aliases.value,
+      notes: f.notes.value,
+      destination: f.destination.value,
+      flow_mode: f.flow_mode.value || 'per_test',
+      wb_rule: f.wb_rule.value || 'db_minus_1k',
+      owner: f.owner.value.trim() || (f.destination.value === 'shared' ? 'HPT' : 'local'),
+      original_profile_id: oldId || null,
+      original_destination: (f.original_destination.value || f.destination.value),
+      update_entries: updateEntries
+    };
+    const resp = await fetch('/api/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    document.getElementById('profileMsg').textContent = data.success ? ((data.message || 'Saved.') + ' Reloading…') : (data.message || 'Error');
+    if (data.success) location.reload();
+  });
+
+  const condDoc = JSON.parse(document.getElementById('condDocJson').textContent);
+  const condId = JSON.parse(document.getElementById('condIdJson').textContent);
+
+  function currentSlice(doc) {
+    const climate = document.getElementById('condClimate').value;
+    const application = document.getElementById('condApplication').value;
+    const cs = (doc.condition_sets || {})[condId] || {};
+    const conditions = cs.conditions || {};
+    const nested = conditions[climate] && typeof conditions[climate] === 'object' && !('tdb_set' in (Object.values(conditions[climate] || {})[0] || {}));
+    if (nested || (conditions[climate] && conditions[climate][application])) {
+      return (conditions[climate] || {})[application] || {};
+    }
+    return conditions;
+  }
+
+  function renderConditionTable() {
+    const tbody = document.querySelector('#condTable tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const slice = currentSlice(condDoc);
+    Object.keys(slice).forEach(letter => {
+      const vals = slice[letter] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><strong>${letter}</strong></td>
+        <td><input class="form-control form-control-sm cond-tdb" data-letter="${letter}" value="${vals.tdb_set != null ? vals.tdb_set : ''}"></td>
+        <td><input class="form-control form-control-sm cond-tsup" data-letter="${letter}" value="${vals.tsup_set != null ? vals.tsup_set : ''}"></td>
+        <td><input class="form-control form-control-sm cond-tmean" data-letter="${letter}" value="${vals.tmean_set != null ? vals.tmean_set : ''}"></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('condClimate').addEventListener('change', renderConditionTable);
+  document.getElementById('condApplication').addEventListener('change', renderConditionTable);
+  renderConditionTable();
+
+  document.getElementById('btnSaveConditions').addEventListener('click', async () => {
+    const doc = JSON.parse(JSON.stringify(condDoc));
+    const climate = document.getElementById('condClimate').value;
+    const application = document.getElementById('condApplication').value;
+    const cs = doc.condition_sets[condId];
+    cs.conditions = cs.conditions || {};
+    const first = Object.values(cs.conditions)[0];
+    const isNested = first && typeof first === 'object' && !('tdb_set' in first);
+    if (isNested) {
+      cs.conditions[climate] = cs.conditions[climate] || {};
+      const existing = cs.conditions[climate][application] || {};
+      const slice = {};
+      document.querySelectorAll('.cond-tdb').forEach(inp => {
+        const letter = inp.dataset.letter;
+        slice[letter] = Object.assign({}, existing[letter] || {});
+        slice[letter].tdb_set = parseFloat(inp.value);
+      });
+      document.querySelectorAll('.cond-tsup').forEach(inp => {
+        const letter = inp.dataset.letter;
+        slice[letter] = slice[letter] || Object.assign({}, existing[letter] || {});
+        slice[letter].tsup_set = parseFloat(inp.value);
+      });
+      document.querySelectorAll('.cond-tmean').forEach(inp => {
+        const letter = inp.dataset.letter;
+        slice[letter] = slice[letter] || Object.assign({}, existing[letter] || {});
+        const v = inp.value;
+        slice[letter].tmean_set = (v === '' || v == null) ? null : parseFloat(v);
+      });
+      cs.conditions[climate][application] = slice;
+    } else {
+      const conditions = {};
+      document.querySelectorAll('.cond-tdb').forEach(inp => {
+        const letter = inp.dataset.letter;
+        conditions[letter] = conditions[letter] || {};
+        conditions[letter].tdb_set = parseFloat(inp.value);
+      });
+      document.querySelectorAll('.cond-tsup').forEach(inp => {
+        const letter = inp.dataset.letter;
+        conditions[letter] = conditions[letter] || {};
+        conditions[letter].tsup_set = parseFloat(inp.value);
+      });
+      cs.conditions = conditions;
+    }
+    const resp = await fetch('/api/condition_sets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc)
+    });
+    const data = await resp.json();
+    document.getElementById('condMsg').textContent = data.success ? 'Saved.' : (data.message || 'Error');
+    if (data.success && data.document) {
+      Object.assign(condDoc, data.document);
+    }
+  });
+
+  document.getElementById('btnBackfill').addEventListener('click', async () => {
+    const resp = await fetch('/api/backfill_profile_ids', { method: 'POST' });
+    const data = await resp.json();
+    alert(data.success ? (`Updated ${data.updated}, unresolved ${data.unresolved}`) : data.message);
+  });
+})();
+</script>
+{% endblock %}

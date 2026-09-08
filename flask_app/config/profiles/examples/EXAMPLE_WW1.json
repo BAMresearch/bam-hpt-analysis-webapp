@@ -1,0 +1,19 @@
+{
+  "profile_id": "EXAMPLE_WW1",
+  "display_name": "Example water-to-water unit (fictitious)",
+  "owner": "EXAMPLE",
+  "unit_type": "water_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": null,
+  "flow_type": "",
+  "flow_set_value": null,
+  "flow_mode": "per_test",
+  "wb_rule": "none",
+  "filename_patterns": [
+    "EXAMPLE_WW1*"
+  ],
+  "notes": "Shipped example only — not a real test unit.",
+  "default_climate": null,
+  "default_application": null,
+  "hp_id_aliases": []
+}

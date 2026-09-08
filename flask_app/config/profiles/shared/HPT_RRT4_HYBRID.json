@@ -1,0 +1,19 @@
+{
+  "profile_id": "HPT_RRT4_HYBRID",
+  "display_name": "HPT hybrid air-to-water placeholder (individual test)",
+  "unit_type": "hybrid_air_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": null,
+  "flow_type": "",
+  "flow_set_value": null,
+  "default_climate": null,
+  "default_application": null,
+  "filename_patterns": [
+    "HPT_RRT4_HYBRID*"
+  ],
+  "hp_id_aliases": [],
+  "notes": "Public placeholder for the HPT individual test on a hybrid heat pump. Fill pdesign / flow set / BUH cap when the unit is confirmed. Export files with the prefix HPT_RRT4_HYBRID_ so they resolve to this profile; no hp_id alias on purpose. Set climate and application per test (no BAM Average/MT default).",
+  "flow_mode": "per_test",
+  "wb_rule": "db_minus_1k",
+  "owner": "HPT"
+}

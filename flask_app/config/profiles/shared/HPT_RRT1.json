@@ -1,0 +1,16 @@
+{
+  "profile_id": "HPT_RRT1",
+  "display_name": "HPT RRT1 placeholder (air-to-water, ~10 kW, variable flow)",
+  "owner": "HPT",
+  "unit_type": "air_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": 10.0,
+  "flow_type": null,
+  "flow_set_value": null,
+  "flow_mode": "variable",
+  "wb_rule": "db_minus_1k",
+  "filename_patterns": [
+    "HPT_RRT1*"
+  ],
+  "notes": "Public placeholder — fill design/flow/BUH when the unit is confirmed. Set climate and application per test (no BAM Average/MT default)."
+}

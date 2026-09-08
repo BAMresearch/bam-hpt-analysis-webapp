@@ -1,0 +1,257 @@
+{
+  "default_condition_set_id": "ecodesign_heating",
+  "default_climate": "Average",
+  "default_application": "MT",
+  "condition_sets": {
+    "ecodesign_heating": {
+      "display_name": "Ecodesign Table 3 – Heating conditions",
+      "description": "Ecodesign Table 3 heating conditions: outdoor dry-bulb, leaving water (tsup_set), and mean water temperature (tmean_set). Organised as climate (Average/Warmer/Colder) × application (LT/MT/HT). Default slice: Average / MT.",
+      "aliases": ["BAM_RRT"],
+      "wb_rule": "db_minus_1k",
+      "defaults": {
+        "climate": "Average",
+        "application": "MT"
+      },
+      "tdesignh": {
+        "Average": -10.0,
+        "Warmer": 2.0,
+        "Colder": -22.0
+      },
+      "delta_T_variable_flow": {
+        "LT": 5.0,
+        "MT": 8.0,
+        "HT": 10.0
+      },
+      "conditions": {
+        "Average": {
+          "LT": {
+            "E": {
+              "tdb_set": -10.0,
+              "tsup_set": 35.0,
+              "tmean_set": 32.3,
+              "source": "BAM_design"
+            },
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 34.0,
+              "tmean_set": 31.3
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 30.0,
+              "tmean_set": 27.2
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 27.0,
+              "tmean_set": 24.0
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 24.0,
+              "tmean_set": 21.9
+            }
+          },
+          "MT": {
+            "E": {
+              "tdb_set": -10.0,
+              "tsup_set": 55.0,
+              "tmean_set": 50.8,
+              "source": "BAM_design"
+            },
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 52.0,
+              "tmean_set": 47.8
+            },
+            "F": {
+              "tdb_set": -5.0,
+              "tsup_set": 49.8,
+              "tmean_set": 45.6,
+              "source": "BAM_extra"
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 42.0,
+              "tmean_set": 37.7
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 36.0,
+              "tmean_set": 31.5
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 30.0,
+              "tmean_set": 25.0
+            }
+          },
+          "HT": {
+            "E": {
+              "tdb_set": -10.0,
+              "tsup_set": 65.0,
+              "tmean_set": 59.8,
+              "source": "BAM_design"
+            },
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 61.0,
+              "tmean_set": 55.8
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 49.0,
+              "tmean_set": 43.6
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 41.0,
+              "tmean_set": 35.5
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 32.0,
+              "tmean_set": 25.6
+            }
+          }
+        },
+        "Warmer": {
+          "LT": {
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 35.0,
+              "tmean_set": 32.3
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 31.0,
+              "tmean_set": 28.2
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 26.0,
+              "tmean_set": 22.8
+            }
+          },
+          "MT": {
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 55.0,
+              "tmean_set": 50.8
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 46.0,
+              "tmean_set": 41.8
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 34.0,
+              "tmean_set": 29.4
+            }
+          },
+          "HT": {
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 65.0,
+              "tmean_set": 59.8
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 53.0,
+              "tmean_set": 47.7
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 39.0,
+              "tmean_set": 33.4
+            }
+          }
+        },
+        "Colder": {
+          "LT": {
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 30.0,
+              "tmean_set": 27.2
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 27.0,
+              "tmean_set": 24.0
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 25.0,
+              "tmean_set": 22.9
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 24.0,
+              "tmean_set": 21.3
+            },
+            "G": {
+              "tdb_set": -15.0,
+              "tsup_set": 32.0,
+              "tmean_set": 29.3
+            }
+          },
+          "MT": {
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 44.0,
+              "tmean_set": 39.7
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 37.0,
+              "tmean_set": 32.6
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 32.0,
+              "tmean_set": 27.3
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 28.0,
+              "tmean_set": 23.2
+            },
+            "G": {
+              "tdb_set": -15.0,
+              "tsup_set": 49.0,
+              "tmean_set": 44.8
+            }
+          },
+          "HT": {
+            "A": {
+              "tdb_set": -7.0,
+              "tsup_set": 50.0,
+              "tmean_set": 44.7
+            },
+            "B": {
+              "tdb_set": 2.0,
+              "tsup_set": 41.0,
+              "tmean_set": 35.5
+            },
+            "C": {
+              "tdb_set": 7.0,
+              "tsup_set": 36.0,
+              "tmean_set": 30.2
+            },
+            "D": {
+              "tdb_set": 12.0,
+              "tsup_set": 30.0,
+              "tmean_set": 24.2
+            },
+            "G": {
+              "tdb_set": -15.0,
+              "tsup_set": 57.0,
+              "tmean_set": 51.7
+            }
+          }
+        }
+      }
+    }
+  }
+}

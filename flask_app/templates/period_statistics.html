@@ -1,0 +1,379 @@
+{% extends "base.html" %}
+
+{% block title %}Period Statistics{% endblock %}
+
+
+
+{% block extra_css %}
+
+<style>
+
+  .table-responsive { margin-top: 16px; max-height: 75vh; overflow: auto; }
+
+  .table th { background: #f8f9fa; position: sticky; top: 0; z-index: 2; font-size: 0.82rem; white-space: nowrap; }
+
+  .table td { font-size: 0.82rem; vertical-align: middle; }
+
+  .table td.mono, .table th.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+  .filter-row input, .filter-row select { width: 100%; padding: 3px 6px; font-size: 0.8rem; border: 1px solid #ced4da; border-radius: 4px; }
+
+  .group-header { background: #e9ecef !important; text-align: center; font-weight: 600; }
+
+  .group-header.combined { background: #d4edda !important; }
+
+  .kind-tabs .btn { min-width: 120px; }
+
+  .stat-null { color: #adb5bd; }
+
+</style>
+
+{% endblock %}
+
+
+
+{% block content %}
+
+<div class="container-fluid">
+
+  <div class="page-header">
+
+    <h1><i class="fas fa-layer-group"></i> Period Statistics</h1>
+
+    <p>
+
+      Mean operating-point values per sub-cycle period (one row per cycle entry).
+
+      Defrost entries show <strong>D / H</strong> sub-period splits plus full-cycle <strong>D+H</strong> from the database.
+
+      On–off entries show <strong>Off / On</strong> splits plus full-cycle <strong>Off+On</strong> from the database.
+
+      <strong>dT min / dT avg / dT max</strong> are the signed minimum, arithmetic mean, and maximum of
+      dTreturn = T_return_emu − T_return_calc in that section.
+
+    </p>
+
+  </div>
+
+
+
+  <div class="d-flex flex-wrap align-items-center mb-3 kind-tabs">
+
+    <div class="btn-group mr-3 mb-2">
+
+      <a href="{{ url_for('period_statistics', kind='all', buffer_s=buffer_s) }}"
+
+         class="btn btn-sm {% if cycle_kind == 'all' %}btn-primary{% else %}btn-outline-primary{% endif %}">
+
+        All cycles
+
+      </a>
+
+      <a href="{{ url_for('period_statistics', kind='defrost', buffer_s=buffer_s) }}"
+
+         class="btn btn-sm {% if cycle_kind == 'defrost' %}btn-primary{% else %}btn-outline-primary{% endif %}">
+
+        Defrost only
+
+      </a>
+
+      <a href="{{ url_for('period_statistics', kind='on_off', buffer_s=buffer_s) }}"
+
+         class="btn btn-sm {% if cycle_kind == 'on_off' %}btn-primary{% else %}btn-outline-primary{% endif %}">
+
+        On–Off only
+
+      </a>
+
+    </div>
+
+    <form class="form-inline mb-2" method="get">
+
+      <input type="hidden" name="kind" value="{{ cycle_kind }}">
+
+      <label class="mr-2 font-weight-bold">Buffer (s):</label>
+
+      <select name="buffer_s" class="form-control form-control-sm mr-2" onchange="this.form.submit()">
+
+        {% for b in buffer_options %}
+
+          <option value="{{ b }}" {% if b == buffer_s %}selected{% endif %}>{{ b }}</option>
+
+        {% endfor %}
+
+      </select>
+
+      <span class="small text-muted">Applies to defrost D/H splits only.</span>
+
+    </form>
+
+    <button id="exportCsvBtn" class="btn btn-sm btn-outline-secondary mb-2" type="button">
+
+      <i class="fas fa-download"></i> Export CSV
+
+    </button>
+
+    <span id="filterStatus" class="small text-muted ml-3 mb-2"></span>
+
+  </div>
+
+
+
+  <div class="table-responsive">
+
+    <table class="table table-sm table-striped table-bordered" id="statsTable">
+
+      <thead>
+
+        <tr>
+
+          <th rowspan="2" class="mono">rowid</th>
+
+          <th rowspan="2">file</th>
+
+          <th rowspan="2" class="mono text-right">ds</th>
+
+          <th rowspan="2" class="mono">unit</th>
+
+          <th rowspan="2">test</th>
+
+          <th rowspan="2">cycle</th>
+
+          <th rowspan="2">marker</th>
+
+          <th rowspan="2" class="mono text-right">Pelec trans.</th>
+
+          <th rowspan="2">src</th>
+
+          <th rowspan="2">Flow Config</th>
+
+          <th rowspan="2">COP Dataset</th>
+
+          {% for g in stat_groups %}
+
+            <th colspan="{{ stat_columns | selectattr('group', 'equalto', g) | list | length }}"
+
+                class="group-header{% if g in ('D+H', 'Off+On') %} combined{% endif %}">{{ g }}</th>
+
+          {% endfor %}
+
+        </tr>
+
+        <tr>
+
+          {% for col in stat_columns %}
+
+            <th class="mono text-right" title="{{ col.key }}">{{ col.label.split(' ', 1)[1] if ' ' in col.label else col.label }}</th>
+
+          {% endfor %}
+
+        </tr>
+
+        <tr class="filter-row">
+
+          <th><input type="text" data-col="rowid" placeholder="filter"></th>
+
+          <th><input type="text" data-col="file_name" placeholder="filter"></th>
+
+          <th><input type="text" data-col="data_set" placeholder="filter"></th>
+
+          <th><input type="text" data-col="hp_id" placeholder="filter"></th>
+
+          <th><input type="text" data-col="test_condition" placeholder="filter"></th>
+
+          <th><input type="text" data-col="cycle_family" placeholder="filter"></th>
+
+          <th><input type="text" data-col="cycle_start_marker" placeholder="filter"></th>
+
+          <th><input type="text" data-col="pelec_transition_time" placeholder="filter"></th>
+
+          <th><input type="text" data-col="transition_source" placeholder="filter"></th>
+
+          <th><input type="text" data-col="flow_config" placeholder="filter"></th>
+
+          <th><input type="text" data-col="cop_dataset" placeholder="filter"></th>
+
+          {% for col in stat_columns %}
+
+            <th><input type="text" data-col="{{ col.key }}" placeholder="filter"></th>
+
+          {% endfor %}
+
+        </tr>
+
+      </thead>
+
+      <tbody id="statsBody">
+
+        {% for r in rows %}
+
+        <tr data-row='{{ r | tojson }}'>
+
+          <td class="mono text-right">{{ r.rowid }}</td>
+
+          <td class="mono" title="{{ r.file_name }}">{{ r.file_name }}</td>
+
+          <td class="mono text-right">{{ r.data_set if r.data_set is not none else '' }}</td>
+
+          <td class="mono">{{ r.hp_id or '' }}</td>
+
+          <td>{{ r.test_condition or '' }}</td>
+
+          <td class="mono">{{ r.cycle_family or '' }}</td>
+
+          <td class="mono">{{ r.cycle_start_marker or '' }}</td>
+
+          <td class="mono text-right">{{ r.pelec_transition_time if r.pelec_transition_time is not none else '' }}</td>
+
+          <td class="mono">{{ r.transition_source or 'auto' }}</td>
+
+          <td class="mono">{{ r.flow_config or '' }}</td>
+
+          <td class="mono">{{ r.cop_dataset or '' }}</td>
+
+          {% for col in stat_columns %}
+
+            {% set v = r.get(col.key) %}
+
+            <td class="mono text-right{% if v is none %} stat-null{% endif %}">
+
+              {% if v is none %}—{% elif col.key.endswith('duration_s') %}{{ '%.0f'|format(v) }}{% else %}{{ '%.3f'|format(v) }}{% endif %}
+
+            </td>
+
+          {% endfor %}
+
+        </tr>
+
+        {% endfor %}
+
+      </tbody>
+
+    </table>
+
+  </div>
+
+</div>
+
+{% endblock %}
+
+
+
+{% block extra_js %}
+
+<script>
+
+  const statColumns = {{ stat_columns | tojson }};
+
+  const metaCols = ['rowid','file_name','data_set','hp_id','test_condition','cycle_family','cycle_start_marker','pelec_transition_time','transition_source','flow_config','cop_dataset'];
+
+
+
+  function rowData(tr) {
+
+    try { return JSON.parse(tr.getAttribute('data-row')); } catch (e) { return {}; }
+
+  }
+
+
+
+  function applyFilters() {
+
+    const filters = {};
+
+    document.querySelectorAll('.filter-row input[data-col]').forEach(function(inp) {
+
+      const v = (inp.value || '').trim().toLowerCase();
+
+      if (v) filters[inp.getAttribute('data-col')] = v;
+
+    });
+
+    let shown = 0, total = 0;
+
+    document.querySelectorAll('#statsBody tr').forEach(function(tr) {
+
+      total++;
+
+      const d = rowData(tr);
+
+      let ok = true;
+
+      for (const k in filters) {
+
+        const raw = d[k];
+
+        const s = (raw === null || raw === undefined) ? '' : String(raw).toLowerCase();
+
+        if (s.indexOf(filters[k]) === -1) { ok = false; break; }
+
+      }
+
+      tr.style.display = ok ? '' : 'none';
+
+      if (ok) shown++;
+
+    });
+
+    document.getElementById('filterStatus').textContent = shown + ' / ' + total + ' rows shown';
+
+  }
+
+
+
+  document.querySelectorAll('.filter-row input').forEach(function(inp) {
+
+    inp.addEventListener('input', applyFilters);
+
+  });
+
+
+
+  document.getElementById('exportCsvBtn').addEventListener('click', function() {
+
+    const headers = metaCols.concat(statColumns.map(c => c.key));
+
+    const labels = ['rowid','file','ds','unit','test','cycle','marker','Pelec trans.','src','Flow Config','COP Dataset'].concat(statColumns.map(c => c.label));
+
+    const lines = [labels.join(';')];
+
+    document.querySelectorAll('#statsBody tr').forEach(function(tr) {
+
+      if (tr.style.display === 'none') return;
+
+      const d = rowData(tr);
+
+      const cells = headers.map(function(k) {
+
+        const v = d[k];
+
+        if (v === null || v === undefined) return '';
+
+        return String(v).replace(/;/g, ',');
+
+      });
+
+      lines.push(cells.join(';'));
+
+    });
+
+    const blob = new Blob([lines.join('\n')], {type: 'text/csv;charset=utf-8;'});
+
+    const a = document.createElement('a');
+
+    a.href = URL.createObjectURL(blob);
+
+    a.download = 'period_statistics_{{ cycle_kind }}_{% if cycle_kind != "on_off" %}{{ buffer_s }}{% else %}onoff{% endif %}.csv';
+
+    a.click();
+
+  });
+
+
+
+  applyFilters();
+
+</script>
+
+{% endblock %}
+

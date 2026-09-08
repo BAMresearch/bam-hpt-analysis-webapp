@@ -1,0 +1,1414 @@
+{% extends "base.html" %}
+
+{% block title %}Manage Columns{% endblock %}
+
+{% block extra_css %}
+<style>
+    .section-card {
+        margin-bottom: 2rem;
+    }
+    .form-section {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .column-list {
+        max-height: 400px;
+        overflow-y: auto;
+    }
+    .help-text {
+        font-size: 0.875rem;
+        color: #6c757d;
+        margin-top: 0.25rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+        <h1 class="mb-4"><i class="fas fa-columns"></i> Column Management</h1>
+
+        <!-- Existing Columns -->
+        <div class="card section-card">
+            <div class="card-header">
+                <h3><i class="fas fa-list"></i> Existing Custom Columns</h3>
+            </div>
+            <div class="card-body">
+                {% if custom_columns %}
+                <div class="table-responsive column-list">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Column Name</th>
+                                <th>Type</th>
+                                <th>Not Null</th>
+                                <th>Default Value</th>
+                                <th>Formula/Info</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for col in custom_columns %}
+                            <tr>
+                                <td><code>{{ col[1] }}</code></td>
+                                <td>{{ col[2] }}</td>
+                                <td>{% if col[3] %}Yes{% else %}No{% endif %}</td>
+                                <td>{{ col[4] if col[4] else '-' }}</td>
+                                <td>
+                                    {% if column_metadata.get(col[1]) %}
+                                        {% if column_metadata[col[1]].category == 'derived' %}
+                                            <small class="text-success"><i class="fas fa-calculator"></i> Derived</small><br>
+                                            <code class="small" style="word-break: break-all; white-space: pre-wrap;">{{ column_metadata[col[1]].formula }}</code>
+                                        {% elif column_metadata[col[1]].category == 'timeseries' %}
+                                            <small class="text-info"><i class="fas fa-chart-line"></i> Time Series</small>
+                                        {% elif column_metadata[col[1]].category == 'text' %}
+                                            <small class="text-muted"><i class="fas fa-keyboard"></i> Text</small>
+                                        {% endif %}
+                                    {% else %}
+                                        <small class="text-muted">-</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-primary" onclick="editColumn('{{ col[1] }}')" title="Edit formula/info for this column">
+                                        <i class="fas fa-edit"></i> Edit
+                                    </button>
+                                    <button class="btn btn-sm btn-danger" onclick="removeColumn('{{ col[1] }}')" title="Remove this column">
+                                        <i class="fas fa-trash"></i> Remove
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div id="remove_column_message" class="mt-2"></div>
+                {% else %}
+                <p class="text-muted">No custom columns yet. Add your first column below!</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Column Ordering -->
+        <div class="card section-card">
+            <div class="card-header">
+                <h3><i class="fas fa-sort"></i> Column Display Order</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <p class="text-muted">Drag and drop columns to reorder them in the main table, or use the arrow buttons. Toggle visibility to show/hide columns on the mean values page. Committed defaults are in <code>column_order.json</code> and <code>column_visibility.json</code>; saving here writes those files locally and only reaches git if you commit them.</p>
+                    <div id="column_order_list" class="list-group mb-3" style="max-height: 500px; overflow-y: auto;">
+                        <!-- Will be populated by JavaScript -->
+                    </div>
+                    <button class="btn btn-primary" onclick="saveColumnOrder()">
+                        <i class="fas fa-save"></i> Save Column Order & Visibility
+                    </button>
+                    <button class="btn btn-secondary" onclick="resetColumnOrder()">
+                        <i class="fas fa-undo"></i> Reset to Default
+                    </button>
+                    <div id="column_order_message" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add New Column -->
+        <div class="card section-card">
+            <div class="card-header">
+                <h3><i class="fas fa-plus-circle"></i> Add New Column</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <h5>Step 1: Create Column</h5>
+                    <div class="row">
+                        <div class="col-md-4">
+                            <label for="column_name" class="form-label">Column Name</label>
+                            <input type="text" class="form-control" id="column_name" placeholder="e.g., test_condition">
+                            <div class="help-text">Only letters, numbers, and underscores</div>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="column_type" class="form-label">Data Type</label>
+                            <select class="form-select" id="column_type">
+                                <option value="TEXT">TEXT</option>
+                                <option value="REAL">REAL (Decimal)</option>
+                                <option value="INTEGER">INTEGER</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="column_category" class="form-label">Column Category</label>
+                            <select class="form-select" id="column_category">
+                                <option value="text">Text (Manual Input)</option>
+                                <option value="derived">Derived (From Existing Columns)</option>
+                                <option value="timeseries">Time Series Analysis</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button class="btn btn-primary w-100" onclick="addColumn()">
+                                <i class="fas fa-plus"></i> Add Column
+                            </button>
+                        </div>
+                    </div>
+                    <div id="add_column_message" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Text Column Input -->
+        <div class="card section-card" id="text_column_section">
+            <div class="card-header">
+                <h3><i class="fas fa-keyboard"></i> Input Text Column Data</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <p class="text-muted mb-3">Enter text values for your TEXT columns. You can paste data from Excel or type it manually.</p>
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <label for="text_column_select" class="form-label">Select Column</label>
+                            <select class="form-select" id="text_column_select">
+                                <option value="">-- Select a TEXT column --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="pasted_data" class="form-label">Paste Data</label>
+                        <textarea class="form-control" id="pasted_data" rows="10" 
+                                  placeholder="Paste tab or comma-separated data here. As an example to add a column value of test_cond, use the following format:&#10;File Name, Data Set, Start Time, End Time, Value&#10;HPT_RRT2_Lab04_E.xlsx, 1, 10, 4000, E&#10;HPT_RRT2_Lab04_E.xlsx, 2, 4010, 8000, E"></textarea>
+                        <div class="help-text">
+                            <strong>Format:</strong> Each line should contain: <code>File Name, Data Set, Start Time, End Time, Value</code><br>
+                            • <strong>You do NOT need to include a header row</strong> - just paste the data directly<br>
+                            • If you copy from Excel and it includes headers (like "File Name, Data Set..."), that's fine - it will be automatically skipped<br>
+                            • You can copy from Excel and paste here (tab or comma separated)<br>
+                            • You can also type manually, one entry per line<br>
+                            • <strong>Example (without header - recommended):</strong><br>
+                            <code style="display: block; margin-top: 5px; padding: 5px; background: #f0f0f0;">
+                            HPT_RRT2_Lab04_E.xlsx, 1, 10, 4000, E<br>
+                            HPT_RRT2_Lab04_E.xlsx, 2, 4010, 8000, E<br>
+                            </code>
+                            • <strong>Example (with header - also works):</strong><br>
+                            <code style="display: block; margin-top: 5px; padding: 5px; background: #f0f0f0;">
+                            File Name, Data Set, Start Time, End Time, test_cond<br>
+                            HPT_RRT2_Lab04_E.xlsx, 1, 10, 4000, E<br>
+                            HPT_RRT2_Lab04_E.xlsx, 2, 4010, 8000, E<br>
+                            </code>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <button class="btn btn-success" onclick="updateTextColumn()">
+                            <i class="fas fa-save"></i> Update Column Values
+                        </button>
+                        <button class="btn btn-info" onclick="exportDatabaseEntries()" title="Export current database entries in the correct format">
+                            <i class="fas fa-download"></i> Export Database Format
+                        </button>
+                    </div>
+                    <div id="text_column_message" class="mt-2"></div>
+                    <div id="export_result" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bulk Text Input -->
+        {% if text_columns and results %}
+        <div class="card section-card" id="bulk_text_input_section">
+            <div class="card-header">
+                <h3><i class="fas fa-table"></i> Bulk Text Input</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <p class="text-muted mb-3">Fill in text values for multiple columns and entries at once in a single table. This is faster than updating one column at a time.</p>
+                    <div class="mb-3">
+                        <button type="button" class="btn btn-primary" onclick="toggleBulkTextInput()" id="toggleBulkTextBtn">
+                            <i class="fas fa-table"></i> Show Bulk Text Input Table
+                        </button>
+                        <button type="button" class="btn btn-success" onclick="saveBulkTextInput()" id="saveBulkTextBtn" style="display: none;">
+                            <i class="fas fa-save"></i> Save All Changes
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="exportBulkTextTemplate()" id="exportBulkTextBtn" style="display: none;">
+                            <i class="fas fa-download"></i> Export Template (Excel Format)
+                        </button>
+                    </div>
+                    <div id="bulkTextInputTable" style="display: none;">
+                        <div class="table-responsive" style="max-height: 600px; overflow-y: auto;">
+                            <table class="table table-bordered table-sm" id="bulkTextTable">
+                                <thead class="thead-light" style="position: sticky; top: 0; background: white; z-index: 10;">
+                                    <tr>
+                                        <th>File Name</th>
+                                        <th>Data Set</th>
+                                        <th>Start Time</th>
+                                        <th>End Time</th>
+                                        {% for col in text_columns %}
+                                        <th>{{ col }}</th>
+                                        {% endfor %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for row in results %}
+                                    <tr data-rowid="{{ row.get('rowid', '') }}" data-file="{{ row['file_name'] }}" data-dataset="{{ row['data_set'] }}">
+                                        <td><small>{{ row['file_name'] }}</small></td>
+                                        <td><small>{{ row['data_set'] }}</small></td>
+                                        <td><small>{{ row['start_time'] }}</small></td>
+                                        <td><small>{{ row['end_time'] }}</small></td>
+                                        {% for col in text_columns %}
+                                        <td>
+                                            <input type="text" 
+                                                   class="form-control form-control-sm bulk-text-input" 
+                                                   data-column="{{ col }}" 
+                                                   data-rowid="{{ row.get('rowid', '') }}"
+                                                   value="{{ row.get(col, '') or '' }}"
+                                                   placeholder="Enter {{ col }}...">
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="bulkTextMessage" class="mt-2"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Derived Column Calculation -->
+        <div class="card section-card" id="derived_column_section">
+            <div class="card-header">
+                <h3><i class="fas fa-calculator"></i> Calculate Derived Column</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <label for="derived_column_select" class="form-label">Select Column</label>
+                            <select class="form-select" id="derived_column_select">
+                                <option value="">-- Select a REAL/INTEGER column --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="derived_formula" class="form-label">Formula (Python Expression)</label>
+                        <input type="text" class="form-control" id="derived_formula" 
+                               placeholder="e.g., avg_heating_capacity_corr / avg_power_input_corr">
+                        <div class="help-text">
+                            <strong>Use Python syntax, not Excel formulas!</strong> Use column names as variables. Examples:<br>
+                            • <code>avg_heating_capacity_corr / avg_power_input_corr</code> (division)<br>
+                            • <code>avg_t_supply - avg_t_return_emu</code> (subtraction)<br>
+                            • <code>(avg_t_db + avg_t_wb) / 2</code> (average)<br>
+                            • <code>"YES" if abs(column_name) > threshold_value else "NO"</code> (conditional - Excel IF conversion)<br>
+                            • <code>abs(column_name)</code> (absolute value - Excel ABS conversion)<br>
+                            <strong>Note:</strong> Excel <code>=IF(ABS(AT232)>$CC$1;"NO";"YES")</code> becomes:<br>
+                            <code>"NO" if abs(column_name) > threshold_value else "YES"</code><br>
+                            (Replace <code>column_name</code> with your actual column name and <code>threshold_value</code> with a number)<br>
+                            Available columns: <span id="available_columns_list"></span>
+                        </div>
+                    </div>
+                    <button class="btn btn-success" onclick="calculateDerivedColumn()">
+                        <i class="fas fa-calculator"></i> Calculate Values
+                    </button>
+                    <div id="derived_column_message" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Time Series Analysis Column -->
+        <div class="card section-card" id="timeseries_column_section">
+            <div class="card-header">
+                <h3><i class="fas fa-chart-line"></i> Calculate Time Series Analysis Column</h3>
+            </div>
+            <div class="card-body">
+                <div class="form-section">
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <label for="timeseries_column_select" class="form-label">Select Column</label>
+                            <select class="form-select" id="timeseries_column_select">
+                                <option value="">-- Select a REAL/INTEGER column --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="analysis_type" class="form-label">Analysis Type</label>
+                        <select class="form-select" id="analysis_type" onchange="updateAnalysisForm()">
+                            <option value="count_violations">Count Violations (Beyond Limits)</option>
+                            <option value="statistical">Statistical Analysis</option>
+                            <option value="custom">Custom Formula</option>
+                        </select>
+                    </div>
+
+                    <!-- Count Violations Form -->
+                    <div id="violations_form" style="display: none;">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <label for="param_name_violations" class="form-label">Parameter Name</label>
+                                <input type="text" class="form-control" id="param_name_violations" 
+                                       placeholder="e.g., T_supply">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="upper_limit" class="form-label">Upper Limit (optional)</label>
+                                <input type="number" class="form-control" id="upper_limit" step="0.01">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="lower_limit" class="form-label">Lower Limit (optional)</label>
+                                <input type="number" class="form-control" id="lower_limit" step="0.01">
+                            </div>
+                        </div>
+                        <div class="help-text">
+                            Counts how many times the parameter exceeds the upper limit or falls below the lower limit.
+                        </div>
+                    </div>
+
+                    <!-- Statistical Analysis Form -->
+                    <div id="statistical_form" style="display: none;">
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <label for="param_name_statistical" class="form-label">Parameter Name</label>
+                                <input type="text" class="form-control" id="param_name_statistical" 
+                                       placeholder="e.g., T_supply">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="stat_type" class="form-label">Statistic Type</label>
+                                <select class="form-select" id="stat_type">
+                                    <option value="mean">Mean</option>
+                                    <option value="std">Standard Deviation</option>
+                                    <option value="min">Minimum</option>
+                                    <option value="max">Maximum</option>
+                                    <option value="median">Median</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Custom Formula Form -->
+                    <div id="custom_form" style="display: none;">
+                        <div class="mb-3">
+                            <label for="custom_formula" class="form-label">Custom Formula (Python)</label>
+                            <input type="text" class="form-control" id="custom_formula" 
+                                   placeholder="e.g., (df['T_supply'] > 50).sum()">
+                            <div class="help-text">
+                                Use <code>df</code> to refer to the time series DataFrame. Examples:<br>
+                                • <code>(df['T_supply'] > 50).sum()</code> - count values above 50<br>
+                                • <code>df['T_supply'].std()</code> - standard deviation<br>
+                                • <code>((df['T_supply'] - df['T_supply'].mean()).abs() > 2).sum()</code> - count outliers
+                            </div>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-success" onclick="calculateTimeseriesColumn()">
+                        <i class="fas fa-chart-line"></i> Calculate Values
+                    </button>
+                    <div id="timeseries_column_message" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Column Modal -->
+    <div class="modal fade" id="editColumnModal" tabindex="-1" role="dialog">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Edit Column: <span id="edit_column_name_display"></span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="edit_column_name_hidden">
+                    <div id="edit_column_type_display" class="mb-3">
+                        <strong>Column Type:</strong> <span id="edit_column_type_text"></span>
+                    </div>
+                    <div id="edit_derived_formula_section" style="display: none;">
+                        <div class="form-group mb-3">
+                            <label for="edit_derived_formula" class="form-label"><strong>Formula (Python Expression)</strong></label>
+                            <textarea class="form-control" id="edit_derived_formula" rows="4" 
+                                      placeholder="e.g., avg_heating_capacity_corr / avg_power_input_corr"></textarea>
+                            <div class="help-text">
+                                <strong>Use Python syntax, not Excel formulas!</strong> Use column names as variables.<br>
+                                Examples: <code>avg_heating_capacity_corr / avg_power_input_corr</code>, 
+                                <code>avg_t_supply - avg_t_return_emu</code>, 
+                                <code>"YES" if abs(column_name) > threshold_value else "NO"</code>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="edit_timeseries_section" style="display: none;">
+                        <div class="form-group mb-3">
+                            <label for="edit_analysis_type" class="form-label"><strong>Analysis Type</strong></label>
+                            <select class="form-select" id="edit_analysis_type" onchange="updateEditAnalysisForm()">
+                                <option value="count_violations">Count Violations (Beyond Limits)</option>
+                                <option value="statistical">Statistical Analysis</option>
+                                <option value="custom">Custom Formula</option>
+                            </select>
+                        </div>
+                        <div id="edit_violations_form" style="display: none;">
+                            <div class="row mb-3">
+                                <div class="col-md-4">
+                                    <label for="edit_param_name_violations" class="form-label">Parameter Name</label>
+                                    <input type="text" class="form-control" id="edit_param_name_violations" placeholder="e.g., T_supply">
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="edit_upper_limit" class="form-label">Upper Limit (optional)</label>
+                                    <input type="number" class="form-control" id="edit_upper_limit" step="0.01">
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="edit_lower_limit" class="form-label">Lower Limit (optional)</label>
+                                    <input type="number" class="form-control" id="edit_lower_limit" step="0.01">
+                                </div>
+                            </div>
+                        </div>
+                        <div id="edit_statistical_form" style="display: none;">
+                            <div class="row mb-3">
+                                <div class="col-md-4">
+                                    <label for="edit_param_name_statistical" class="form-label">Parameter Name</label>
+                                    <input type="text" class="form-control" id="edit_param_name_statistical" placeholder="e.g., T_supply">
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="edit_stat_type" class="form-label">Statistic Type</label>
+                                    <select class="form-select" id="edit_stat_type">
+                                        <option value="mean">Mean</option>
+                                        <option value="std">Standard Deviation</option>
+                                        <option value="min">Minimum</option>
+                                        <option value="max">Maximum</option>
+                                        <option value="median">Median</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="edit_custom_form" style="display: none;">
+                            <div class="form-group mb-3">
+                                <label for="edit_custom_formula" class="form-label">Custom Formula (Python)</label>
+                                <input type="text" class="form-control" id="edit_custom_formula" placeholder="e.g., (df['T_supply'] > 50).sum()">
+                                <div class="help-text">Use <code>df</code> to refer to the time series DataFrame.</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="edit_text_section" style="display: none;">
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle"></i> Text columns don't have formulas. You can update their values using the "Input Text Column Data" section below.
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="saveColumnEdit()">
+                        <i class="fas fa-save"></i> Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="application/json" id="manageColumnsPageData">{{ {
+        'all_column_names': all_column_names,
+        'column_visibility': column_visibility,
+        'deviation_columns': deviation_columns,
+        'text_columns': text_columns,
+        'numeric_columns': numeric_columns,
+        'column_metadata': column_metadata,
+        'monitoring_mean_columns': monitoring_mean_columns,
+        'default_hidden_columns': default_hidden_columns
+    } | tojson }}</script>
+    <script>
+        const pageData = JSON.parse(document.getElementById('manageColumnsPageData').textContent);
+        const allColumnNames = pageData.all_column_names;
+        const columnVisibility = pageData.column_visibility;
+        const deviationColumns = pageData.deviation_columns;
+        const textColumns = pageData.text_columns;
+        const numericColumns = pageData.numeric_columns;
+        const columnMetadata = pageData.column_metadata;
+        const monitoringMeanColumns = pageData.monitoring_mean_columns || [];
+        const defaultHiddenColumns = pageData.default_hidden_columns || [];
+
+        function isDefaultColumnVisible(colName) {
+            if (columnVisibility.hasOwnProperty(colName)) {
+                return !!columnVisibility[colName];
+            }
+            if (deviationColumns.includes(colName) || colName.indexOf('dev_') === 0) return false;
+            if (monitoringMeanColumns.includes(colName)) return false;
+            if (colName.indexOf('dtreturn_cache_') === 0) return false;
+            if (colName.indexOf('gutegrad_') === 0 || colName.indexOf('cop_carnot_') === 0 || colName.indexOf('pump_correction_') === 0) return false;
+            if (defaultHiddenColumns.includes(colName)) return false;
+            return true;
+        }
+        
+        // Update available columns list
+        document.getElementById('available_columns_list').textContent = allColumnNames.filter(c => 
+            !['rowid', 'file_name', 'data_set', 'start_time', 'end_time', 'has_time_series', 'time_series_data', 'display_order'].includes(c)
+        ).join(', ');
+
+        // Watch for column category changes (for adding new columns)
+        document.getElementById('column_category').addEventListener('change', function() {
+            const category = this.value;
+            // Text, derived, and timeseries sections are now always visible
+            // This change handler is kept for future use if needed
+            updateColumnSelects();
+        });
+
+        function updateColumnSelects() {
+            // This will be populated after columns are added
+            // For now, we'll fetch columns dynamically
+            fetch('/manage_columns')
+                .then(response => response.text())
+                .then(html => {
+                    // Parse and update selects (simplified - in production, use an API endpoint)
+                });
+        }
+
+        function addColumn() {
+            const columnName = document.getElementById('column_name').value.trim();
+            const columnType = document.getElementById('column_type').value;
+            const columnCategory = document.getElementById('column_category').value;
+            const messageDiv = document.getElementById('add_column_message');
+
+            if (!columnName) {
+                showMessage(messageDiv, 'Please enter a column name', 'danger');
+                return;
+            }
+
+            fetch('/add_column', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName,
+                    column_type: columnType,
+                    column_category: columnCategory
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(messageDiv, data.message, 'success');
+                    document.getElementById('column_name').value = '';
+                    // Reload page after a short delay to show new column
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+
+        function updateTextColumn() {
+            const columnName = document.getElementById('text_column_select').value;
+            const pastedData = document.getElementById('pasted_data').value;
+            const messageDiv = document.getElementById('text_column_message');
+
+            if (!columnName || !pastedData) {
+                showMessage(messageDiv, 'Please select a column and provide data', 'danger');
+                return;
+            }
+
+            fetch('/update_text_column', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName,
+                    pasted_data: pastedData
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    let msg = data.message;
+                    if (data.errors && data.errors.length > 0) {
+                        // Show first 10 errors, with option to see more
+                        const errorCount = data.errors.length;
+                        const errorsToShow = data.errors.slice(0, 10);
+                        msg += `<br><small><strong>Errors (showing first 10 of ${errorCount}):</strong><br>` + 
+                               errorsToShow.join('<br>') + 
+                               (errorCount > 10 ? `<br>... and ${errorCount - 10} more errors` : '') +
+                               '</small>';
+                    }
+                    showMessage(messageDiv, msg, data.updated_count > 0 ? 'success' : 'warning');
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+
+        function exportDatabaseEntries() {
+            const exportDiv = document.getElementById('export_result');
+            exportDiv.innerHTML = '<div class="alert alert-info">Loading database entries...</div>';
+            
+            fetch('/api/export_entries_format')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        const textarea = document.createElement('textarea');
+                        textarea.className = 'form-control';
+                        textarea.rows = 15;
+                        textarea.value = data.export_data;
+                        textarea.readOnly = true;
+                        
+                        const copyBtn = document.createElement('button');
+                        copyBtn.className = 'btn btn-sm btn-primary mt-2';
+                        copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy to Clipboard';
+                        copyBtn.onclick = () => {
+                            textarea.select();
+                            document.execCommand('copy');
+                            copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                            setTimeout(() => {
+                                copyBtn.innerHTML = '<i class="fas fa-copy"></i> Copy to Clipboard';
+                            }, 2000);
+                        };
+                        
+                        exportDiv.innerHTML = `
+                            <div class="alert alert-success">
+                                <strong>Database Entries Format:</strong><br>
+                                <small>Copy this format and fill in the last column with your values</small>
+                            </div>
+                        `;
+                        exportDiv.appendChild(textarea);
+                        exportDiv.appendChild(copyBtn);
+                    } else {
+                        exportDiv.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+                    }
+                })
+                .catch(error => {
+                    exportDiv.innerHTML = `<div class="alert alert-danger">Error: ${error}</div>`;
+                });
+        }
+
+        function calculateDerivedColumn() {
+            const columnName = document.getElementById('derived_column_select').value;
+            const formula = document.getElementById('derived_formula').value.trim();
+            const messageDiv = document.getElementById('derived_column_message');
+
+            if (!columnName || !formula) {
+                showMessage(messageDiv, 'Please select a column and provide a formula', 'danger');
+                return;
+            }
+
+            fetch('/calculate_derived_column', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName,
+                    formula: formula
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    let msg = data.message;
+                    if (data.errors && data.errors.length > 0) {
+                        msg += '<br><small>Errors:<br>' + data.errors.join('<br>') + '</small>';
+                    }
+                    showMessage(messageDiv, msg, 'success');
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+
+        function calculateTimeseriesColumn() {
+            const columnName = document.getElementById('timeseries_column_select').value;
+            const analysisType = document.getElementById('analysis_type').value;
+            const messageDiv = document.getElementById('timeseries_column_message');
+
+            if (!columnName) {
+                showMessage(messageDiv, 'Please select a column', 'danger');
+                return;
+            }
+
+            let parameters = {};
+            if (analysisType === 'count_violations') {
+                parameters = {
+                    parameter_name: document.getElementById('param_name_violations').value,
+                    upper_limit: document.getElementById('upper_limit').value || null,
+                    lower_limit: document.getElementById('lower_limit').value || null
+                };
+            } else if (analysisType === 'statistical') {
+                parameters = {
+                    parameter_name: document.getElementById('param_name_statistical').value,
+                    stat_type: document.getElementById('stat_type').value
+                };
+            } else if (analysisType === 'custom') {
+                parameters = {
+                    formula: document.getElementById('custom_formula').value
+                };
+            }
+
+            fetch('/calculate_timeseries_column', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName,
+                    analysis_type: analysisType,
+                    parameters: parameters
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    let msg = data.message;
+                    if (data.errors && data.errors.length > 0) {
+                        msg += '<br><small>Errors:<br>' + data.errors.join('<br>') + '</small>';
+                    }
+                    showMessage(messageDiv, msg, 'success');
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+
+        function updateAnalysisForm() {
+            const analysisType = document.getElementById('analysis_type').value;
+            document.getElementById('violations_form').style.display = analysisType === 'count_violations' ? 'block' : 'none';
+            document.getElementById('statistical_form').style.display = analysisType === 'statistical' ? 'block' : 'none';
+            document.getElementById('custom_form').style.display = analysisType === 'custom' ? 'block' : 'none';
+        }
+
+        function showMessage(element, message, type) {
+            element.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show" role="alert">${message}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
+        }
+
+        function populateColumnSelects() {
+            const textSelect = document.getElementById('text_column_select');
+            const derivedSelect = document.getElementById('derived_column_select');
+            const timeseriesSelect = document.getElementById('timeseries_column_select');
+            
+            // Clear existing options (except first)
+            textSelect.innerHTML = '<option value="">-- Select a TEXT column --</option>';
+            derivedSelect.innerHTML = '<option value="">-- Select a REAL/INTEGER column --</option>';
+            timeseriesSelect.innerHTML = '<option value="">-- Select a REAL/INTEGER column --</option>';
+            
+            // Populate text columns
+            textColumns.forEach(col => {
+                const option = document.createElement('option');
+                option.value = col;
+                option.textContent = col;
+                textSelect.appendChild(option);
+            });
+            
+            // Populate numeric columns
+            numericColumns.forEach(col => {
+                const option1 = document.createElement('option');
+                option1.value = col;
+                option1.textContent = col;
+                derivedSelect.appendChild(option1);
+                
+                const option2 = document.createElement('option');
+                option2.value = col;
+                option2.textContent = col;
+                timeseriesSelect.appendChild(option2);
+            });
+        }
+        
+        function editColumn(columnName) {
+            const metadata = columnMetadata[columnName] || {};
+            const category = metadata.category || 'text';
+            
+            // Set column name
+            document.getElementById('edit_column_name_hidden').value = columnName;
+            document.getElementById('edit_column_name_display').textContent = columnName;
+            
+            // Get column type from the table
+            const row = Array.from(document.querySelectorAll('tbody tr')).find(tr => 
+                tr.querySelector('code').textContent === columnName
+            );
+            const columnType = row ? row.cells[1].textContent.trim() : 'UNKNOWN';
+            document.getElementById('edit_column_type_text').textContent = columnType;
+            
+            // Hide all sections first
+            document.getElementById('edit_derived_formula_section').style.display = 'none';
+            document.getElementById('edit_timeseries_section').style.display = 'none';
+            document.getElementById('edit_text_section').style.display = 'none';
+            
+            // Show appropriate section based on category
+            if (category === 'derived') {
+                document.getElementById('edit_derived_formula_section').style.display = 'block';
+                document.getElementById('edit_derived_formula').value = metadata.formula || '';
+            } else if (category === 'timeseries') {
+                document.getElementById('edit_timeseries_section').style.display = 'block';
+                const analysisType = metadata.analysis_type || 'count_violations';
+                document.getElementById('edit_analysis_type').value = analysisType;
+                
+                // Populate parameters if they exist
+                const params = metadata.parameters || {};
+                if (analysisType === 'count_violations') {
+                    document.getElementById('edit_param_name_violations').value = params.parameter_name || '';
+                    document.getElementById('edit_upper_limit').value = params.upper_limit || '';
+                    document.getElementById('edit_lower_limit').value = params.lower_limit || '';
+                } else if (analysisType === 'statistical') {
+                    document.getElementById('edit_param_name_statistical').value = params.parameter_name || '';
+                    document.getElementById('edit_stat_type').value = params.stat_type || 'mean';
+                } else if (analysisType === 'custom') {
+                    document.getElementById('edit_custom_formula').value = params.formula || '';
+                }
+                updateEditAnalysisForm();
+            } else {
+                document.getElementById('edit_text_section').style.display = 'block';
+            }
+            
+            // Show modal
+            const modal = new bootstrap.Modal(document.getElementById('editColumnModal'));
+            modal.show();
+        }
+        
+        function updateEditAnalysisForm() {
+            const analysisType = document.getElementById('edit_analysis_type').value;
+            document.getElementById('edit_violations_form').style.display = analysisType === 'count_violations' ? 'block' : 'none';
+            document.getElementById('edit_statistical_form').style.display = analysisType === 'statistical' ? 'block' : 'none';
+            document.getElementById('edit_custom_form').style.display = analysisType === 'custom' ? 'block' : 'none';
+        }
+        
+        function saveColumnEdit() {
+            const columnName = document.getElementById('edit_column_name_hidden').value;
+            const metadata = columnMetadata[columnName] || {};
+            const category = metadata.category || 'text';
+            
+            let updateData = {
+                column_name: columnName
+            };
+            
+            if (category === 'derived') {
+                const formula = document.getElementById('edit_derived_formula').value.trim();
+                if (!formula) {
+                    alert('Please enter a formula');
+                    return;
+                }
+                updateData.category = 'derived';
+                updateData.formula = formula;
+            } else if (category === 'timeseries') {
+                const analysisType = document.getElementById('edit_analysis_type').value;
+                let parameters = {};
+                
+                if (analysisType === 'count_violations') {
+                    parameters = {
+                        parameter_name: document.getElementById('edit_param_name_violations').value,
+                        upper_limit: document.getElementById('edit_upper_limit').value || null,
+                        lower_limit: document.getElementById('edit_lower_limit').value || null
+                    };
+                } else if (analysisType === 'statistical') {
+                    parameters = {
+                        parameter_name: document.getElementById('edit_param_name_statistical').value,
+                        stat_type: document.getElementById('edit_stat_type').value
+                    };
+                } else if (analysisType === 'custom') {
+                    parameters = {
+                        formula: document.getElementById('edit_custom_formula').value
+                    };
+                }
+                
+                updateData.category = 'timeseries';
+                updateData.analysis_type = analysisType;
+                updateData.parameters = parameters;
+            } else {
+                alert('Text columns cannot be edited here. Use the "Input Text Column Data" section to update values.');
+                return;
+            }
+            
+            fetch('/edit_column_metadata', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(updateData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Column metadata updated successfully! The page will reload.');
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+        }
+        
+        function removeColumn(columnName) {
+            if (!confirm(`Are you sure you want to remove column "${columnName}"? This action cannot be undone and all data in this column will be lost.`)) {
+                return;
+            }
+            
+            const messageDiv = document.getElementById('remove_column_message');
+            
+            fetch('/remove_column', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(messageDiv, data.message, 'success');
+                    // Reload page after a short delay to refresh the column list
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+
+        // Column ordering functions
+        let allColumnsList = [];
+        let currentColumnOrder = [];
+        let currentColumnVisibility = {...columnVisibility};
+
+        function loadColumnOrder() {
+            // Get all columns from the API
+            fetch('/api/columns')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        allColumnsList = data.all_columns.map(c => c.name);
+                        
+                        // Get saved order
+                        fetch('/get_column_order')
+                            .then(response => response.json())
+                            .then(orderData => {
+                                const standard = ['file_name', 'data_set', 'start_time', 'end_time'];
+                                
+                                if (orderData.success && orderData.column_order.length > 0) {
+                                    // Remove standard columns from saved order (they'll be added first)
+                                    let savedOrder = orderData.column_order.filter(col => 
+                                        allColumnsList.includes(col) && !standard.includes(col)
+                                    );
+                                    
+                                    // Start with standard columns, then saved order
+                                    const standardFiltered = standard.filter(c => allColumnsList.includes(c));
+                                    currentColumnOrder = standardFiltered.concat(savedOrder);
+                                    
+                                    // Add any missing columns to the end
+                                    const missing = allColumnsList.filter(col => 
+                                        !currentColumnOrder.includes(col) && 
+                                        !['rowid', 'has_time_series', 'time_series_data', 'display_order'].includes(col)
+                                    );
+                                    currentColumnOrder = currentColumnOrder.concat(missing);
+                                } else {
+                                    // Use default order: standard -> calculated -> custom
+                                    const calculated = [
+                                        'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
+                                        'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
+                                        'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
+                                        'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu', 'avg_t_return_calc',
+                                        'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_ba', 'avg_volume_flow',
+                                        'avg_mass_flow', 'avg_dp', 'avg_adj_dp', 'avg_P_hyd', 'avg_eff_pump',
+                                        'avg_qcorr_bam', 'avg_pcorr_bam', 'avg_power_buh', 'avg_power_buh_from_ts', 'avg_t_sup_buh'
+                                    ];
+                                    const system = ['rowid', 'has_time_series', 'time_series_data', 'display_order'];
+                                    
+                                    // Filter to only include existing columns
+                                    const standardFiltered = standard.filter(c => allColumnsList.includes(c));
+                                    const calculatedFiltered = calculated.filter(c => allColumnsList.includes(c));
+                                    const customFiltered = allColumnsList.filter(c => 
+                                        !standard.includes(c) && !calculated.includes(c) && !system.includes(c)
+                                    );
+                                    
+                                    currentColumnOrder = standardFiltered.concat(calculatedFiltered, customFiltered);
+                                }
+                                displayColumnOrder();
+                            });
+                    }
+                });
+        }
+
+        function displayColumnOrder() {
+            const listDiv = document.getElementById('column_order_list');
+            listDiv.innerHTML = '';
+            
+            // Standard columns that must always be first
+            const standardColumns = ['file_name', 'data_set', 'start_time', 'end_time'];
+            
+            // Separate standard columns from others
+            const standardCols = currentColumnOrder.filter(col => standardColumns.includes(col));
+            const otherCols = currentColumnOrder.filter(col => !standardColumns.includes(col));
+            
+            // Display standard columns first (fixed position)
+            standardCols.forEach((colName, index) => {
+                const item = document.createElement('div');
+                item.className = 'list-group-item d-flex justify-content-between align-items-center bg-light';
+                item.dataset.column = colName;
+                
+                item.innerHTML = `
+                    <div class="d-flex align-items-center">
+                        <i class="fas fa-lock text-muted me-2" title="Fixed position - always first"></i>
+                        <code>${colName}</code>
+                        <span class="badge bg-primary ms-2">STANDARD</span>
+                    </div>
+                    <div>
+                        <span class="text-muted small">Fixed position</span>
+                    </div>
+                `;
+                
+                listDiv.appendChild(item);
+            });
+            
+            // Add separator if there are other columns
+            if (otherCols.length > 0 && standardCols.length > 0) {
+                const separator = document.createElement('div');
+                separator.className = 'list-group-item bg-secondary text-white text-center py-1';
+                separator.innerHTML = '<small><strong>Reorderable Columns (Standard columns above are always first)</strong></small>';
+                listDiv.appendChild(separator);
+            }
+            
+            // Display other columns (reorderable)
+            otherCols.forEach((colName, index) => {
+                const actualIndex = standardCols.length + index;
+                const item = document.createElement('div');
+                item.className = 'list-group-item d-flex justify-content-between align-items-center';
+                item.dataset.column = colName;
+                item.style.cursor = 'move';
+                
+                const colInfo = allColumnsList.find(c => c === colName);
+                const colType = colInfo ? (textColumns.includes(colName) ? 'TEXT' : 
+                                          (numericColumns.includes(colName) ? 'NUMERIC' : 'OTHER')) : 'UNKNOWN';
+                
+                const isVisible = isDefaultColumnVisible(colName);
+                const isDeviation = deviationColumns.includes(colName);
+                currentColumnVisibility[colName] = isVisible;
+                
+                const visibilityClass = isVisible ? 'text-success' : 'text-muted';
+                const visibilityIcon = isVisible ? 'fa-eye' : 'fa-eye-slash';
+                const visibilityBadge = isVisible ? 'bg-success' : 'bg-secondary';
+                
+                item.innerHTML = `
+                    <div class="d-flex align-items-center">
+                        <i class="fas fa-grip-vertical text-muted me-2" style="cursor: move;"></i>
+                        <code>${colName}</code>
+                        <span class="badge bg-secondary ms-2">${colType}</span>
+                        ${isDeviation ? '<span class="badge bg-warning ms-2">DEVIATION</span>' : ''}
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="visibility_${colName}" 
+                                   ${isVisible ? 'checked' : ''} 
+                                   onchange="toggleColumnVisibility('${colName}')"
+                                   title="${isVisible ? 'Hide' : 'Show'} column on mean values page">
+                            <label class="form-check-label ${visibilityClass}" for="visibility_${colName}">
+                                <i class="fas ${visibilityIcon}"></i>
+                            </label>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="moveColumnUp(${actualIndex})" ${actualIndex === standardCols.length ? 'disabled' : ''} title="Move up">
+                            <i class="fas fa-arrow-up"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="moveColumnDown(${actualIndex})" ${actualIndex === currentColumnOrder.length - 1 ? 'disabled' : ''} title="Move down">
+                            <i class="fas fa-arrow-down"></i>
+                        </button>
+                    </div>
+                `;
+                
+                // Make draggable
+                item.draggable = true;
+                let draggedIndex = null;
+                
+                item.addEventListener('dragstart', (e) => {
+                    draggedIndex = index;
+                    item.classList.add('dragging');
+                    item.style.opacity = '0.5';
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                
+                item.addEventListener('dragend', (e) => {
+                    item.classList.remove('dragging');
+                    item.style.opacity = '1';
+                    draggedIndex = null;
+                });
+                
+                item.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    
+                    const afterElement = getDragAfterElement(listDiv, e.clientY);
+                    if (afterElement == null) {
+                        listDiv.appendChild(item);
+                    } else {
+                        listDiv.insertBefore(item, afterElement);
+                    }
+                });
+                
+                item.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    if (draggedIndex !== null && draggedIndex !== index) {
+                        // Reorder the array
+                        const draggedItem = currentColumnOrder[draggedIndex];
+                        currentColumnOrder.splice(draggedIndex, 1);
+                        const newIndex = currentColumnOrder.indexOf(colName);
+                        currentColumnOrder.splice(newIndex + (draggedIndex < index ? 1 : 0), 0, draggedItem);
+                        displayColumnOrder();
+                    }
+                });
+                
+                listDiv.appendChild(item);
+            });
+        }
+
+        function getDragAfterElement(container, y) {
+            const draggableElements = [...container.querySelectorAll('.list-group-item:not(.dragging)')];
+            return draggableElements.reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - box.height / 2;
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset: offset, element: child };
+                } else {
+                    return closest;
+                }
+            }, { offset: Number.NEGATIVE_INFINITY }).element;
+        }
+
+        function moveColumnUp(index) {
+            if (index > 0) {
+                [currentColumnOrder[index], currentColumnOrder[index - 1]] = 
+                [currentColumnOrder[index - 1], currentColumnOrder[index]];
+                displayColumnOrder();
+            }
+        }
+
+        function moveColumnDown(index) {
+            if (index < currentColumnOrder.length - 1) {
+                [currentColumnOrder[index], currentColumnOrder[index + 1]] = 
+                [currentColumnOrder[index + 1], currentColumnOrder[index]];
+                displayColumnOrder();
+            }
+        }
+
+        function saveColumnOrder() {
+            const messageDiv = document.getElementById('column_order_message');
+            
+            // Get current order from DOM (excluding separator)
+            const items = Array.from(document.querySelectorAll('#column_order_list .list-group-item'))
+                .filter(item => item.dataset.column) // Only items with column data
+                .map(item => item.dataset.column);
+            
+            // Standard columns are always first, so we only save the order of other columns
+            const standard = ['file_name', 'data_set', 'start_time', 'end_time'];
+            const standardCols = items.filter(col => standard.includes(col));
+            const otherCols = items.filter(col => !standard.includes(col));
+            
+            // Save order: standard columns first, then others
+            const newOrder = standardCols.concat(otherCols);
+            
+            // Save both order and visibility
+            fetch('/save_column_order', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_order: otherCols,  // Only save non-standard columns
+                    column_visibility: currentColumnVisibility
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(messageDiv, data.message + ' (Note: File Name, Data Set, Start Time, End Time will always appear first)', 'success');
+                    currentColumnOrder = newOrder;
+                } else {
+                    showMessage(messageDiv, data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 'Error: ' + error, 'danger');
+            });
+        }
+        
+        function toggleColumnVisibility(colName) {
+            const checkbox = document.getElementById(`visibility_${colName}`);
+            currentColumnVisibility[colName] = checkbox.checked;
+            
+            // Update visual feedback
+            const label = checkbox.nextElementSibling;
+            const icon = label.querySelector('i');
+            if (checkbox.checked) {
+                label.classList.remove('text-muted');
+                label.classList.add('text-success');
+                icon.classList.remove('fa-eye-slash');
+                icon.classList.add('fa-eye');
+            } else {
+                label.classList.remove('text-success');
+                label.classList.add('text-muted');
+                icon.classList.remove('fa-eye');
+                icon.classList.add('fa-eye-slash');
+            }
+        }
+
+        function resetColumnOrder() {
+            if (confirm('Reset column order to default? This will discard your custom ordering.')) {
+                currentColumnOrder = [];
+                loadColumnOrder();
+                const messageDiv = document.getElementById('column_order_message');
+                showMessage(messageDiv, 'Column order reset to default. Click "Save Column Order" to apply.', 'info');
+            }
+        }
+
+        function addFormula(columnName) {
+            const formula = prompt(`Enter the formula for column "${columnName}":\n\nUse column names as variables. Example: avg_heating_capacity_corr / avg_power_input_corr`, '');
+            if (formula && formula.trim()) {
+                saveFormula(columnName, formula.trim());
+            }
+        }
+
+        function editFormula(columnName, currentFormula) {
+            const formula = prompt(`Edit the formula for column "${columnName}":`, currentFormula);
+            if (formula && formula.trim() && formula !== currentFormula) {
+                saveFormula(columnName, formula.trim());
+            }
+        }
+
+        function saveFormula(columnName, formula) {
+            fetch('/save_column_formula', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    column_name: columnName,
+                    formula: formula
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Formula saved successfully! The page will reload to show the updated formula.');
+                    location.reload();
+                } else {
+                    alert('Error saving formula: ' + data.message);
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+        }
+
+        // Bulk Text Input Functions
+        function toggleBulkTextInput() {
+            const table = document.getElementById('bulkTextInputTable');
+            const toggleBtn = document.getElementById('toggleBulkTextBtn');
+            const saveBtn = document.getElementById('saveBulkTextBtn');
+            const exportBtn = document.getElementById('exportBulkTextBtn');
+            
+            if (table.style.display === 'none') {
+                table.style.display = 'block';
+                saveBtn.style.display = 'inline-block';
+                exportBtn.style.display = 'inline-block';
+                toggleBtn.innerHTML = '<i class="fas fa-eye-slash"></i> Hide Bulk Text Input Table';
+            } else {
+                table.style.display = 'none';
+                saveBtn.style.display = 'none';
+                exportBtn.style.display = 'none';
+                toggleBtn.innerHTML = '<i class="fas fa-table"></i> Show Bulk Text Input Table';
+            }
+        }
+        
+        function saveBulkTextInput() {
+            const messageDiv = document.getElementById('bulkTextMessage');
+            const inputs = document.querySelectorAll('.bulk-text-input');
+            const updates = [];
+            
+            inputs.forEach(input => {
+                const rowid = input.dataset.rowid;
+                const column = input.dataset.column;
+                const value = input.value.trim();
+                const row = input.closest('tr');
+                const file_name = row.dataset.file;
+                const data_set = row.dataset.dataset;
+                
+                if (rowid && column) {
+                    updates.push({
+                        rowid: rowid,
+                        column: column,
+                        value: value,
+                        file_name: file_name,
+                        data_set: data_set
+                    });
+                }
+            });
+            
+            if (updates.length === 0) {
+                showMessage(messageDiv, 'No changes to save', 'warning');
+                return;
+            }
+            
+            // Show loading
+            showMessage(messageDiv, `Saving ${updates.length} updates...`, 'info');
+            
+            fetch('/bulk_update_text_columns', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({updates: updates})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(messageDiv, 
+                        `Successfully updated ${data.updated_count} values!`, 
+                        'success');
+                    // Reload page after a short delay to show updated values
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showMessage(messageDiv, 
+                        `Error: ${data.message}`, 
+                        'danger');
+                }
+            })
+            .catch(error => {
+                showMessage(messageDiv, 
+                    `Error: ${error}`, 
+                    'danger');
+            });
+        }
+        
+        function exportBulkTextTemplate() {
+            const rows = document.querySelectorAll('#bulkTextTable tbody tr');
+            const textColumns = Array.from(document.querySelectorAll('#bulkTextTable thead th'))
+                .slice(4) // Skip File Name, Data Set, Start Time, End Time
+                .map(th => th.textContent.trim());
+            
+            // Create CSV content
+            let csv = 'File Name,Data Set,Start Time,End Time,' + textColumns.join(',') + '\n';
+            
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                const file_name = cells[0].textContent.trim();
+                const data_set = cells[1].textContent.trim();
+                const start_time = cells[2].textContent.trim();
+                const end_time = cells[3].textContent.trim();
+                
+                let rowData = `${file_name},${data_set},${start_time},${end_time}`;
+                
+                // Get text column values
+                for (let i = 4; i < cells.length; i++) {
+                    const input = cells[i].querySelector('input');
+                    const value = input ? input.value.trim() : '';
+                    // Escape commas and quotes in CSV
+                    const escapedValue = value.includes(',') || value.includes('"') 
+                        ? `"${value.replace(/"/g, '""')}"` 
+                        : value;
+                    rowData += ',' + escapedValue;
+                }
+                
+                csv += rowData + '\n';
+            });
+            
+            // Download as CSV
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'bulk_text_input_template.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            const messageDiv = document.getElementById('bulkTextMessage');
+            showMessage(messageDiv, 'Template exported! You can edit it in Excel and import back.', 'success');
+        }
+
+        window.addEventListener('load', function() {
+            populateColumnSelects();
+            loadColumnOrder();
+        });
+    </script>
+{% endblock %}
+

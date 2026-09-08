@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Series Details</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h2><i class="fas fa-chart-line"></i> Time Series Details</h2>
+                    <a href="{{ url_for('index') }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> Back to Main
+                    </a>
+                </div>
+
+                <!-- Record Information -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-info-circle"></i> Record Information</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <p><strong>File Name:</strong> {{ record.file_name }}</p>
+                                <p><strong>Data Set:</strong> {{ record.data_set }}</p>
+                                <p><strong>Start Time:</strong> {{ record.start_time | int }}s</p>
+                                <p><strong>End Time:</strong> {{ record.end_time | int }}s</p>
+                            </div>
+                            <div class="col-md-6">
+                                <p><strong>Time Series Status:</strong> 
+                                    {% if record.has_time_series %}
+                                        <span class="badge bg-success">Available in Database</span>
+                                    {% else %}
+                                        <span class="badge bg-warning">Excel Only</span>
+                                    {% endif %}
+                                </p>
+                                <p><strong>Excel File:</strong> 
+                                    {% if excel_file_exists %}
+                                        <span class="badge bg-success">Found</span>
+                                    {% else %}
+                                        <span class="badge bg-danger">Not Found</span>
+                                    {% endif %}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Database Time Series Columns -->
+                {% if record.has_time_series and time_series_columns %}
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-database"></i> Database Time Series Columns ({{ time_series_columns|length }})</h5>
+                        <a href="{{ url_for('update_timeseries', file_name=record.file_name, data_set=record.data_set) }}" 
+                           class="btn btn-warning btn-sm">
+                            <i class="fas fa-sync-alt"></i> Update/Re-import
+                        </a>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            {% for column in time_series_columns %}
+                            <div class="col-md-3 mb-2">
+                                <span class="badge bg-primary">{{ column }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        
+                        <!-- Sample Data Preview -->
+                        {% if time_series_data and time_series_data|length > 0 %}
+                        <hr>
+                        <h6>Sample Data (First 3 rows):</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped">
+                                <thead>
+                                    <tr>
+                                        {% for column in time_series_columns[:10] %}
+                                        <th>{{ column }}</th>
+                                        {% endfor %}
+                                        {% if time_series_columns|length > 10 %}
+                                        <th>...</th>
+                                        {% endif %}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for row in time_series_data[:3] %}
+                                    <tr>
+                                        {% for column in time_series_columns[:10] %}
+                                        <td>{{ row[column] | round(2) if row[column] is number else row[column] }}</td>
+                                        {% endfor %}
+                                        {% if time_series_columns|length > 10 %}
+                                        <td>...</td>
+                                        {% endif %}
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Excel File Columns -->
+                {% if excel_file_exists and excel_columns %}
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-file-excel"></i> Excel File Columns ({{ excel_columns|length }})</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            {% for column in excel_columns %}
+                            <div class="col-md-3 mb-2">
+                                {% if column in time_series_columns %}
+                                    <span class="badge bg-success">{{ column }}</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">{{ column }}</span>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="mt-3">
+                            <small class="text-muted">
+                                <span class="badge bg-success">Green</span> = Available in database | 
+                                <span class="badge bg-secondary">Gray</span> = Only in Excel file
+                            </small>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Missing Time Series -->
+                {% if not record.has_time_series %}
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5><i class="fas fa-exclamation-triangle"></i> No Time Series Data in Database</h5>
+                    </div>
+                    <div class="card-body">
+                        <p>This entry does not have time series data stored in the database. You can import it from the Excel file.</p>
+                        {% if excel_file_exists %}
+                        <button type="button" 
+                                class="btn btn-primary" 
+                                onclick="importTimeSeries('{{ record.file_name }}', '{{ record.data_set }}')">
+                            <i class="fas fa-download"></i> Import Time Series
+                        </button>
+                        {% else %}
+                        <p class="text-danger">Excel file not found. Cannot import time series data.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Actions -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-tools"></i> Actions</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="btn-group" role="group">
+                            <a href="{{ url_for('view_timeseries', file_name=record.file_name, data_set=record.data_set) }}" 
+                               class="btn btn-info">
+                                <i class="fas fa-refresh"></i> Refresh
+                            </a>
+                            {% if record.has_time_series %}
+                            <a href="{{ url_for('update_timeseries', file_name=record.file_name, data_set=record.data_set) }}" 
+                               class="btn btn-warning">
+                                <i class="fas fa-sync-alt"></i> Update Time Series
+                            </a>
+                            {% endif %}
+                            <a href="{{ url_for('index') }}" class="btn btn-secondary">
+                                <i class="fas fa-arrow-left"></i> Back to Main
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function importTimeSeries(fileName, dataSet) {
+            if (confirm('Import time series data for ' + fileName + ', dataset ' + dataSet + '?')) {
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '{{ url_for("import_time_series_route") }}';
+                
+                const fileInput = document.createElement('input');
+                fileInput.type = 'hidden';
+                fileInput.name = 'file_name';
+                fileInput.value = fileName;
+                form.appendChild(fileInput);
+                
+                const datasetInput = document.createElement('input');
+                datasetInput.type = 'hidden';
+                datasetInput.name = 'data_set';
+                datasetInput.value = dataSet;
+                form.appendChild(datasetInput);
+                
+                // Add CSRF token if needed (Flask-WTF)
+                const csrfToken = document.querySelector('meta[name="csrf-token"]');
+                if (csrfToken) {
+                    const csrfInput = document.createElement('input');
+                    csrfInput.type = 'hidden';
+                    csrfInput.name = 'csrf_token';
+                    csrfInput.value = csrfToken.content;
+                    form.appendChild(csrfInput);
+                }
+                
+                document.body.appendChild(form);
+                form.submit();
+            }
+            return false; // Prevent any default behavior
+        }
+    </script>
+</body>
+</html>
+

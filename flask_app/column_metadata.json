@@ -1,0 +1,90 @@
+{
+  "gutegrad_uncorr": {
+    "category": "derived",
+    "formula": "COPUncorrwBUH/((Ts_buh+273.15)/(Ts_buh-avg_t_db))"
+  },
+  "gutegrad_corr": {
+    "category": "derived",
+    "formula": "COPCorrwBUH/((Ts_buh+273.15)/(Ts_buh-avg_t_db))"
+  },
+  "gutegrad_bam_corr": {
+    "category": "derived",
+    "formula": "cop_bam_corr/((avg_t_supply+273.15)/(avg_t_supply-avg_t_db))"
+  },
+  "pump_correction_difference": {
+    "category": "derived",
+    "formula": "cop_corr-cop_bam_corr"
+  },
+  "pump_correction_check": {
+    "category": "derived",
+    "formula": "\"NO\" if abs(pump_correction_difference) > 0.0001 else \"YES\""
+  },
+  "powerbuh": {
+    "category": "derived",
+    "formula": "avg_power_buh if (avg_power_buh is not None and avg_power_buh > 0) else avg_power_buh_from_ts"
+  },
+  "QUncorrwBUH": {
+    "category": "derived",
+    "formula": "powerbuh+avg_heating_capacity_uncorr"
+  },
+  "PUncorrwBUH": {
+    "category": "derived",
+    "formula": "powerbuh+avg_power_input_uncorr"
+  },
+  "COPUncorrwBUH": {
+    "category": "derived",
+    "formula": "QUncorrwBUH/PUncorrwBUH"
+  },
+  "QCorrwBUH": {
+    "category": "derived",
+    "formula": "powerbuh+avg_heating_capacity_corr"
+  },
+  "PCorrwBUH": {
+    "category": "derived",
+    "formula": "powerbuh+avg_power_input_corr"
+  },
+  "COPCorrwBUH": {
+    "category": "derived",
+    "formula": "QCorrwBUH/PCorrwBUH"
+  },
+  "Ts_buh": {
+    "category": "derived",
+    "formula": "max(avg_t_sup_buh, avg_t_supply)"
+  },
+  "cop_carnot_uncorr": {
+    "category": "derived",
+    "formula": "gutegrad_uncorr*(dev_tsup_setpoint+273.15)/(dev_tsup_setpoint-dev_db_setpoint)"
+  },
+  "cop_carnot_corr": {
+    "category": "derived",
+    "formula": "gutegrad_corr*(dev_tsup_setpoint+273.15)/(dev_tsup_setpoint-dev_db_setpoint)"
+  },
+  "cop_carnot_bamm_corr": {
+    "category": "derived",
+    "formula": "gutegrad_bam_corr*(dev_tsup_setpoint+273.15)/(dev_tsup_setpoint-dev_db_setpoint)"
+  },
+  "DTret": {
+    "category": "derived",
+    "formula": "avg_t_return_emu - avg_t_return_calc"
+  },
+  "avg_t_mean_log": {
+    "category": "measured",
+    "formula": "time-average of 20+(TL-TR)/ln((TL-20)/(TR-20)); TL prefers Ts Buh else T_supply_afterBUH else T_supply"
+  },
+  "t_mean_from_avgs": {
+    "category": "measured",
+    "formula": "20+(avg_TL-avg_TR)/ln((avg_TL-20)/(avg_TR-20)) from period-average leaving and return"
+  },
+  "avg_dt_ln": {
+    "category": "measured",
+    "formula": "avg_t_mean_log-20"
+  },
+  "climate": {
+    "category": "measured",
+    "formula": "Average / Warmer / Colder; with application selects Table 3 tsup_set and tmean_set"
+  },
+  "application": {
+    "category": "measured",
+    "formula": "LT / MT / HT; with climate selects Table 3 tsup_set and tmean_set"
+  }
+}

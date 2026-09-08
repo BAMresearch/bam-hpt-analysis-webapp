@@ -1,0 +1,59 @@
+{
+  "DB": {
+    "value": 1.0,
+    "unit": "K",
+    "description": "Dry-bulb temperature deviation band (transient)",
+    "standard_reference": "SN EN 14511-3:2022 Table 6, Interval H"
+  },
+  "WB": {
+    "value": 1.0,
+    "unit": "K",
+    "description": "Wet-bulb temperature deviation band (transient)",
+    "standard_reference": "SN EN 14511-3:2022 Table 6, Interval H"
+  },
+  "Tsup": {
+    "value": 0.5,
+    "unit": "K",
+    "description": "Supply temperature deviation band (transient)",
+    "standard_reference": "SN EN 14511-3:2022 Table 6, Interval H - Arithmetical mean"
+  },
+  "dTreturn": {
+    "lower": -2.0,
+    "upper": 2.0,
+    "unit": "K",
+    "description": "Return temperature difference band (transient): dTreturn = T_return_emu \u2212 T_return_calc",
+    "standard_reference": ""
+  },
+  "Tmean": {
+    "unit": "K",
+    "scope": "cycle_mean",
+    "applies_to": "variable_flow",
+    "band_key": "mean_tmean_k",
+    "description": "Mean water temperature: cycle mean of T_mean_log against the ecodesign Table 3 mean. Variable-flow tests only \u2014 fixed-flow tests run above the Table 3 mean at part load by physics, so they are judged on Tsup instead. No transient band is defined.",
+    "standard_reference": "BAM lab proposal \u2014 the ecodesign draft defines no tolerance for the mean temperature. 0.5 K chosen as the analogue of SN EN 14511-3:2022 Table 6 Interval H (mean supply temperature)."
+  },
+  "mean_db_k": 0.6,
+  "mean_wb_k": 0.4,
+  "mean_tsup_k": 0.5,
+  "mean_tmean_k": 0.5,
+  "mean_q_band_pct": 5.0,
+  "db_pct_red": 5.0,
+  "db_pct_yellow": 1.0,
+  "wb_pct_red": 5.0,
+  "wb_pct_yellow": 1.0,
+  "db_violations_red": 0.0,
+  "wb_violations_red": 0.0,
+  "tsup_pct_red": 5.0,
+  "tsup_pct_yellow": 1.0,
+  "tsup_violations_red": 0.0,
+  "dtreturn_pct_red": 2.0,
+  "dtreturn_pct_yellow": 1.0,
+  "dtreturn_violations_red": 0.0,
+  "mean_q_pct_red": 10.0,
+  "mean_q_pct_yellow": 5.0,
+  "mean_flow_pct": 1.0,
+  "flow_instantaneous_pct": 2.5,
+  "flow_violations_red": 0.0,
+  "flow_pct_red": 5.0,
+  "flow_pct_yellow": 1.0
+}

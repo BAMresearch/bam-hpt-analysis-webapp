@@ -1,0 +1,42 @@
+{
+  "checks": [
+    {
+      "id": "db",
+      "quantity": "T_outdoor (DB)",
+      "applies_when": { "source_medium": "air" }
+    },
+    {
+      "id": "wb",
+      "quantity": "T_outdoor (WB)",
+      "applies_when": { "source_medium": "air", "has_wetbulb": true }
+    },
+    {
+      "id": "tsup",
+      "quantity": "controlled_variable",
+      "applies_when": {}
+    },
+    {
+      "id": "dtreturn",
+      "quantity": "dTreturn",
+      "applies_when": {}
+    },
+    {
+      "id": "flow",
+      "quantity": "flow",
+      "applies_when": { "entry_flow_mode": "fixed" }
+    },
+    {
+      "id": "tmean",
+      "quantity": "T_mean_log",
+      "applies_when": { "entry_flow_mode": "variable" },
+      "setpoint": "tmean_set",
+      "scope": "cycle_mean",
+      "notes": "Ecodesign Table 3 mean water temperature. Variable flow only: the draft allows a higher leaving water temperature provided the mean of the test condition is maintained. Fixed-flow tests keep the Tsup check instead."
+    },
+    {
+      "id": "gas_input",
+      "quantity": "gas_heat_input",
+      "applies_when": { "has_gas_input": true }
+    }
+  ]
+}

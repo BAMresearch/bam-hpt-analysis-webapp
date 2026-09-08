@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Export summary{% endblock %}
+{% block content %}
+<div class="container mt-4" style="max-width: 960px;">
+  <h2>Export summary</h2>
+  <p class="text-muted">
+    Download analysed entries as CSV or Excel
+    ({{ selected_columns|length }} of {{ column_count }} columns selected by default).
+    Open database: <strong>{{ open_database_label }}</strong>
+    · tool version: <strong>{{ tool_version }}</strong>
+  </p>
+
+  <div class="border p-3 mb-3">
+    <form id="exportForm" method="post" action="{{ url_for('export_summary_download') }}">
+      <div class="form-group">
+        <label class="font-weight-bold">Format</label>
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="format" id="fmtCsv" value="csv" checked>
+          <label class="form-check-label" for="fmtCsv">CSV (UTF-8, Excel-friendly BOM)</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="format" id="fmtXlsx" value="xlsx">
+          <label class="form-check-label" for="fmtXlsx">Excel (.xlsx) — sheets <code>summary</code> + <code>meta</code></label>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="font-weight-bold">Row filter</label>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="cop_only" id="copOnly" value="1">
+          <label class="form-check-label" for="copOnly">
+            Export only COP dataset (<code>YES</code>)
+          </label>
+        </div>
+        <small class="form-text text-muted">
+          Off = all entries. On = rows with <code>cop_dataset = YES</code> (case-insensitive).
+          The <code>cop_dataset</code> column is included only if checked below.
+        </small>
+      </div>
+
+      <p class="mb-2">
+        <span class="badge badge-secondary">All entries: {{ total_count }}</span>
+        <span class="badge badge-info">COP YES: {{ cop_yes_count }}</span>
+        <span class="badge badge-light border" id="selectedColBadge">Columns: {{ selected_columns|length }} / {{ column_count }}</span>
+        {% if using_custom_default %}
+        <span class="badge badge-warning">Custom default saved</span>
+        {% endif %}
+      </p>
+
+      <button type="submit" class="btn btn-primary">
+        <i class="fas fa-download"></i> Download
+      </button>
+
+      <div class="mt-3">
+        <button class="btn btn-outline-primary btn-sm" type="button" data-toggle="collapse"
+                data-target="#exportColumnsSection" aria-expanded="false" aria-controls="exportColumnsSection">
+          <i class="fas fa-sliders-h"></i> Advanced: columns
+        </button>
+      </div>
+
+      <div class="collapse mt-3" id="exportColumnsSection">
+        <div class="card card-body" style="background-color: #f8f9fa; border: 2px solid #007bff;">
+          <h5 class="mb-2"><i class="fas fa-cog"></i> Columns included in export</h5>
+          <p class="text-muted small mb-2">
+            Tick or untick columns for this download. <strong>Save as my default</strong> remembers
+            your selection on this computer after you restart the app; it does not change the tool for others.
+            <strong>Reset default</strong> restores all available columns.
+          </p>
+          <p class="text-muted small mb-2">
+            This list is the set of columns the export currently supports.
+            To add a new column that is not listed here (or to change what the tool offers for everyone),
+            ask a maintainer to update the export definition in the WebApp code
+            (<code>flask_app/summary_export.py</code>) — not by editing this page alone.
+          </p>
+          <div class="mb-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnColsAll">Select all</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnColsNone">Select none</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnColsSchema">All available columns</button>
+            <button type="button" class="btn btn-sm btn-success" id="btnSaveDefault">Save as my default</button>
+            <button type="button" class="btn btn-sm btn-outline-warning" id="btnResetDefault">Reset default</button>
+          </div>
+          <div id="exportColsAlert" class="alert d-none py-2" role="alert"></div>
+          {% for group_title, group_cols in column_groups %}
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <strong>{{ group_title }}</strong>
+              <span>
+                <button type="button" class="btn btn-link btn-sm p-0 group-all" data-group="{{ loop.index0 }}">all</button>
+                ·
+                <button type="button" class="btn btn-link btn-sm p-0 group-none" data-group="{{ loop.index0 }}">none</button>
+              </span>
+            </div>
+            <div class="row export-col-group" data-group="{{ loop.index0 }}">
+              {% for col in group_cols %}
+              <div class="col-md-4 col-lg-3">
+                <div class="form-check">
+                  <input class="form-check-input export-col" type="checkbox" name="columns" value="{{ col }}"
+                         id="col_{{ col }}" {% if col in selected_columns %}checked{% endif %}>
+                  <label class="form-check-label small" for="col_{{ col }}"><code>{{ col }}</code></label>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <p class="small text-muted mb-0">
+    The download filename shows whether all rows or only the COP dataset were exported,
+    the tool version, and a timestamp (and a column count if you did not use the usual full set).
+  </p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  const schemaCols = {{ all_columns | tojson }};
+  const boxes = () => Array.from(document.querySelectorAll('.export-col'));
+  const badge = document.getElementById('selectedColBadge');
+  const alertBox = document.getElementById('exportColsAlert');
+
+  function updateBadge() {
+    const n = boxes().filter(b => b.checked).length;
+    badge.textContent = 'Columns: ' + n + ' / ' + schemaCols.length;
+  }
+
+  function setAll(checked) {
+    boxes().forEach(b => { b.checked = checked; });
+    updateBadge();
+  }
+
+  function setGroup(groupIdx, checked) {
+    document.querySelectorAll('.export-col-group[data-group="' + groupIdx + '"] .export-col')
+      .forEach(b => { b.checked = checked; });
+    updateBadge();
+  }
+
+  function showAlert(type, msg) {
+    alertBox.className = 'alert alert-' + type + ' py-2';
+    alertBox.textContent = msg;
+    alertBox.classList.remove('d-none');
+  }
+
+  function selectedValues() {
+    return boxes().filter(b => b.checked).map(b => b.value);
+  }
+
+  function applyList(list) {
+    const set = new Set(list || []);
+    boxes().forEach(b => { b.checked = set.has(b.value); });
+    updateBadge();
+  }
+
+  document.getElementById('btnColsAll').addEventListener('click', () => setAll(true));
+  document.getElementById('btnColsNone').addEventListener('click', () => setAll(false));
+  document.getElementById('btnColsSchema').addEventListener('click', () => applyList(schemaCols));
+  document.querySelectorAll('.group-all').forEach(btn => {
+    btn.addEventListener('click', () => setGroup(btn.dataset.group, true));
+  });
+  document.querySelectorAll('.group-none').forEach(btn => {
+    btn.addEventListener('click', () => setGroup(btn.dataset.group, false));
+  });
+  boxes().forEach(b => b.addEventListener('change', updateBadge));
+
+  document.getElementById('exportForm').addEventListener('submit', function (e) {
+    if (selectedValues().length === 0) {
+      e.preventDefault();
+      showAlert('danger', 'Select at least one column (or use Full schema).');
+      $('#exportColumnsSection').collapse('show');
+    }
+  });
+
+  document.getElementById('btnSaveDefault').addEventListener('click', function () {
+    const cols = selectedValues();
+    if (!cols.length) {
+      showAlert('danger', 'Select at least one column before saving a default.');
+      return;
+    }
+    fetch('{{ url_for("api_export_columns_default") }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ default_columns: cols })
+    }).then(r => r.json()).then(res => {
+      if (res.success) {
+        showAlert('success', res.message || ('Saved default (' + res.columns.length + ' columns).'));
+        updateBadge();
+      } else {
+        showAlert('danger', res.message || 'Failed to save default.');
+      }
+    }).catch(err => showAlert('danger', 'Error: ' + err));
+  });
+
+  document.getElementById('btnResetDefault').addEventListener('click', function () {
+    fetch('{{ url_for("api_export_columns_default") }}', {
+      method: 'DELETE'
+    }).then(r => r.json()).then(res => {
+      if (res.success) {
+        applyList(res.columns || schemaCols);
+            showAlert('info', res.message || 'Default reset to all usual columns.');
+      } else {
+        showAlert('danger', res.message || 'Failed to reset default.');
+      }
+    }).catch(err => showAlert('danger', 'Error: ' + err));
+  });
+
+  updateBadge();
+})();
+</script>
+{% endblock %}

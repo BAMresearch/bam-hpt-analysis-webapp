@@ -1,0 +1,904 @@
+{% extends "base.html" %}
+
+{% block title %}Cycle Extraction{% endblock %}
+
+{% block extra_css %}
+<style>
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  .small-help { color: #6c757d; font-size: 0.85rem; }
+  .table td, .table th { vertical-align: middle; }
+  #chartArea { min-height: 160px; background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px; position: relative; }
+  #chartArea.empty { display: flex; align-items: center; justify-content: center; color: #999; font-size: 1.1rem; }
+  .badge-sugg { background: #007bff; color: #fff; }
+  .badge-manual { background: #28a745; color: #fff; }
+  .btn-xs { padding: .15rem .35rem; font-size: .75rem; }
+  .click-hint { position: absolute; bottom: 8px; right: 14px; background: rgba(52,58,64,.82); color: #fff;
+                 padding: 3px 10px; border-radius: 4px; font-size: .78rem; z-index: 10; pointer-events: none; }
+  #existingCard .table { font-size: .85rem; }
+  /* Side legend aligned with subplot groupings */
+  #chartRowWrap .chart-column { position: relative; min-width: 0; }
+  #sideLegendWrap { flex: 0 0 200px; max-width: 220px; font-size: 11px; align-self: stretch; display: flex; flex-direction: column; }
+  #sideLegendWrap:empty { display: none !important; }
+  .legend-block { padding: 4px 0 8px 0; border-bottom: 1px solid #dee2e6; }
+  .legend-block:last-child { border-bottom: none; }
+  .legend-block-title { font-weight: 600; color: #495057; margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .02em; }
+  .legend-item { cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 2px 0; line-height: 1.25; color: #212529;
+                  -webkit-user-select: none; user-select: none; }
+  .legend-item.legend-off { opacity: 0.4; color: #868e96; }
+  .legend-swatch { width: 14px; height: 5px; border-radius: 1px; flex-shrink: 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header">
+    <h1><i class="fas fa-wave-square"></i> Cycle Extraction</h1>
+    <p class="small-help mb-0">
+      Load an Excel file to visualize time series. Click the plot to set start/end times.
+      Use auto-suggestions, edit them, or define your own cycles. Existing DB entries are shown for comparison.
+    </p>
+  </div>
+
+  <!-- ─── Controls ─── -->
+  <div class="card mb-3">
+    <div class="card-body pb-2">
+      <div class="row align-items-end">
+        <div class="col-md-5">
+          <label class="font-weight-bold mb-1">Excel file</label>
+          <select id="fileSelect" class="form-control form-control-sm">
+            <option value="" selected>Select a file…</option>
+            {% for f in excel_files %}
+              <option value="{{ f }}">{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <button id="loadBtn" class="btn btn-dark btn-sm mt-4" type="button">
+            <i class="fas fa-chart-line"></i> Load data
+          </button>
+        </div>
+        <div class="col-md-2">
+          <label class="font-weight-bold mb-1">Min gap (s)</label>
+          <input id="gapInput" class="form-control form-control-sm" type="number" step="1" value="900">
+        </div>
+        <div class="col-md-2 text-right">
+          <button id="suggestBtn" class="btn btn-primary btn-sm mt-4" type="button">
+            <i class="fas fa-magic"></i> Suggest cycles
+          </button>
+        </div>
+      </div>
+      <p class="small-help mb-0 mt-2">
+        <strong>Suggest cycles</strong> uses <strong>uncorrected</strong> electric power (e.g. <span class="mono">Electric Power Input (without correction)</span> or <span class="mono">Pel_el (uncorr)</span>), finds compressor “off” boundaries, then merges nearby drop shoulders using <strong>Min gap</strong>.
+        Min gap is <em>not</em> a minimum cycle length—it controls merging of timestamps that belong to the same electrical drop; set it shorter than typical pulse spacing if suggestions lump runs together or disappear.
+      </p>
+      <details class="small-help mt-2">
+        <summary class="text-muted" style="cursor:pointer;">Detector details (optional)</summary>
+        <div class="mt-2 pl-3" style="border-left: 3px solid #dee2e6;">
+          <ul class="mb-2 pl-3">
+            <li><strong>Sampling:</strong> on ~10&nbsp;s grids, split mainly on sustained true-off stretches; on 1&nbsp;Hz files, sustained off must be longer (linked to Min gap) so brief defrost-length dips don’t become their own cycles.</li>
+            <li><strong>Start of file:</strong> if the trace clearly starts mid-pulse (high median power before the first long off), the incomplete leading block is skipped.</li>
+            <li><strong>Fallback slopes:</strong> if off-based splitting isn’t enough, scan forward slopes <span class="mono">(P[i]−P[i−1])/Δt</span> on median-smoothed power; look ~40&nbsp;s ahead for a minimum (“trough-ahead”). Effective drop = max(one step, <span class="mono">P[i−1]−trough</span>) so slow 1&nbsp;Hz ramps are still detected.</li>
+            <li><strong>Keep/reject:</strong> a candidate is kept only if power before the step is clearly “on” and either the trough sits in the file’s idle/off band or the pattern looks like staged shut-down (large cumulative drop vs a high-percentile load scale; trough below pre-plateau and nominal on). That filters most high→intermediate dips but keeps gradual ramps.</li>
+            <li><strong>Min gap:</strong> merges nearby shoulder times from the same drop. Among slopes within ~8% of the steepest, the <em>earliest</em> shoulder wins (pure “steepest only” would pick the last step of a staircase). Starts are merged if raw power between them never reaches true idle/off (drops shallow standby wiggles).</li>
+            <li><strong>Stored times:</strong> <strong>Start</strong> is the last plateau point before the drop (<span class="mono">time[i−1]</span>), nudged one median <span class="mono">Δt</span> earlier to line up with the raw chart; the previous cycle’s <strong>End</strong> is the last timestamp strictly before the next start (e.g. 2720&nbsp;s vs 2730&nbsp;s on a 10&nbsp;s grid).</li>
+            <li><strong>Tuning:</strong> if real cycles sit closer than Min gap, they may merge—reduce the gap. If Min gap ≫ shortest off/on spacing, neighbouring shoulders collapse and you may get few suggestions—use a gap well below pulse spacing.</li>
+          </ul>
+        </div>
+      </details>
+      <div id="statusMsg" class="small-help mt-2"></div>
+    </div>
+  </div>
+
+  <!-- ─── Interactive chart + per-panel legends ─── -->
+  <div class="card mb-3">
+    <div class="card-body p-2">
+      <div id="chartRowWrap" class="d-flex align-items-start" style="gap:10px;">
+        <div class="chart-column flex-grow-1">
+          <div id="chartArea" class="empty" style="height:800px;">
+            Select a file and click <b>Load data</b> to view the time series.
+          </div>
+          <div class="click-hint" id="clickHint" style="display:none;">
+            <i class="fas fa-mouse-pointer"></i> Click = set <b>Start</b> &nbsp;|&nbsp; Shift+Click = set <b>End</b>
+          </div>
+        </div>
+        <div id="sideLegendWrap" aria-label="Plot toggles"></div>
+      </div>
+      <div class="small-help mt-1">Each block matches the subplot above→below. Click a line name to show or hide it.</div>
+    </div>
+  </div>
+
+  <!-- ─── Cycle list (suggestions + manual) ─── -->
+  <div class="card mb-3">
+    <div class="card-header d-flex align-items-center justify-content-between py-2">
+      <div>
+        <span class="font-weight-bold">Cycles</span>
+        <span class="small-help ml-2">
+          <span class="badge badge-sugg">auto</span> = algorithm &nbsp;
+          <span class="badge badge-manual">manual</span> = user defined
+          &nbsp;·&nbsp; Set <b>ds</b> per cycle (defaults 1, 2, 3, …) before Apply
+          &nbsp;·&nbsp; Select a <b>unit profile</b> before Apply (required)
+        </span>
+      </div>
+      <div class="d-flex align-items-center">
+        <label class="small-help mb-0 mr-2" for="cycleProfileSelect" title="Applied to every cycle you insert from this file">Unit profile</label>
+        <select id="cycleProfileSelect" class="form-control form-control-sm mr-3" style="width:16rem;">
+          <option value="">(select a unit profile)</option>
+        </select>
+        <button id="addManualBtn" class="btn btn-outline-success btn-sm mr-2" type="button" disabled>
+          <i class="fas fa-plus"></i> Add manual cycle
+        </button>
+        <button id="applyBtn" class="btn btn-success btn-sm" type="button">
+          <i class="fas fa-check"></i> Apply selected to DB
+        </button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height:360px; overflow-y:auto;">
+        <table class="table table-sm table-hover mb-0" id="cycleTable">
+          <thead class="thead-light" style="position:sticky; top:0; z-index:2;">
+            <tr>
+              <th style="width:36px;"><input type="checkbox" id="selectAll" title="Select all"></th>
+              <th style="width:60px;">Type</th>
+              <th class="text-right" style="width:70px;" title="Dataset number stored in the database for this cycle (editable)">ds</th>
+              <th class="text-right" style="width:100px;">Start (s)</th>
+              <th class="text-right" style="width:100px;">End (s)</th>
+              <th class="text-right" style="width:90px;">Duration</th>
+              <th class="text-right" style="width:70px;"
+                  title="Automatic only: heuristic 0–1 score from Pelec drop size vs half the smoothed peak (not a calibrated probability).">Conf</th>
+              <th style="width:60px;"></th>
+              <th style="width:60px;"></th>
+            </tr>
+          </thead>
+          <tbody id="cycleBody">
+            <tr><td colspan="9" class="small-help p-3 text-center">Load data and suggest cycles, or add manual cycles.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Existing entries for comparison ─── -->
+  <div class="card mb-3" id="existingCard" style="display:none;">
+    <div class="card-header py-2">
+      <span class="font-weight-bold">Existing DB entries</span>
+      <span class="small-help ml-2">for the same file — shown as
+        <span style="display:inline-block; width:14px; height:4px; background:rgba(255,193,7,.55); vertical-align:middle;"></span> bands on the plot
+      </span>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive" style="max-height:280px; overflow-y:auto;">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="thead-light" style="position:sticky; top:0; z-index:2;">
+            <tr>
+              <th class="text-right">rowid</th>
+              <th class="text-right">ds</th>
+              <th class="text-right">start</th>
+              <th class="text-right">end</th>
+              <th class="text-right">duration</th>
+              <th>hp</th>
+              <th>test cond</th>
+              <th>indicator / notes</th>
+            </tr>
+          </thead>
+          <tbody id="existingBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="application/json" id="unitProfilesJson">{{ (profiles or []) | tojson }}</script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  /* ── state ── */
+  var _rawData = null;       // { time:[], col1:[], col2:[], ... }
+  var _colList = [];         // [{key, label}]
+  var _fileName = '';
+  var _dataSet = 1;  // only used for suggestion-store scoping in API calls (not per-cycle DB ds)
+  var _cycles = [];
+  var _existingEntries = [];
+  var _nextManualId = 1;
+  var _pendingSt = null;
+
+  /* ── colour palettes ── */
+  var COLORS_AUTO = [
+    'rgba(0,123,255,0.18)', 'rgba(111,66,193,0.18)', 'rgba(23,162,184,0.18)',
+    'rgba(253,126,20,0.18)', 'rgba(32,201,151,0.18)'
+  ];
+  var COLORS_AUTO_BORDER = [
+    'rgba(0,123,255,0.7)', 'rgba(111,66,193,0.7)', 'rgba(23,162,184,0.7)',
+    'rgba(253,126,20,0.7)', 'rgba(32,201,151,0.7)'
+  ];
+  var COLOR_MANUAL = 'rgba(40,167,69,0.20)';
+  var COLOR_MANUAL_BORDER = 'rgba(40,167,69,0.75)';
+  var COLOR_EXISTING = 'rgba(255,193,7,0.18)';
+  var COLOR_EXISTING_BORDER = 'rgba(255,193,7,0.65)';
+  var COLOR_PENDING_LINE = 'rgba(220,53,69,0.85)';
+
+  function esc(s) {
+    return (s||'').toString().replace(/[&<>"']/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function fmt(v, d) { return v == null ? '-' : Number(v).toFixed(d == null ? 0 : d); }
+  function dur(st, et) { var d = et - st; return d >= 3600 ? fmt(d/3600,1)+'h' : fmt(d,0)+'s'; }
+  function status(msg) { document.getElementById('statusMsg').textContent = msg; }
+
+  var _profiles = [];
+  try {
+    _profiles = JSON.parse((document.getElementById('unitProfilesJson') || {}).textContent || '[]') || [];
+  } catch (e) { _profiles = []; }
+
+  function globMatch(name, pat) {
+    var re = new RegExp('^' + String(pat).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+    return re.test(name || '');
+  }
+  function selectedCycleProfileId() {
+    var sel = document.getElementById('cycleProfileSelect');
+    return (sel && sel.value) ? sel.value : null;
+  }
+  function fillCycleProfileSelect() {
+    var sel = document.getElementById('cycleProfileSelect');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = '';
+    var none = document.createElement('option');
+    none.value = '';
+    none.textContent = '(select a unit profile)';
+    sel.appendChild(none);
+    _profiles.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.profile_id;
+      opt.textContent = p.profile_id + (p.display_name && p.display_name !== p.profile_id ? (' — ' + p.display_name) : '');
+      sel.appendChild(opt);
+    });
+    if (keep) sel.value = keep;
+  }
+  function matchProfileForFile(fileName) {
+    var best = '', bestLen = -1;
+    _profiles.forEach(function(p) {
+      (p.filename_patterns || []).forEach(function(pat) {
+        if (globMatch(fileName, pat) && String(pat).length > bestLen) {
+          best = p.profile_id;
+          bestLen = String(pat).length;
+        }
+      });
+    });
+    var sel = document.getElementById('cycleProfileSelect');
+    if (sel) sel.value = best;
+  }
+
+  /** Next free dataset number for a new cycle (1, 2, 3, …). */
+  function nextDefaultDs() {
+    var max = 0;
+    _cycles.forEach(function(c) {
+      var d = Number(c.ds);
+      if (!isNaN(d) && d > max) max = d;
+    });
+    return max + 1;
+  }
+
+  /* ── helper: find column key by partial label match ── */
+  function findKey(substr) {
+    substr = substr.toLowerCase();
+    for (var i = 0; i < _colList.length; i++) {
+      if (_colList[i].label.toLowerCase().indexOf(substr) >= 0) return _colList[i].key;
+    }
+    return null;
+  }
+  function findKeyExact(label) {
+    for (var i = 0; i < _colList.length; i++) {
+      if (_colList[i].label === label) return _colList[i].key;
+    }
+    return null;
+  }
+
+  function sanitizeColName(label) {
+    return String(label).replace(/ /g, '_').replace(/\(/g, '').replace(/\)/g, '').replace(/\//g, '_').replace(/\./g, '_');
+  }
+
+  /** Rebuild minimal column metadata from payload keys (legacy / empty columns array). */
+  function rebuildColListFromRaw() {
+    if (!_rawData) return [];
+    var out = [];
+    Object.keys(_rawData).forEach(function(k) {
+      if (k === 'time') return;
+      out.push({ key: k, label: k });
+    });
+    return out;
+  }
+
+  /**
+   * Resolve which key in _rawData corresponds to an Excel-style label.
+   * Works when `columns` from the server is missing and for short aliases (pelec / dtreturn).
+   */
+  function resolveDataKey(findLabel) {
+    if (!_rawData) return null;
+    var k0 = findKeyExact(findLabel) || findKey(findLabel);
+    if (k0 && _rawData[k0] != null) return k0;
+
+    var sk = sanitizeColName(findLabel);
+    if (_rawData[sk] != null) return sk;
+
+    var target = sk.toLowerCase();
+    var keys = Object.keys(_rawData);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i] === 'time') continue;
+      if (String(keys[i]).toLowerCase() === target) return keys[i];
+      if (sanitizeColName(keys[i]).toLowerCase() === target) return keys[i];
+    }
+
+    var fl = String(findLabel).toLowerCase();
+    for (var j = 0; j < keys.length; j++) {
+      if (keys[j] === 'time') continue;
+      if (String(keys[j]).toLowerCase().indexOf(fl) >= 0 && _rawData[keys[j]] != null) return keys[j];
+    }
+
+    if (fl.indexOf('electric power input (without correction)') >= 0 && _rawData.pelec) return 'pelec';
+    if ((fl === 'dtreturn' || fl.indexOf('d t return') >= 0) && _rawData.dtreturn) return 'dtreturn';
+    if (fl.indexOf('heating capacity (without corr)') >= 0 && _rawData.heating_uncorr) return 'heating_uncorr';
+    return null;
+  }
+
+  /* ── subplot trace definitions ── */
+  /** Whether the trace is drawn (not hidden / legendonly). */
+  function traceDrawn(vis) {
+    if (vis === false) return false;
+    if (vis === 'legendonly') return false;
+    return true;
+  }
+
+  function buildTraces() {
+    if (!_rawData) return { traces: [], traceMeta: [] };
+    var T = _rawData.time;
+    var traces = [];
+    var traceMeta = [];
+
+    // Trace definitions: row 1 = Power/Heating/Q, row 2 = Temperatures, row 3 = Flow/Pressure
+    // rightAxis = true puts the trace on the overlaying right y-axis of that row
+    var defs = [
+      // Row 1: Power, Heating & Q
+      {row:1, label:'Pelec (uncorr.)', findLabel:'Electric Power Input (without correction)', color:'#343a40', vis:true},
+      {row:1, label:'Heating (uncorr.)', findLabel:'Heating Capacity (without corr)', color:'#e74c3c', vis:true},
+      {row:1, label:'Pelec (corr.)', findLabel:'Electric Power Input (corrected)', color:'#6c757d', vis:'legendonly'},
+      {row:1, label:'Heating (corr.)', findLabel:'Heating Capacity (corrected)', color:'#e08283', vis:'legendonly'},
+      {row:1, label:'Q_HB', findLabel:'Q_HB', color:'#9b59b6', vis:'legendonly'},
+      {row:1, label:'Q_BA', findLabel:'Q_BA', color:'#e67e22', vis:'legendonly'},
+      // Row 2: Temperatures (left) + dTreturn (right axis)
+      {row:2, label:'T_supply', findLabel:'T_supply', color:'#2980b9', vis:true},
+      {row:2, label:'T_return_emu', findLabel:'T_return_emu', color:'#8e44ad', vis:'legendonly'},
+      {row:2, label:'T_mean_log', findLabel:'T_mean_log', color:'#1abc9c', vis:'legendonly'},
+      {row:2, label:'T_return_calc', findLabel:'T_return_calc', color:'#c0392b', vis:'legendonly'},
+      {row:2, label:'T_outdoor (DB)', findLabel:'T_outdoor (DB)', color:'#27ae60', vis:'legendonly'},
+      {row:2, label:'T_outdoor (WB)', findLabel:'T_outdoor (WB)', color:'#2ecc71', vis:'legendonly'},
+      {row:2, label:'T_B_calc', findLabel:'T_B_calc', color:'#f39c12', vis:'legendonly'},
+      {row:2, label:'T_H_calc', findLabel:'T_H_calc', color:'#e67e22', vis:'legendonly'},
+      {row:2, label:'dTreturn (K)', findLabel:'dTreturn', color:'#000000', vis:true, rightAxis:true},
+      // Row 3: Flow (left) & Pressure (right)
+      {row:3, label:'volume flow', findLabel:'volume flow', color:'#3498db', vis:true},
+      {row:3, label:'mass flow', findLabel:'mass flow', color:'#1abc9c', vis:'legendonly'},
+      {row:3, label:'Pressure diff.', findLabel:'Pressure difference', color:'#e74c3c', vis:true, rightAxis:true},
+    ];
+
+    // yaxis mapping: row1→y, row1_right→(not used), row2→y2, row2_right→y5, row3→y3, row3_right→y6
+    defs.forEach(function(d) {
+      var key = resolveDataKey(d.findLabel);
+      if (!key || _rawData[key] == null) return;
+      var yaxis;
+      if (d.row === 1) yaxis = 'y';
+      else if (d.row === 2 && !d.rightAxis) yaxis = 'y2';
+      else if (d.row === 2 && d.rightAxis) yaxis = 'y5';
+      else if (d.row === 3 && !d.rightAxis) yaxis = 'y3';
+      else if (d.row === 3 && d.rightAxis) yaxis = 'y6';
+      traceMeta.push({ row: d.row, label: d.label, color: d.color, traceIndex: traces.length });
+      traces.push({
+        x: T, y: _rawData[key],
+        type: 'scattergl', mode: 'lines',
+        name: d.label,
+        line: {color: d.color, width: 1.1},
+        visible: d.vis,
+        showlegend: false,
+        yaxis: yaxis,
+        xaxis: 'x',
+      });
+    });
+    return { traces: traces, traceMeta: traceMeta };
+  }
+
+  /** HTML legend blocks beside the stacked subplots — one block per subplot row. */
+  function renderSidebarLegends(traces, traceMeta) {
+    var wrap = document.getElementById('sideLegendWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!traceMeta.length) return;
+
+    var sections = [
+      { row: 1, title: 'Top · Power / heating / Q' },
+      { row: 2, title: 'Middle · Temperatures & dTreturn' },
+      { row: 3, title: 'Bottom · Flow & pressure' },
+    ];
+
+    sections.forEach(function(sec) {
+      var block = document.createElement('div');
+      block.className = 'legend-block';
+      var ht = document.createElement('div');
+      ht.className = 'legend-block-title';
+      ht.textContent = sec.title;
+      block.appendChild(ht);
+
+      traceMeta.forEach(function(tm) {
+        if (tm.row !== sec.row) return;
+        var idx = tm.traceIndex;
+        var vis0 = traces[idx] && traces[idx].visible;
+        var rowEl = document.createElement('div');
+        rowEl.className = 'legend-item' + (traceDrawn(vis0) ? '' : ' legend-off');
+        rowEl.setAttribute('data-trace-index', String(idx));
+
+        var sw = document.createElement('span');
+        sw.className = 'legend-swatch';
+        sw.style.background = tm.color;
+
+        rowEl.appendChild(sw);
+        var lab = document.createElement('span');
+        lab.textContent = tm.label;
+        rowEl.appendChild(lab);
+
+        rowEl.addEventListener('click', function() {
+          var gd = document.getElementById('chartArea');
+          var t = gd.data[idx];
+          var cur = t.visible;
+          var next = traceDrawn(cur) ? false : true;
+          Plotly.restyle(gd, { visible: next }, [idx]);
+          rowEl.classList.toggle('legend-off', !traceDrawn(next));
+        });
+        block.appendChild(rowEl);
+      });
+      wrap.appendChild(block);
+    });
+  }
+
+  /* ── Plotly chart ── */
+  function renderChart() {
+    var area = document.getElementById('chartArea');
+    var sideLegend = document.getElementById('sideLegendWrap');
+    var hint = document.getElementById('clickHint');
+
+    if (!_rawData) {
+      area.classList.add('empty');
+      area.innerHTML = '';
+      area.textContent = 'No data loaded.';
+      if (hint) hint.style.display = 'none';
+      if (sideLegend) { sideLegend.innerHTML = ''; }
+      return;
+    }
+
+    area.classList.remove('empty');
+    area.innerHTML = '';
+    if (hint) hint.style.display = '';
+
+    var built = buildTraces();
+    var traces = built.traces;
+    var traceMeta = built.traceMeta.slice();
+
+    if (traces.length === 0 && _rawData && _rawData.time && _rawData.time.length) {
+      status('Charts: no traces matched column names. Showing Pelec/heating if present.');
+      var pk = resolveDataKey('Electric Power Input (without correction)');
+      var hk = resolveDataKey('Heating Capacity (without corr)');
+      if (!hk && _rawData.heating_uncorr) hk = 'heating_uncorr';
+      if (pk && _rawData[pk]) {
+        traceMeta.push({ row: 1, label: 'Pelec (fallback)', color: '#343a40', traceIndex: traces.length });
+        traces.push({ x: _rawData.time, y: _rawData[pk], type: 'scattergl', mode: 'lines', name: 'Pelec (fallback)',
+          yaxis: 'y', xaxis: 'x', showlegend: false, visible: true });
+      }
+      if (hk && _rawData[hk]) {
+        traceMeta.push({ row: 1, label: 'Heating (fallback)', color: '#e74c3c', traceIndex: traces.length });
+        traces.push({ x: _rawData.time, y: _rawData[hk], type: 'scattergl', mode: 'lines', name: 'Heating (fallback)',
+          yaxis: 'y', xaxis: 'x', showlegend: false, visible: true });
+      }
+    }
+
+    // Shapes: existing entries (yellow) + suggestions (blue/green) + pending line
+    var shapes = [];
+    var annotations = [];
+
+    _existingEntries.forEach(function(e) {
+      shapes.push({ type:'rect', xref:'x', yref:'paper', x0:e.start_time, x1:e.end_time, y0:0, y1:1,
+        fillcolor: COLOR_EXISTING, line:{color: COLOR_EXISTING_BORDER, width:1, dash:'dot'}, layer:'below' });
+    });
+
+    _cycles.forEach(function(c, i) {
+      var fill = c.type === 'manual' ? COLOR_MANUAL : COLORS_AUTO[i % COLORS_AUTO.length];
+      var border = c.type === 'manual' ? COLOR_MANUAL_BORDER : COLORS_AUTO_BORDER[i % COLORS_AUTO_BORDER.length];
+      shapes.push({ type:'rect', xref:'x', yref:'paper', x0:c.st, x1:c.et, y0:0, y1:1,
+        fillcolor: fill, line:{color: border, width:1.5}, layer:'below' });
+      annotations.push({ x:(c.st+c.et)/2, y:1.01, xref:'x', yref:'paper',
+        text:'#'+(i+1), showarrow:false, font:{size:9, color:'#555'} });
+    });
+
+    if (_pendingSt !== null) {
+      shapes.push({ type:'line', xref:'x', yref:'paper', x0:_pendingSt, x1:_pendingSt, y0:0, y1:1,
+        line:{color:COLOR_PENDING_LINE, width:2, dash:'dash'} });
+      annotations.push({ x:_pendingSt, y:1.03, xref:'x', yref:'paper',
+        text:'START', showarrow:false, font:{size:9, color:'#dc3545'} });
+    }
+
+    // 3-row subplot layout
+    var gap = 0.05;
+    var rowH = (1.0 - 2*gap) / 3;
+    function yDomain(row) { // row 1=top, 3=bottom
+      var top = 1.0 - (row-1)*(rowH+gap);
+      return [top - rowH, top];
+    }
+
+    var layout = {
+      margin: {t:25, b:45, l:60, r:72},
+      height: 780,
+      shapes: shapes,
+      annotations: annotations,
+      hovermode: 'x unified',
+      dragmode: 'zoom',
+      showlegend: false,
+      // Shared x-axis anchored to bottom row
+      xaxis: {domain:[0,1], anchor:'y3', title:'time_elapsed (s)', showgrid:true, gridcolor:'#eee'},
+      // Row 1: Power / Heating / Q
+      yaxis:  {domain:yDomain(1), title:'Power / Heating (kW)', showgrid:true, gridcolor:'#eee'},
+      // Row 2 left: Temperatures (°C)
+      yaxis2: {domain:yDomain(2), title:'Temperature (°C)', showgrid:true, gridcolor:'#eee'},
+      // Row 2 right: dTreturn (K)
+      yaxis5: {domain:yDomain(2), title: { text: 'dTreturn (K)', font: { color: '#000000', size: 12 } },
+               side: 'right', overlaying: 'y2', showgrid: false,
+               tickfont: { color: '#000000' } },
+      // Row 3 left: Flow
+      yaxis3: {domain:yDomain(3), title:'Flow', showgrid:true, gridcolor:'#eee'},
+      // Row 3 right: Pressure
+      yaxis6: {domain:yDomain(3), title: { text: 'Pressure (bar)', font: { color: '#e74c3c', size: 12 } },
+               side: 'right', overlaying: 'y3', showgrid: false,
+               tickfont: { color: '#e74c3c' } },
+    };
+
+    // Link all x-axes so zoom/pan syncs
+    Plotly.newPlot(area, traces, layout, {
+      responsive: true, scrollZoom: true,
+      modeBarButtonsToAdd: ['toggleSpikelines'],
+      displaylogo: false
+    }).then(function() {
+      renderSidebarLegends(traces, traceMeta);
+    });
+
+    area.on('plotly_click', function(evData) {
+      if (!evData || !evData.points || !evData.points.length) return;
+      var x = evData.points[0].x;
+      var isShift = evData.event && evData.event.shiftKey;
+      if (isShift) {
+        if (_pendingSt !== null && x > _pendingSt) {
+          addManualCycle(_pendingSt, x);
+          _pendingSt = null;
+          renderChart(); renderCycleTable();
+        } else {
+          status('Shift+Click to set end — must be after the start. Click first to set start.');
+        }
+      } else {
+        _pendingSt = x;
+        renderChart();
+        status('Start set at ' + fmt(x,1) + 's. Now Shift+Click to set the end.');
+      }
+    });
+  }
+
+  /* ── Load data ── */
+  async function loadData() {
+    _fileName = document.getElementById('fileSelect').value;
+    if (!_fileName) { status('Select a file first.'); return; }
+    status('Loading data…');
+    var resp = await fetch('/api/cycle_extract/load_data', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet })
+    });
+    var d = await resp.json();
+    if (!d.success) { status('Error: ' + d.message); return; }
+    _rawData = d.data;
+    _colList = d.columns || [];
+    if (!_colList.length && _rawData) _colList = rebuildColListFromRaw();
+    var ncol = _colList.length;
+    status('Loaded ' + (d.returned_points || 0) + ' pts (of ' + (d.total_points || 0) + '). '
+      + ncol + ' trace column(s) mapped.');
+    document.getElementById('addManualBtn').disabled = false;
+    matchProfileForFile(_fileName);
+    _cycles = [];
+    renderChart();
+    loadExistingEntries();
+  }
+
+  /* ── Existing entries ── */
+  async function loadExistingEntries() {
+    var resp = await fetch('/api/cycle_extract/existing_entries', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName })
+    });
+    var d = await resp.json();
+    _existingEntries = (d.success && d.entries) ? d.entries : [];
+    var card = document.getElementById('existingCard');
+    var body = document.getElementById('existingBody');
+    if (_existingEntries.length === 0) { card.style.display = 'none'; renderChart(); return; }
+    card.style.display = '';
+    body.innerHTML = '';
+    _existingEntries.forEach(function(e) {
+      var tr = document.createElement('tr');
+      var notes = [e.indicator_notes||'', e.notes||''].filter(function(x){return x;}).join(' | ');
+      tr.innerHTML =
+        '<td class="text-right mono">'+e.rowid+'</td>'+
+        '<td class="text-right mono">'+fmt(e.data_set,0)+'</td>'+
+        '<td class="text-right mono">'+fmt(e.start_time,0)+'</td>'+
+        '<td class="text-right mono">'+fmt(e.end_time,0)+'</td>'+
+        '<td class="text-right mono">'+dur(e.start_time,e.end_time)+'</td>'+
+        '<td class="mono">'+esc(e.hp_id)+'</td>'+
+        '<td class="mono">'+esc(e.dev_test_condition)+'</td>'+
+        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(notes)+'">'+esc(notes)+'</td>';
+      body.appendChild(tr);
+    });
+    renderChart();
+  }
+
+  /* ── Cycle management ── */
+  function addManualCycle(st, et) {
+    _cycles.push({
+      id:'manual_'+(_nextManualId++), type:'manual',
+      st:Math.round(st), et:Math.round(et), conf:null,
+      ds: nextDefaultDs()
+    });
+  }
+  function addManualCycleEmpty() {
+    if (!_rawData) return;
+    var t = _rawData.time;
+    var lo = t[0]||0, hi = t[t.length-1]||0, mid = (lo+hi)/2;
+    _cycles.push({
+      id:'manual_'+(_nextManualId++), type:'manual',
+      st:Math.round(mid-500), et:Math.round(mid+500), conf:null,
+      ds: nextDefaultDs()
+    });
+    renderCycleTable(); renderChart();
+  }
+  function removeCycle(idx) { _cycles.splice(idx,1); renderCycleTable(); renderChart(); }
+
+  /* ── Suggest cycles ── */
+  async function suggestCycles() {
+    _fileName = document.getElementById('fileSelect').value || _fileName;
+    if (!_fileName) { status('Select a file first. Load data optional for suggestions.'); return; }
+    var gap = parseFloat(document.getElementById('gapInput').value || '900');
+    status('Detecting cycles…');
+    var resp = await fetch('/api/cycle_extract/suggest', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet, min_gap_s: gap })
+    });
+    var d = await resp.json();
+    if (!d.success) { status('Error: '+d.message); return; }
+    status('Detection done ('+( d.count||0)+' cycles). Loading list…');
+    var resp2 = await fetch('/api/cycle_extract/list', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet })
+    });
+    var d2 = await resp2.json();
+    var sugg = (d2.success && d2.suggestions) ? d2.suggestions : [];
+    _cycles = _cycles.filter(function(c){ return c.type==='manual'; });
+    sugg.forEach(function(s) {
+      _cycles.push({
+        id:'sugg_'+s.id, db_id:s.id, type:'auto',
+        st:s.start_time, et:s.end_time,
+        conf:s.confidence, drop_mag:s.pelec_drop_mag,
+        ds: nextDefaultDs()
+      });
+    });
+    renderCycleTable(); renderChart();
+    status('Found '+sugg.length+' auto suggestions'+(_cycles.length>sugg.length?' + '+(_cycles.length-sugg.length)+' manual':'')+'.');
+  }
+
+  /* ── Render cycle table ── */
+  function renderCycleTable() {
+    var body = document.getElementById('cycleBody');
+    body.innerHTML = '';
+    if (_cycles.length === 0) {
+      body.innerHTML = '<tr><td colspan="9" class="small-help p-3 text-center">No cycles yet. Click the plot or use Suggest cycles.</td></tr>';
+      return;
+    }
+    _cycles.forEach(function(c, idx) {
+      if (c.ds == null || c.ds === '' || isNaN(Number(c.ds))) c.ds = idx + 1;
+      var tr = document.createElement('tr');
+      tr.dataset.idx = idx;
+      var badge = c.type==='auto' ? '<span class="badge badge-sugg">auto</span>' : '<span class="badge badge-manual">manual</span>';
+      tr.innerHTML =
+        '<td><input type="checkbox" class="cyc-check" checked></td>'+
+        '<td>'+badge+'</td>'+
+        '<td class="text-right"><input class="form-control form-control-sm mono cyc-ds" type="number" step="any" value="'+Number(c.ds)+'" title="Dataset number for this cycle"></td>'+
+        '<td class="text-right"><input class="form-control form-control-sm mono cyc-st" type="number" step="1" value="'+Math.round(c.st)+'"></td>'+
+        '<td class="text-right"><input class="form-control form-control-sm mono cyc-et" type="number" step="1" value="'+Math.round(c.et)+'"></td>'+
+        '<td class="text-right mono cyc-dur">'+dur(c.st,c.et)+'</td>'+
+        '<td class="text-right mono">'+(c.conf!=null?fmt(c.conf,2):'-')+'</td>'+
+        '<td><button class="btn btn-outline-primary btn-xs cyc-focus" title="Zoom to this cycle"><i class="fas fa-search-plus"></i></button></td>'+
+        '<td><button class="btn btn-outline-danger btn-xs cyc-del" title="Remove"><i class="fas fa-times"></i></button></td>';
+      body.appendChild(tr);
+    });
+    wireCycleButtons();
+  }
+
+  function wireCycleButtons() {
+    document.querySelectorAll('#cycleBody .cyc-del').forEach(function(btn) {
+      btn.addEventListener('click', function(ev) {
+        ev.preventDefault(); ev.stopPropagation();
+        removeCycle(parseInt(btn.closest('tr').dataset.idx,10));
+      });
+    });
+    document.querySelectorAll('#cycleBody .cyc-focus').forEach(function(btn) {
+      btn.addEventListener('click', function(ev) {
+        ev.preventDefault(); ev.stopPropagation();
+        var c = _cycles[parseInt(btn.closest('tr').dataset.idx,10)];
+        if (!c) return;
+        var pad = Math.max(120, (c.et-c.st)*0.15);
+        Plotly.relayout('chartArea', {'xaxis.range':[c.st-pad, c.et+pad]});
+      });
+    });
+    document.querySelectorAll('#cycleBody .cyc-st, #cycleBody .cyc-et').forEach(function(inp) {
+      inp.addEventListener('change', function() {
+        var tr = inp.closest('tr');
+        var idx = parseInt(tr.dataset.idx,10);
+        var c = _cycles[idx]; if (!c) return;
+        c.st = parseFloat(tr.querySelector('.cyc-st').value) || c.st;
+        c.et = parseFloat(tr.querySelector('.cyc-et').value) || c.et;
+        var durCell = tr.querySelector('.cyc-dur');
+        if (durCell) durCell.textContent = dur(c.st, c.et);
+        renderChart();
+      });
+    });
+    document.querySelectorAll('#cycleBody .cyc-ds').forEach(function(inp) {
+      inp.addEventListener('change', function() {
+        var tr = inp.closest('tr');
+        var idx = parseInt(tr.dataset.idx,10);
+        var c = _cycles[idx]; if (!c) return;
+        var v = parseFloat(tr.querySelector('.cyc-ds').value);
+        c.ds = isNaN(v) ? c.ds : v;
+      });
+    });
+  }
+
+  /* ── Apply selected to DB ── */
+  async function applySelected() {
+    var applyBtn = document.getElementById('applyBtn');
+    _fileName = document.getElementById('fileSelect').value || _fileName;
+    var rows = Array.from(document.querySelectorAll('#cycleBody tr'));
+    var selected = [];
+    rows.forEach(function(tr) {
+      var cb = tr.querySelector('.cyc-check');
+      if (!cb || !cb.checked) return;
+      var idx = parseInt(tr.dataset.idx,10);
+      var c = _cycles[idx]; if (!c) return;
+      var dsInp = tr.querySelector('.cyc-ds');
+      var dsVal = dsInp ? parseFloat(dsInp.value) : Number(c.ds);
+      if (isNaN(dsVal)) dsVal = idx + 1;
+      c.ds = dsVal;
+      selected.push({
+        c:c,
+        st:parseFloat(tr.querySelector('.cyc-st').value),
+        et:parseFloat(tr.querySelector('.cyc-et').value),
+        ds: dsVal
+      });
+    });
+    if (selected.length===0) { status('Select at least one cycle.'); return; }
+    if (!selectedCycleProfileId()) {
+      status('Please select a unit profile before applying.');
+      var sel = document.getElementById('cycleProfileSelect');
+      if (sel) { sel.focus(); sel.classList.add('is-invalid'); }
+      return;
+    }
+
+    var autoIds=[], autoEdits={}, manualEntries=[];
+    selected.forEach(function(s) {
+      if (s.c.type==='auto' && s.c.db_id) {
+        autoIds.push(s.c.db_id);
+        autoEdits[String(s.c.db_id)] = {start_time:s.st, end_time:s.et, data_set:s.ds};
+      } else {
+        manualEntries.push({file_name:_fileName, data_set:s.ds, start_time:s.st, end_time:s.et});
+      }
+    });
+
+    status('Applying '+selected.length+' cycles…');
+    if (applyBtn) applyBtn.disabled = true;
+    var totalAdded=0, totalSkipped=0, errors=[];
+
+    function fmtApplyResponse(r, label) {
+      if (!r || r.success !== true) {
+        var msg = (r && r.message) ? r.message : (label + ' failed');
+        errors.push(msg);
+        return;
+      }
+      totalAdded += r.added || 0;
+      totalSkipped += r.skipped || 0;
+      if (r.errors && r.errors.length) errors = errors.concat(r.errors);
+      if (r.notices && r.notices.length) {
+        r.notices.forEach(function(n) {
+          if (errors.indexOf('Note: ' + n) < 0) errors.push('Note: ' + n);
+        });
+      }
+      if (r.skipped_duplicate_details && r.skipped_duplicate_details.length) {
+        var bits = r.skipped_duplicate_details.map(function(d) {
+          return 'results rowid ' + d.existing_rowid + ' (' + Math.round(d.start_time) + '–' + Math.round(d.end_time) + ' s)';
+        });
+        errors.push('Already in database: ' + bits.join('; '));
+      }
+    }
+
+    try {
+      if (autoIds.length>0) {
+        var resp1 = await fetch('/api/cycle_extract/apply', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({suggestion_ids:autoIds, edits:autoEdits, profile_id: selectedCycleProfileId()})});
+        var r1 = await resp1.json().catch(function(){ return { success:false, message:'Invalid JSON from server (HTTP '+resp1.status+')' }; });
+        fmtApplyResponse(r1, 'Apply suggestions');
+      }
+      if (manualEntries.length>0) {
+        var resp2 = await fetch('/api/cycle_extract/add_manual', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({entries:manualEntries, profile_id: selectedCycleProfileId()})});
+        var r2 = await resp2.json().catch(function(){ return { success:false, message:'Invalid JSON from server (HTTP '+resp2.status+')' }; });
+        if (!r2 || r2.success !== true) {
+          errors.push((r2 && r2.message) ? r2.message : 'Add manual failed');
+        } else {
+          totalAdded += r2.added || 0;
+          totalSkipped += r2.skipped || 0;
+          if (r2.errors && r2.errors.length) errors = errors.concat(r2.errors);
+          if (r2.notices && r2.notices.length) {
+            r2.notices.forEach(function(n) {
+              if (errors.indexOf('Note: ' + n) < 0) errors.push('Note: ' + n);
+            });
+          }
+        }
+      }
+    } catch (e) {
+      errors.push(e && e.message ? e.message : String(e));
+      status('Apply failed: ' + errors[errors.length-1]);
+      loadExistingEntries();
+      return;
+    } finally {
+      if (applyBtn) applyBtn.disabled = false;
+    }
+
+    if (totalAdded > 0) {
+      var noteBits = errors.filter(function(e){ return String(e).indexOf('Note: ') === 0; });
+      if (noteBits.length) {
+        status('Added '+totalAdded+'. Notes: '+noteBits.join(' | ')+' Opening mean-values page…');
+      } else {
+        status('Added '+totalAdded+'. Opening mean-values page to confirm metadata (same as Add Data)…');
+      }
+      window.location.href = '/';
+      return;
+    }
+    var msg = 'Done: added '+totalAdded+', skipped '+totalSkipped+'.';
+    if (errors.length)
+      msg += ' ' + errors.join(' ');
+    status(msg.trim());
+    loadExistingEntries();
+  }
+
+  /* ── Init ── */
+  document.addEventListener('DOMContentLoaded', function() {
+    fillCycleProfileSelect();
+    document.getElementById('loadBtn').addEventListener('click', function(){ loadData(); });
+    document.getElementById('fileSelect').addEventListener('change', function() {
+      matchProfileForFile(this.value);
+    });
+    document.getElementById('cycleProfileSelect').addEventListener('change', function() {
+      this.classList.remove('is-invalid');
+    });
+    document.getElementById('suggestBtn').addEventListener('click', function(){ suggestCycles(); });
+    document.getElementById('addManualBtn').addEventListener('click', function(){ addManualCycleEmpty(); });
+    document.getElementById('applyBtn').addEventListener('click', function(){ applySelected(); });
+    document.getElementById('selectAll').addEventListener('change', function() {
+      var chk = this.checked;
+      document.querySelectorAll('#cycleBody .cyc-check').forEach(function(cb){ cb.checked=chk; });
+    });
+  });
+
+})();
+</script>
+{% endblock %}

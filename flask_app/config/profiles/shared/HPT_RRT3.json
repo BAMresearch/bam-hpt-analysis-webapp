@@ -1,0 +1,14 @@
+{
+  "profile_id": "HPT_RRT3",
+  "display_name": "HPT RRT3 placeholder (water-to-water, ~20 kW, fixed flow)",
+  "owner": "HPT",
+  "unit_type": "water_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": 20.0,
+  "flow_type": "mass",
+  "flow_set_value": null,
+  "flow_mode": "fixed",
+  "wb_rule": "none",
+  "filename_patterns": ["HPT_RRT3*"],
+  "notes": "Public placeholder — type is a field (water_water); id stays HPT_RRT3 if type changes. Set climate and application per test (no BAM Average/MT default)."
+}

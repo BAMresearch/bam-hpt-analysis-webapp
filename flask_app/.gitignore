@@ -1,0 +1,96 @@
+# Sensitive Data - NEVER commit these
+*.xlsx
+*.xls
+*.csv
+*.txt
+data/
+excel_files/
+raw_data/
+sensitive_data/
+
+# Keep version history files (these are safe to commit)
+# app.py - earlier version (keep for reference)
+# index-copy.html - earlier version (keep for reference)
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+results.db
+
+# Configuration files with sensitive paths
+config.json
+secrets.json
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+runlog.txt
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Flask specific
+instance/
+.webassets-cache
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Backup files
+*.bak
+*.backup

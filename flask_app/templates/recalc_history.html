@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recalculation History</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        .container { padding: 20px; }
+        .table { font-size: 0.9rem; }
+        .filters { margin-bottom: 15px; }
+    </style>
+ </head>
+ <body>
+  <div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3 class="mb-0">Recalculation History</h3>
+      <a class="btn btn-secondary btn-sm" href="{{ url_for('index') }}">Back to Data</a>
+    </div>
+
+    <form class="filters form-inline mb-3" method="GET" action="{{ url_for('recalc_history') }}">
+      <div class="form-group mr-2">
+        <label class="mr-2">File:</label>
+        <input type="text" class="form-control" name="file_name" value="{{ file_filter }}" placeholder="Exact filename">
+      </div>
+      <div class="form-group mr-2">
+        <label class="mr-2">Status:</label>
+        <select class="form-control" name="status">
+          <option value="" {% if not status_filter %}selected{% endif %}>Any</option>
+          <option value="success" {% if status_filter=='success' %}selected{% endif %}>success</option>
+          <option value="failed" {% if status_filter=='failed' %}selected{% endif %}>failed</option>
+          <option value="error" {% if status_filter=='error' %}selected{% endif %}>error</option>
+        </select>
+      </div>
+      <div class="form-group mr-2">
+        <label class="mr-2">Scope:</label>
+        <input type="text" class="form-control" name="scope" value="{{ scope_filter }}" placeholder="e.g., all, cop">
+      </div>
+      <button class="btn btn-primary" type="submit">Filter</button>
+    </form>
+
+    <div class="table-responsive">
+      <table class="table table-bordered table-striped">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>File</th>
+            <th>Set</th>
+            <th>Scope</th>
+            <th>Status</th>
+            <th>Duration (ms)</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in history %}
+          <tr>
+            <td>{{ row['created_at'] }}</td>
+            <td>{{ row['file_name'] }}</td>
+            <td>{{ row['data_set'] }}</td>
+            <td>{{ row['scope'] }}</td>
+            <td>{{ row['status'] }}</td>
+            <td>{{ row['duration_ms'] if row['duration_ms'] is not none else '-' }}</td>
+            <td>{{ row['message'] if row['message'] else '-' }}</td>
+          </tr>
+        {% endfor %}
+        {% if not history %}
+          <tr><td colspan="7" class="text-center text-muted">No records</td></tr>
+        {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+  <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+ </body>
+ </html>
+
+
+
+

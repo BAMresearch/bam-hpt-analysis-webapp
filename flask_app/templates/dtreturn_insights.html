@@ -1,0 +1,621 @@
+{% extends "base.html" %}
+{% block title %}dTreturn Insights{% endblock %}
+
+{% block extra_css %}
+<style>
+  .stat-card { border: 1px solid #e6e6e6; border-radius: 8px; padding: 12px 14px; background: #fff; }
+  .stat-label { color: #6c757d; font-size: 0.85rem; margin-bottom: 4px; }
+  .stat-value { font-size: 1.25rem; font-weight: 700; color: #343a40; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  .results-img { max-width: 100%; border: 1px solid #eee; border-radius: 6px; }
+  .small-help { color: #6c757d; font-size: 0.9rem; }
+  .cache-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; font-weight: 600; }
+  .cache-ok { background: #d4edda; color: #155724; }
+  .cache-stale { background: #fff3cd; color: #856404; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header">
+    <h1><i class="fas fa-thermometer-half"></i> dTreturn Insights</h1>
+    <p>
+      Point-level distribution of dTreturn = T_return_emu &minus; T_return_calc across selected entries.
+      Results are precomputed per entry and aggregated instantly.
+    </p>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-body">
+      <!-- Unified cache pipeline status bar -->
+      <div class="d-flex align-items-center flex-wrap mb-3">
+        <span class="font-weight-bold mr-2">Pipeline:</span>
+        <span id="pipelineStatus" class="cache-badge cache-ok">checking…</span>
+        <button id="pipelineUpdateBtn" class="btn btn-sm btn-outline-warning ml-3" type="button">
+          <i class="fas fa-sync-alt"></i> Update cache
+        </button>
+        <button id="pipelineRebuildBtn" class="btn btn-sm btn-outline-danger ml-2" type="button">
+          <i class="fas fa-bolt"></i> Rebuild all
+        </button>
+        <span id="refreshMsg" class="small-help ml-3"></span>
+      </div>
+      <p class="small-help mb-0">
+        <strong>Update cache</strong> runs the pipeline only for rows that still need work (missing full-cycle dTreturn cache, missing auto-class fields, missing Pelec transition, incomplete per-period caches for the multi-buffer D/H split, or outdated period mean-stat columns such as Ts Buh / QCorrwBUH).
+        <strong>Rebuild all</strong> recomputes every row from scratch (slow). The yellow &ldquo;pending&rdquo; count is all such gaps in the database, not only the row you just added.
+      </p>
+
+      <div class="row">
+        <div class="col-md-3">
+          <label class="font-weight-bold">Units</label>
+          <select id="hpSelect" class="form-control" multiple size="8">
+            {% for u in units %}
+              <option value="{{ u.unit_key }}">{{ u.label }}</option>
+            {% endfor %}
+          </select>
+          {% if not units %}
+          <div class="small-help mt-2">No units yet. Assign a unit profile on Cycle Extract or review, or fill HP ID for BAM files.</div>
+          {% else %}
+          <div class="small-help mt-2">Grouped by unit profile (HPT) or HP ID (BAM). Empty = all.</div>
+          {% endif %}
+        </div>
+        <div class="col-md-3">
+          <label class="font-weight-bold">Test conditions</label>
+          <select id="condSelect" class="form-control" multiple size="8">
+            {% for c in test_conditions %}
+              <option value="{{ c }}">{{ c }}</option>
+            {% endfor %}
+          </select>
+          <div class="small-help mt-2">Empty = all.</div>
+        </div>
+        <div class="col-md-2">
+          <label class="font-weight-bold">COP dataset</label>
+          <select id="copSelect" class="form-control" multiple size="4">
+            {% for v in cop_dataset_values %}
+              <option value="{{ v }}">{{ v }}</option>
+            {% endfor %}
+          </select>
+          <div class="small-help mt-2">Empty = all.</div>
+          <label class="font-weight-bold mt-2">Period</label>
+          <select id="periodSelect" class="form-control">
+            <option value="all" selected>All (full cycle)</option>
+            <option value="defrost">Defrost (D)</option>
+            <option value="heating">Heating (H)</option>
+            <option value="off">Off (C/D)</option>
+            <option value="on">On (C/D)</option>
+          </select>
+          <label class="font-weight-bold mt-2">Buffer (s)</label>
+          <select id="bufferSelect" class="form-control">
+            <option value="600" selected>600</option>
+            <option value="900">900</option>
+            <option value="1200">1200</option>
+          </select>
+          <div class="small-help mt-1">Used when generating periods (D/H split).</div>
+        </div>
+        <div class="col-md-4">
+          <label class="font-weight-bold">Band recommendation</label>
+          <div class="form-group">
+            <label class="small-help">Target coverage (%)</label>
+            <input id="coverageInput" type="number" class="form-control" min="50" max="99.9" step="0.1" value="95.0">
+          </div>
+          <button id="runBtn" class="btn btn-primary btn-block" type="button">
+            <i class="fas fa-chart-bar"></i> Show results
+          </button>
+          <div id="statusMsg" class="small-help mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="resultsSection" style="display:none;">
+    <div class="row mb-3">
+      <div class="col-md-3"><div class="stat-card"><div class="stat-label">Entries</div><div id="statEntries" class="stat-value mono">-</div></div></div>
+      <div class="col-md-3"><div class="stat-card"><div class="stat-label">Valid points</div><div id="statPoints" class="stat-value mono">-</div></div></div>
+      <div class="col-md-3"><div class="stat-card"><div class="stat-label">Median (K)</div><div id="statMedian" class="stat-value mono">-</div></div></div>
+      <div class="col-md-3"><div class="stat-card"><div class="stat-label">Recommended band (K)</div><div id="statBand" class="stat-value mono">-</div></div></div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header font-weight-bold">Overall distribution</div>
+      <div class="card-body">
+        <div class="row">
+          <div class="col-lg-6 mb-3"><img id="imgHist" class="results-img" alt="Histogram"></div>
+          <div class="col-lg-6 mb-3"><img id="imgEcdf" class="results-img" alt="ECDF"></div>
+        </div>
+        <div class="small-help">
+          Tip: ECDF lets you read coverage directly: pick a band [L, U] and read P(L &le; dTreturn &le; U).
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header font-weight-bold">Recommended bands by group</div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm table-striped">
+            <thead>
+              <tr>
+                <th>unit</th><th>test_condition</th>
+                <th class="text-right">entries</th><th class="text-right">valid points</th>
+                <th class="text-right">median (K)</th><th class="text-right">p95 |.| (K)</th>
+                <th class="text-right">lower (K)</th><th class="text-right">upper (K)</th>
+              </tr>
+            </thead>
+            <tbody id="groupTableBody"></tbody>
+          </table>
+        </div>
+        <div class="small-help mt-2">Click a row to drill down into the entries of that group.</div>
+      </div>
+    </div>
+
+    <div id="drillSection" class="card mb-3" style="display:none;">
+      <div class="card-header font-weight-bold">
+        Group entries
+        <span id="drillTitle" class="small-help ml-2"></span>
+      </div>
+      <div class="card-body">
+        <div class="small-help mb-2">
+          Entries are ranked by max |dTreturn|. Use exclude/include to remove outliers.
+          Click <b>Periods</b> to see/edit the D/H sub-period boundaries for an entry.
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-striped">
+            <thead>
+              <tr>
+                <th class="text-right">rowid</th>
+                <th>file</th>
+                <th class="text-right">ds</th>
+                <th class="text-right">t_start</th>
+                <th class="text-right">t_end</th>
+                <th>cycle</th>
+                <th class="text-right">Pelec trans.</th>
+                <th class="text-right">n_valid</th>
+                <th class="text-right">min dT (K)</th>
+                <th class="text-right">max dT (K)</th>
+                <th class="text-right">max |dT|</th>
+                <th class="text-right">max signed</th>
+                <th class="text-right">p99 |dT|</th>
+                <th>exclude</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="drillBody"></tbody>
+          </table>
+        </div>
+        <!-- Period detail panel (shown when clicking Periods) -->
+        <div id="periodDetail" class="mt-3" style="display:none;">
+          <div class="card">
+            <div class="card-header font-weight-bold">
+              Periods for entry <span id="periodEntryId"></span>
+              <span id="periodEntryInfo" class="small-help ml-2"></span>
+            </div>
+            <div class="card-body">
+              <div class="table-responsive">
+                <table class="table table-sm">
+                  <thead>
+                    <tr>
+                      <th>Period</th><th class="text-right">start</th><th class="text-right">end</th>
+                      <th class="text-right">duration (s)</th><th>method</th>
+                      <th class="text-right">n_valid</th>
+                      <th class="text-right">min dT (K)</th><th class="text-right">max dT (K)</th>
+                      <th class="text-right">max |dT|</th>
+                    </tr>
+                  </thead>
+                  <tbody id="periodDetailBody"></tbody>
+                </table>
+              </div>
+              <div class="form-inline mt-2">
+                <label class="mr-2 font-weight-bold">Pelec transition time:</label>
+                <input id="transTimeInput" type="number" class="form-control form-control-sm mr-2" style="width:120px;" step="1">
+                <button id="saveTransTimeBtn" class="btn btn-sm btn-primary mr-2" type="button">Save &amp; regenerate</button>
+                <button id="showPelecPlotBtn" class="btn btn-sm btn-outline-secondary" type="button">
+                  <i class="fas fa-chart-line"></i> Show Pelec plot
+                </button>
+                <span id="transTimeMsg" class="small-help ml-2"></span>
+              </div>
+              <div id="pelecPlotArea" class="mt-3" style="display:none;">
+                <img id="pelecPlotImg" class="results-img" alt="Pelec plot" style="max-width:100%;">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  function getSelectedValues(el) { return Array.from(el.selectedOptions).map(o => o.value); }
+  function fmt(x, d) { d = d || 3; return (x === null || x === undefined || typeof x !== 'number' || isNaN(x)) ? '-' : x.toFixed(d); }
+
+  // --- Unified pipeline status + actions ---
+  async function checkPipeline() {
+    const badge = document.getElementById('pipelineStatus');
+    try {
+      const resp = await fetch('/api/pipeline/status');
+      const d = await resp.json();
+      if (!d || !d.success) throw new Error((d && d.message) ? d.message : 'status failed');
+      const pending = d.pending_entries || 0;
+      const total = d.total_entries || 0;
+      if (pending > 0) {
+        badge.className = 'cache-badge cache-stale';
+        badge.textContent = pending + ' / ' + total + ' entries pending';
+      } else {
+        badge.className = 'cache-badge cache-ok';
+        badge.textContent = 'all cached (' + total + ' entries)';
+      }
+    } catch (e) {
+      badge.className = 'cache-badge cache-stale';
+      badge.textContent = 'status error';
+    }
+  }
+
+  async function runPipeline(forceAll) {
+    const msg = document.getElementById('refreshMsg');
+    const btn1 = document.getElementById('pipelineUpdateBtn');
+    const btn2 = document.getElementById('pipelineRebuildBtn');
+    btn1.disabled = true;
+    btn2.disabled = true;
+    msg.textContent = forceAll ? 'Rebuilding all caches (this can take long)…' : 'Updating caches (new/missing entries)…';
+    try {
+      const resp = await fetch('/api/pipeline/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ force_all: !!forceAll })
+      });
+      const d = await resp.json();
+      if (d && d.success) {
+        const q = (d.pipeline_queue_len != null) ? d.pipeline_queue_len : '';
+        const tot = (d.total_results_rows != null) ? d.total_results_rows : '';
+        const qPart = (q !== '' && tot !== '') ? (' · queue ' + q + ' / DB ' + tot + ' rows') : '';
+        msg.textContent = 'Done: ' + (d.processed_entries || 0) + ' processed' + qPart
+          + ', full=' + (d.updated_full_cache || 0)
+          + ', period_rows=' + (d.updated_period_rows || 0)
+          + ', detected=' + (d.detected || 0)
+          + ', failed=' + (d.failed_detection || 0)
+          + ' (' + (d.elapsed_s || '?') + 's)';
+      } else {
+        msg.textContent = 'Error: ' + ((d && d.message) || 'unknown');
+      }
+      await checkPipeline();
+    } catch (e) {
+      msg.textContent = 'Network error: ' + e.message;
+    } finally {
+      btn1.disabled = false;
+      btn2.disabled = false;
+    }
+  }
+
+  // --- Analysis (instant from cache) ---
+  async function runAnalysis() {
+    const status = document.getElementById('statusMsg');
+    status.textContent = '';
+    document.getElementById('runBtn').disabled = true;
+
+    var periodFilter = document.getElementById('periodSelect').value || 'all';
+    var bufferS = (periodFilter === 'off' || periodFilter === 'on')
+      ? 0
+      : parseInt(document.getElementById('bufferSelect').value || '600', 10);
+    // store current filters for drilldown consistency
+    window._dtreturnLastPeriodFilter = periodFilter;
+    window._dtreturnLastCopDataset = getSelectedValues(document.getElementById('copSelect'));
+    window._dtreturnLastBufferS = bufferS;
+
+    try {
+      const resp = await fetch('/api/dtreturn_insights', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          hp_ids: getSelectedValues(document.getElementById('hpSelect')),
+          unit_keys: getSelectedValues(document.getElementById('hpSelect')),
+          test_conditions: getSelectedValues(document.getElementById('condSelect')),
+          cop_dataset: getSelectedValues(document.getElementById('copSelect')),
+          coverage: parseFloat(document.getElementById('coverageInput').value || '95'),
+          period_filter: periodFilter,
+          buffer_s: bufferS
+        })
+      });
+      const data = await resp.json();
+      if (!data || !data.success) throw new Error((data && data.message) ? data.message : 'Unknown error');
+
+      const o = data.overall || {};
+      document.getElementById('resultsSection').style.display = 'block';
+      document.getElementById('statEntries').textContent = o.entries_processed || 0;
+      document.getElementById('statPoints').textContent = o.valid_points ? o.valid_points.toLocaleString() : '0';
+      document.getElementById('statMedian').textContent = fmt(o.median, 3);
+      document.getElementById('statBand').textContent = fmt(o.recommended_lower, 2) + ' … ' + fmt(o.recommended_upper, 2);
+
+      var images = data.images || {};
+      document.getElementById('imgHist').src = images.histogram || '';
+      document.getElementById('imgEcdf').src = images.ecdf || '';
+
+      var body = document.getElementById('groupTableBody');
+      body.innerHTML = '';
+      (data.groups || []).forEach(function(g) {
+        var tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', function() { loadGroupEntries(g.hp_id || '', g.test_condition || 'unknown'); });
+        tr.innerHTML =
+          '<td>' + (g.unit_label || g.hp_id || '') + '</td>' +
+          '<td>' + (g.test_condition || '') + '</td>' +
+          '<td class="text-right mono">' + (g.entries_processed || 0) + '</td>' +
+          '<td class="text-right mono">' + (g.valid_points ? g.valid_points.toLocaleString() : '0') + '</td>' +
+          '<td class="text-right mono">' + fmt(g.median, 3) + '</td>' +
+          '<td class="text-right mono">' + fmt(g.p95_abs, 3) + '</td>' +
+          '<td class="text-right mono">' + fmt(g.recommended_lower, 2) + '</td>' +
+          '<td class="text-right mono">' + fmt(g.recommended_upper, 2) + '</td>';
+        body.appendChild(tr);
+      });
+
+      var pf = (data.meta && data.meta.period_filter) || 'all';
+      var pfLabel = pf === 'defrost' ? ' [Defrost]' : (pf === 'heating' ? ' [Heating]' : '');
+      var uncached = (data.meta && data.meta.uncached_entries) || 0;
+      status.textContent = (o.entries_processed || 0) + ' entries' + pfLabel + ', '
+        + (o.valid_points ? o.valid_points.toLocaleString() : '0') + ' points.'
+        + (uncached > 0 ? ' (' + uncached + ' not yet cached)' : '');
+    } catch (e) {
+      alert('Error: ' + (e.message || e));
+      status.textContent = 'Error.';
+    } finally {
+      document.getElementById('runBtn').disabled = false;
+    }
+  }
+
+  function fmtNum(x, d) { d = d || 3; return (x === null || x === undefined || typeof x !== 'number' || isNaN(x)) ? '-' : x.toFixed(d); }
+  function esc(s) {
+    return (s || '').toString().replace(/[&<>"']/g, function(c) {
+      if (c === '&') return '&amp;';
+      if (c === '<') return '&lt;';
+      if (c === '>') return '&gt;';
+      if (c === '\"') return '&quot;';
+      return '&#39;';
+    });
+  }
+
+  async function setExclusion(rowid, exclude, reason) {
+    const resp = await fetch('/api/dtreturn_exclusion_set', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ rowid: rowid, exclude: !!exclude, reason: reason || '' })
+    });
+    const d = await resp.json();
+    if (!d || !d.success) throw new Error((d && d.message) ? d.message : 'Failed to update exclusion');
+  }
+
+  async function loadGroupEntries(hp_id, test_condition) {
+    const drill = document.getElementById('drillSection');
+    const title = document.getElementById('drillTitle');
+    const body = document.getElementById('drillBody');
+    drill.style.display = 'block';
+    document.getElementById('periodDetail').style.display = 'none';
+    title.textContent = '(' + hp_id + ', ' + test_condition + ')';
+    body.innerHTML = '<tr><td colspan=\"15\" class=\"small-help\">Loading…</td></tr>';
+
+    try {
+      const resp = await fetch('/api/dtreturn_group_entries', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          unit_key: hp_id,
+          hp_id: hp_id,
+          test_condition: test_condition,
+          limit: 2000,
+          period_filter: window._dtreturnLastPeriodFilter || (document.getElementById('periodSelect').value || 'all'),
+          cop_dataset: window._dtreturnLastCopDataset || getSelectedValues(document.getElementById('copSelect')),
+          buffer_s: window._dtreturnLastBufferS || (function() {
+            var pf = window._dtreturnLastPeriodFilter || (document.getElementById('periodSelect').value || 'all');
+            if (pf === 'off' || pf === 'on') return 0;
+            return parseInt(document.getElementById('bufferSelect').value || '600', 10);
+          })()
+        })
+      });
+      const d = await resp.json();
+      if (!d || !d.success) {
+        body.innerHTML = '<tr><td colspan=\"15\">Error: ' + esc((d && d.message) ? d.message : 'unknown') + '</td></tr>';
+        return;
+      }
+
+      const entries = d.entries || [];
+      title.textContent = '(' + hp_id + ', ' + test_condition + ') — ' + entries.length + ' entries';
+      body.innerHTML = '';
+      if (entries.length === 0) {
+        body.innerHTML = '<tr><td colspan=\"15\" class=\"small-help\">No entries match this group with the current period/COP filters.</td></tr>';
+        return;
+      }
+      entries.forEach(function(e) {
+        const tr = document.createElement('tr');
+        const checked = e.excluded ? 'checked' : '';
+        var cycleLabel = '';
+        if (e.cycle_type === 'defrost_cycle') cycleLabel = 'D:' + (e.cycle_start_marker === 'defrost_start' ? 'drop' : 'ramp');
+        else if (e.cycle_type === 'on_off_cycle') cycleLabel = 'OO';
+        else if (e.cycle_type) cycleLabel = e.cycle_type;
+        tr.innerHTML =
+          '<td class=\"text-right mono\">' + e.rowid + '</td>' +
+          '<td class=\"mono\" style=\"max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;\" title=\"' + esc(e.file_name) + '\">' + esc(e.file_name) + '</td>' +
+          '<td class=\"text-right mono\">' + (e.data_set === null || e.data_set === undefined ? '' : e.data_set) + '</td>' +
+          '<td class=\"text-right mono\">' + (e.start_time === null || e.start_time === undefined ? '' : e.start_time) + '</td>' +
+          '<td class=\"text-right mono\">' + (e.end_time === null || e.end_time === undefined ? '' : e.end_time) + '</td>' +
+          '<td class=\"mono\">' + esc(cycleLabel) + '</td>' +
+          '<td class=\"text-right mono\">' + fmtNum(e.pelec_transition_time, 0) + '</td>' +
+          '<td class=\"text-right mono\">' + (e.n_valid === null || e.n_valid === undefined ? '' : Number(e.n_valid).toLocaleString()) + '</td>' +
+          '<td class=\"text-right mono\" style=\"color:#0b5394;\">' + fmtNum(e.dt_min, 2) + '</td>' +
+          '<td class=\"text-right mono\" style=\"color:#a61c00;\">' + fmtNum(e.dt_max, 2) + '</td>' +
+          '<td class=\"text-right mono\">' + fmtNum(e.max_abs, 3) + '</td>' +
+          '<td class=\"text-right mono\">' + fmtNum(e.max_signed, 3) + '</td>' +
+          '<td class=\"text-right mono\">' + fmtNum(e.p99_abs, 3) + '</td>' +
+          '<td class=\"mono\"><input type=\"checkbox\" class=\"dt-excl\" data-rowid=\"' + e.rowid + '\" ' + checked + '></td>' +
+          '<td>' +
+            '<a class=\"btn btn-sm btn-outline-primary mr-1\" href=\"' + esc(e.focus_url) + '\" target=\"_blank\">Open</a>' +
+            '<button class=\"btn btn-sm btn-outline-info show-periods-btn\" data-rowid=\"' + e.rowid + '\">Periods</button>' +
+          '</td>';
+        body.appendChild(tr);
+      });
+
+      Array.from(document.querySelectorAll('#drillBody .dt-excl')).forEach(function(cb) {
+        cb.addEventListener('change', async function() {
+          const rid = parseInt(cb.getAttribute('data-rowid'), 10);
+          try {
+            const reason = cb.checked ? prompt('Reason for excluding rowid ' + rid + ' (optional):', '') : '';
+            await setExclusion(rid, cb.checked, reason || '');
+            await runAnalysis();
+          } catch (e) {
+            alert('Failed: ' + (e.message || e));
+            cb.checked = !cb.checked;
+          }
+        });
+      });
+
+      Array.from(document.querySelectorAll('#drillBody .show-periods-btn')).forEach(function(btn) {
+        btn.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          ev.preventDefault();
+          var rid = parseInt(btn.getAttribute('data-rowid'), 10);
+          showPeriodDetail(rid).catch(function(err) { alert('Periods error: ' + err.message); });
+        });
+      });
+    } catch (err) {
+      body.innerHTML = '<tr><td colspan=\"15\">Error: ' + esc(err.message || err) + '</td></tr>';
+    }
+  }
+
+  async function showPeriodDetail(rowid) {
+    var panel = document.getElementById('periodDetail');
+    var tbody = document.getElementById('periodDetailBody');
+    var entryId = document.getElementById('periodEntryId');
+    var entryInfo = document.getElementById('periodEntryInfo');
+    var transInput = document.getElementById('transTimeInput');
+    var transMsg = document.getElementById('transTimeMsg');
+
+    if (!panel || !tbody) { alert('Period detail elements not found in DOM'); return; }
+
+    panel.style.display = 'block';
+    setTimeout(function() { panel.scrollIntoView({behavior: 'smooth', block: 'nearest'}); }, 100);
+    entryId.textContent = '#' + rowid;
+    entryInfo.textContent = 'loading…';
+    tbody.innerHTML = '';
+    transMsg.textContent = '';
+    document.getElementById('pelecPlotArea').style.display = 'none';
+
+    try {
+      var periodFilter = document.getElementById('periodSelect').value || 'all';
+      var bufferS = (periodFilter === 'off' || periodFilter === 'on')
+        ? 0
+        : parseInt(document.getElementById('bufferSelect').value || '600', 10);
+      var resp = await fetch('/api/cycle_periods/entry_info', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ rowid: rowid, buffer_s: bufferS })
+      });
+      var d = await resp.json();
+      if (!d || !d.success) {
+        entryInfo.textContent = 'Error: ' + ((d && d.message) || 'unknown');
+        return;
+      }
+
+      var c = d.classification || {};
+      entryInfo.textContent = (c.cycle_type || '-') + ' / ' + (c.cycle_start_marker || '-')
+        + '  |  notes: ' + (c.notes || '-') + '  |  test_cond: ' + (c.test_cond || '-');
+      transInput.value = (c.pelec_transition_time !== null && c.pelec_transition_time !== undefined)
+        ? c.pelec_transition_time : '';
+      transInput.dataset.rowid = rowid;
+
+      var periods = d.periods || [];
+      if (periods.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="small-help">No periods defined. Run Auto-classify or set transition time manually.</td></tr>';
+      } else {
+        periods.forEach(function(p) {
+          var tr = document.createElement('tr');
+          var dur = (p.end_time !== null && p.start_time !== null) ? (p.end_time - p.start_time).toFixed(0) : '-';
+          var badgeClass = 'secondary';
+          if (p.period_type === 'defrost') badgeClass = 'danger';
+          else if (p.period_type === 'heating') badgeClass = 'success';
+          else if (p.period_type === 'off') badgeClass = 'warning';
+          else if (p.period_type === 'on') badgeClass = 'info';
+          tr.innerHTML =
+            '<td><span class="badge badge-' + badgeClass + '">' + esc(p.period_type) + '</span></td>' +
+            '<td class="text-right mono">' + fmtNum(p.start_time, 0) + '</td>' +
+            '<td class="text-right mono">' + fmtNum(p.end_time, 0) + '</td>' +
+            '<td class="text-right mono">' + dur + '</td>' +
+            '<td class="mono">' + esc(p.detection_method || '') + '</td>' +
+            '<td class="text-right mono">' + (p.dtreturn_n_valid != null ? p.dtreturn_n_valid : '-') + '</td>' +
+            '<td class="text-right mono" style="color:#0b5394;">' + fmtNum(p.dtreturn_min, 2) + '</td>' +
+            '<td class="text-right mono" style="color:#a61c00;">' + fmtNum(p.dtreturn_max, 2) + '</td>' +
+            '<td class="text-right mono">' + fmtNum(p.dtreturn_max_abs, 3) + '</td>';
+          tbody.appendChild(tr);
+        });
+      }
+    } catch (e) {
+      entryInfo.textContent = 'Error: ' + (e.message || e);
+    }
+  }
+
+  async function showPelecPlot() {
+    var input = document.getElementById('transTimeInput');
+    var rid = parseInt(input.dataset.rowid, 10);
+    var plotArea = document.getElementById('pelecPlotArea');
+    var plotImg = document.getElementById('pelecPlotImg');
+    var msg = document.getElementById('transTimeMsg');
+
+    if (!rid || isNaN(rid)) { msg.textContent = 'No entry selected.'; return; }
+
+    plotArea.style.display = 'block';
+    plotImg.src = '';
+    msg.textContent = 'Loading Pelec plot…';
+
+    try {
+      var periodFilter = document.getElementById('periodSelect').value || 'all';
+      var bufferS = (periodFilter === 'off' || periodFilter === 'on')
+        ? 0
+        : parseInt(document.getElementById('bufferSelect').value || '600', 10);
+      var resp = await fetch('/api/cycle_periods/pelec_plot', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ rowid: rid, buffer_s: bufferS })
+      });
+      var d = await resp.json();
+      if (d && d.success && d.image) {
+        plotImg.src = d.image;
+        msg.textContent = '';
+      } else {
+        msg.textContent = 'Plot error: ' + ((d && d.message) || 'unknown');
+        plotArea.style.display = 'none';
+      }
+    } catch (e) {
+      msg.textContent = 'Plot error: ' + (e.message || e);
+      plotArea.style.display = 'none';
+    }
+  }
+
+  async function saveTransitionTime() {
+    var input = document.getElementById('transTimeInput');
+    var msg = document.getElementById('transTimeMsg');
+    var rid = parseInt(input.dataset.rowid, 10);
+    var val = input.value.trim();
+    var newTime = val === '' ? null : parseFloat(val);
+
+    msg.textContent = 'Saving…';
+    try {
+      var bufferS = parseInt(document.getElementById('bufferSelect').value || '600', 10);
+      var resp = await fetch('/api/cycle_periods/update_transition', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ rowid: rid, pelec_transition_time: newTime, buffer_s: bufferS })
+      });
+      var d = await resp.json();
+      if (d && d.success) {
+        msg.textContent = 'Saved. Periods regenerated.';
+        showPeriodDetail(rid);
+      } else {
+        msg.textContent = 'Error: ' + ((d && d.message) || 'unknown');
+      }
+    } catch (e) {
+      msg.textContent = 'Error: ' + (e.message || e);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('runBtn').addEventListener('click', runAnalysis);
+    document.getElementById('pipelineUpdateBtn').addEventListener('click', function() { runPipeline(false); });
+    document.getElementById('pipelineRebuildBtn').addEventListener('click', function() {
+      if (confirm('Rebuild ALL caches? This can take a long time.')) runPipeline(true);
+    });
+    document.getElementById('saveTransTimeBtn').addEventListener('click', saveTransitionTime);
+    document.getElementById('showPelecPlotBtn').addEventListener('click', showPelecPlot);
+    checkPipeline();
+  });
+</script>
+{% endblock %}

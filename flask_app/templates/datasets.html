@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Datasets{% endblock %}
+{% block content %}
+<div class="container mt-4" style="max-width: 900px;">
+  <h2>Datasets</h2>
+  <p class="text-muted">
+    Analysis results are stored in a SQLite database file on this computer (not shipped with the tool).
+    Create a new empty database, or open one you already have.
+  </p>
+
+  {% if not database_is_ready %}
+  <div class="alert alert-warning">
+    <strong>No database is open yet.</strong>
+    On a new installation the list below is often empty — that is normal.
+    Create a new database, or open an existing <code>.db</code> file with Browse / path.
+  </div>
+  {% else %}
+  <div class="alert alert-success">
+    Currently open: <strong>{{ open_database_label }}</strong>
+    <br><small class="text-muted">{{ open_database_path }}</small>
+    {% if not active_in_managed %}
+    <br><small>This file is outside <code>notebooks/</code>, so it does not appear in the list below. The app still uses it normally.</small>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="row">
+    <div class="col-md-6 mb-3">
+      <div class="border rounded p-3 h-100">
+        <h5>Create new database</h5>
+        <p class="small text-muted">
+          Creates an empty file under <code>notebooks/</code>.
+          Existing files are never overwritten.
+        </p>
+        <div class="form-group">
+          <label for="newDbName">Name</label>
+          <input type="text" class="form-control" id="newDbName" placeholder="e.g. LabA_campaign">
+          <small class="form-text text-muted">Saved as <code>notebooks/&lt;name&gt;.db</code></small>
+        </div>
+        <button type="button" class="btn btn-primary" id="btnCreateDb">Create and open</button>
+      </div>
+    </div>
+    <div class="col-md-6 mb-3">
+      <div class="border rounded p-3 h-100">
+        <h5>Open existing database</h5>
+        <p class="small text-muted">
+          Choose a file from the list, browse on this PC, or paste a full path.
+          Opening only switches which file the app uses; it does not delete or replace data.
+        </p>
+        <button type="button" class="btn btn-outline-primary mb-2" id="btnBrowseDb">
+          <i class="fas fa-folder-open"></i> Browse…
+        </button>
+        <div class="form-group mb-2">
+          <label for="openPath">Or paste full path</label>
+          <input type="text" class="form-control form-control-sm" id="openPath" placeholder="C:\path\to\file.db">
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnOpenPath">Open path</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="datasetsAlert" class="alert d-none" role="alert"></div>
+
+  <h5 class="mt-2">Databases in <code>notebooks/</code></h5>
+  <p class="small text-muted">
+    Recommended place for project databases (they show up here for quick reopen).
+    You can also open a <code>.db</code> anywhere on this PC via Browse or path — that works the same;
+    only the quick list is limited to this folder.
+  </p>
+  <div class="table-responsive">
+    <table class="table table-sm table-striped" id="dbTable">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Size</th>
+          <th>Modified</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in databases %}
+        <tr class="{% if d.is_active %}table-success{% endif %}">
+          <td>
+            <code>{{ d.name }}</code>
+            {% if d.is_active %}<span class="badge badge-success ml-1">open</span>{% endif %}
+            {% if not d.has_results %}<span class="badge badge-warning ml-1">no results table</span>{% endif %}
+          </td>
+          <td class="small">{{ '%.1f'|format(d.size_bytes / 1048576) }} MB</td>
+          <td class="small">{{ d.modified }}</td>
+          <td>
+            {% if not d.is_active %}
+            <button type="button" class="btn btn-sm btn-outline-success btn-open-managed" data-path="{{ d.path }}">Open</button>
+            {% else %}
+            <span class="text-muted small">In use</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="4" class="text-muted">
+            No databases in <code>notebooks/</code> yet.
+            Use <strong>Create new</strong>, or <strong>Browse…</strong> / paste a path to open a file elsewhere.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="small text-muted mb-0">
+    Create never overwrites an existing file name. Opening a database only selects which file the app uses.
+  </p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  const alertBox = document.getElementById('datasetsAlert');
+  function showAlert(type, msg) {
+    alertBox.className = 'alert alert-' + type;
+    alertBox.textContent = msg;
+    alertBox.classList.remove('d-none');
+  }
+  function goHome() {
+    window.location.href = '{{ url_for("index") }}';
+  }
+  function postJson(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(r => r.json());
+  }
+
+  document.getElementById('btnCreateDb').addEventListener('click', function () {
+    const name = document.getElementById('newDbName').value.trim();
+    if (!name) { showAlert('danger', 'Enter a name for the new database.'); return; }
+    postJson('{{ url_for("api_datasets_create") }}', { name: name }).then(res => {
+      if (res.success) { showAlert('success', res.message || 'Created.'); goHome(); }
+      else showAlert('danger', res.message || 'Create failed.');
+    }).catch(err => showAlert('danger', String(err)));
+  });
+
+  document.getElementById('btnOpenPath').addEventListener('click', function () {
+    const path = document.getElementById('openPath').value.trim();
+    if (!path) { showAlert('danger', 'Paste a full path to a .db file.'); return; }
+    postJson('{{ url_for("api_datasets_open") }}', { path: path }).then(res => {
+      if (res.success) { showAlert('success', res.message || 'Opened.'); goHome(); }
+      else showAlert('danger', res.message || 'Open failed.');
+    }).catch(err => showAlert('danger', String(err)));
+  });
+
+  document.getElementById('btnBrowseDb').addEventListener('click', function () {
+    postJson('{{ url_for("api_datasets_browse") }}', {}).then(res => {
+      if (res.cancelled) { showAlert('info', 'Browse cancelled.'); return; }
+      if (res.success) { showAlert('success', res.message || 'Opened.'); goHome(); }
+      else showAlert('danger', res.message || 'Browse failed.');
+    }).catch(err => showAlert('danger', String(err)));
+  });
+
+  document.querySelectorAll('.btn-open-managed').forEach(btn => {
+    btn.addEventListener('click', function () {
+      postJson('{{ url_for("api_datasets_open") }}', { path: btn.dataset.path }).then(res => {
+        if (res.success) { showAlert('success', res.message || 'Opened.'); goHome(); }
+        else showAlert('danger', res.message || 'Open failed.');
+      }).catch(err => showAlert('danger', String(err)));
+    });
+  });
+})();
+</script>
+{% endblock %}

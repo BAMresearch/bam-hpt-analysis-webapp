@@ -1,0 +1,19 @@
+{
+  "profile_id": "EXAMPLE_AW1",
+  "display_name": "Example air-to-water unit (fictitious)",
+  "owner": "EXAMPLE",
+  "unit_type": "air_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": null,
+  "flow_type": "",
+  "flow_set_value": null,
+  "flow_mode": "per_test",
+  "default_climate": "Average",
+  "default_application": "MT",
+  "wb_rule": "db_minus_1k",
+  "filename_patterns": [
+    "EXAMPLE_AW1*"
+  ],
+  "notes": "Shipped example only — not a real test unit.",
+  "hp_id_aliases": []
+}

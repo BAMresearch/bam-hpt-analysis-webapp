@@ -1,0 +1,129 @@
+# Measurement Excel lives in Rohdaten/ and Plotdaten/ locally — never commit it.
+*.xlsx
+*.xls
+*.csv
+*.txt
+Rohdaten/**
+Plotdaten/**
+!Rohdaten/README.md
+!Plotdaten/README.md
+data/
+excel_files/
+raw_data/
+sensitive_data/
+
+# The *.txt rule above is for raw data exports; the dependency list must ship.
+!requirements.txt
+
+# Unzipped workbooks: an .xlsx is a ZIP, so extracting one puts the cell data
+# into .xml files that the *.xlsx rule above does not catch.
+extracted/
+unzipped/
+*.xlsx.d/
+**/xl/worksheets/
+
+# Repo backups
+*.bundle
+
+# Database files - NEVER commit these
+*.db
+*.db.*
+*.sqlite
+*.sqlite*
+*.sqlite3
+results.db
+data_analysis.db
+data_analysis-newbatch.db
+
+# Configuration files with sensitive paths
+config.json
+secrets.json
+.env
+
+# Private unit profiles (real BAM / lab units) — never commit JSON
+flask_app/config/profiles/local/*
+!flask_app/config/profiles/local/.gitkeep
+!flask_app/config/profiles/local/README.md
+
+# Local export column defaults (C2b) — machine-specific
+flask_app/config/export_summary_prefs.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+runlog.txt
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Flask specific
+instance/
+.webassets-cache
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Exploratory notebook: its saved output cells embed measured values and unit
+# filenames, so it stays local. Recover an old copy from git history if needed.
+notebooks/database.ipynb
+
+# Word copy of the quick guide — Markdown in docs/ is the source of truth.
+docs/QuickGuide.docx
+docs/sync_quickguide_docx.py
+
+# Backup files
+*.bak
+*.backup

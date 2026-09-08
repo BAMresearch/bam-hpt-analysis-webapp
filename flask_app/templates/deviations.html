@@ -1,0 +1,1824 @@
+{% extends "base.html" %}
+
+{% block title %}Permissible Deviation Analysis{% endblock %}
+
+{% block extra_css %}
+<style>
+    .page-header {
+        margin-bottom: 30px;
+        padding-bottom: 15px;
+        border-bottom: 2px solid #dee2e6;
+    }
+    .page-header h1 {
+        margin: 0;
+        color: #343a40;
+    }
+    .page-header p {
+        margin: 5px 0 0 0;
+        color: #6c757d;
+    }
+    
+    .table-responsive {
+        margin-top: 20px;
+    }
+    
+    .table {
+        width: 100%;
+        margin-bottom: 0;
+        font-size: 0.9rem;
+    }
+    
+    .table th {
+        background-color: #f8f9fa;
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 2px solid #dee2e6;
+    }
+    
+    .table td {
+        vertical-align: middle;
+    }
+    
+    .filter-row input {
+        width: 100%;
+        padding: 4px 8px;
+        font-size: 0.85rem;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+    }
+    
+    .filter-row input:focus {
+        border-color: #28a745;
+        box-shadow: 0 0 0 0.2rem rgba(40, 167, 69, 0.25);
+        outline: none;
+    }
+    
+    .filter-row input.active {
+        background-color: #f0fff4;
+        border-color: #28a745;
+    }
+    
+    .badge-violation {
+        background-color: #dc3545;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+    }
+    
+    .badge-good {
+        background-color: #28a745;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+    }
+    
+    .badge-warning {
+        background-color: #ffc107;
+        color: #212529;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+    }
+    
+    .btn-plot {
+        padding: 4px 12px;
+        font-size: 0.85rem;
+    }
+    
+    .filter-status {
+        background-color: #f8f9fa;
+        padding: 10px 15px;
+        border-radius: 5px;
+        margin-bottom: 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .plot-modal .modal-body img {
+        width: 100%;
+        height: auto;
+    }
+    
+    .stat-highlight {
+        font-weight: 600;
+        color: #343a40;
+    }
+    
+    .table-warning {
+        background-color: #fff3cd !important;
+    }
+    
+    .row-checkbox {
+        cursor: pointer;
+    }
+    
+    #selectAllCheckbox {
+        cursor: pointer;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{#- Empty statistic: N/A once the entry has been calculated (the quantity has no usable
+    data in the window), a plain dash while it has never been calculated. -#}
+{% macro no_data_cell(entry) -%}
+    {%- if entry.has_statistics -%}
+        <span class="badge badge-secondary" title="No valid data for this quantity in the selected window">N/A</span>
+    {%- else -%}
+        <span class="text-muted">-</span>
+    {%- endif -%}
+{%- endmacro %}
+{#- Signed extreme deviation cell: red when the excursion passes the transient band limit. -#}
+{% macro extreme_cell(value, limit, is_upper, unit='', entry=None) -%}
+    {%- if value is undefined or value is none -%}
+        {%- if entry is not none -%}{{ no_data_cell(entry) }}{%- else -%}<span class="text-muted">-</span>{%- endif -%}
+    {%- elif (is_upper and value > limit) or (not is_upper and value < limit) -%}
+        <span class="badge-violation">{{ "%+.2f"|format(value) }}{{ unit }}</span>
+    {%- else -%}
+        <span class="badge-good">{{ "%+.2f"|format(value) }}{{ unit }}</span>
+    {%- endif -%}
+{%- endmacro %}
+<div class="container-fluid">
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-start flex-wrap">
+            <div>
+                <h1><i class="fas fa-exclamation-triangle"></i> Permissible Deviation Analysis</h1>
+                <p>Analyze temperature deviations from setpoints for each test condition (E, A, F, B, C, D)</p>
+            </div>
+            <button class="btn btn-outline-primary btn-sm mt-2" type="button" data-toggle="collapse" data-target="#configSection" aria-expanded="false" aria-controls="configSection">
+                <i class="fas fa-sliders-h"></i> Configure Deviation Bands
+            </button>
+        </div>
+        
+        <!-- Collapsible Configuration Section -->
+        <div class="collapse mt-3" id="configSection">
+            <div class="card card-body" style="background-color: #f8f9fa; border: 2px solid #007bff;">
+                <h5 class="mb-3"><i class="fas fa-cog"></i> Permissible Deviation Configuration</h5>
+                <form id="deviationsConfigForm" class="row">
+                    <!-- Section 1: Transient operation (time series bands) -->
+                    <div class="col-12">
+                        <h6 class="text-primary mb-2"><i class="fas fa-chart-line"></i> Transient operation (time series bands)</h6>
+                        <p class="text-muted small mb-2">Bands used for permissible deviation on time series during transient operation.</p>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group mb-3">
+                            <label for="config_DB_value" class="font-weight-bold">
+                                <i class="fas fa-thermometer-half"></i> Dry-Bulb (DB)
+                                <span class="badge badge-secondary ml-1">K</span>
+                            </label>
+                            <input type="text" inputmode="decimal" id="config_DB_value" class="form-control form-control-sm config-numeric" 
+                                   value="{{ deviations.DB.value }}" required>
+                            <small class="text-muted">{{ deviations.DB.description }}</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group mb-3">
+                            <label for="config_WB_value" class="font-weight-bold">
+                                <i class="fas fa-tint"></i> Wet-Bulb (WB)
+                                <span class="badge badge-secondary ml-1">K</span>
+                            </label>
+                            <input type="text" inputmode="decimal" id="config_WB_value" class="form-control form-control-sm config-numeric" 
+                                   value="{{ deviations.WB.value }}" required>
+                            <small class="text-muted">{{ deviations.WB.description }}</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group mb-3">
+                            <label for="config_Tsup_value" class="font-weight-bold">
+                                <i class="fas fa-fire"></i> Supply Temp (Tsup)
+                                <span class="badge badge-secondary ml-1">K</span>
+                            </label>
+                            <input type="text" inputmode="decimal" id="config_Tsup_value" class="form-control form-control-sm config-numeric" 
+                                   value="{{ deviations.Tsup.value }}" required>
+                            <small class="text-muted">{{ deviations.Tsup.description }}</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group mb-3">
+                            <label class="font-weight-bold">
+                                <i class="fas fa-thermometer-empty"></i> dTreturn band (K)
+                            </label>
+                            <div class="d-flex">
+                                <input type="text" inputmode="decimal" id="config_dTreturn_lower" class="form-control form-control-sm config-numeric mr-1"
+                                       style="max-width: 90px;" value="{{ deviations.get('dTreturn', {}).get('lower', -2.0) }}" placeholder="lower">
+                                <input type="text" inputmode="decimal" id="config_dTreturn_upper" class="form-control form-control-sm config-numeric"
+                                       style="max-width: 90px;" value="{{ deviations.get('dTreturn', {}).get('upper', 2.0) }}" placeholder="upper">
+                            </div>
+                            <small class="text-muted">{{ deviations.get('dTreturn', {}).get('description', 'Return temperature difference band (transient)') }}</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group mb-3">
+                            <label for="config_flow_instantaneous_pct" class="font-weight-bold">Flow instantaneous ± (%)</label>
+                            <input type="text" inputmode="decimal" id="config_flow_instantaneous_pct" class="form-control form-control-sm config-numeric" value="{{ deviations.get('flow_instantaneous_pct', 2.5) }}">
+                            <small class="text-muted">Band for flow violations (fixed-flow tests).</small>
+                        </div>
+                    </div>
+                    <div class="col-12 mt-2">
+                        <h6 class="text-secondary mb-2"><i class="fas fa-palette"></i> Violation coloring thresholds</h6>
+                        <p class="text-muted small mb-2">Red above <em>red</em> %, yellow above <em>yellow</em> %. Violations: red if count &gt; threshold.</p>
+                    </div>
+                    <div class="col-12">
+                        <table class="table table-sm table-bordered" style="max-width: 900px;">
+                            <thead><tr><th></th><th>% red &gt;</th><th>% yellow &gt;</th><th>Violations red &gt;</th></tr></thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>DB</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_db_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('db_pct_red', 5) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_db_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('db_pct_yellow', 1) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_db_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('db_violations_red', 0) }}"></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>WB</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_wb_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_pct_red', 5) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_wb_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_pct_yellow', 1) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_wb_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_violations_red', 0) }}"></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Tsup</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_tsup_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_pct_red', 5) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_tsup_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_pct_yellow', 1) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_tsup_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_violations_red', 0) }}"></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>dTreturn</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_dtreturn_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('dtreturn_pct_red', 5) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_dtreturn_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('dtreturn_pct_yellow', 1) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_dtreturn_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('dtreturn_violations_red', 0) }}"></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Q</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_mean_q_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_q_pct_red', 10) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_mean_q_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_q_pct_yellow', 5) }}"></td>
+                                    <td><span class="text-muted">—</span></td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Flow</strong></td>
+                                    <td><input type="text" inputmode="decimal" id="config_flow_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('flow_pct_red', 5) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_flow_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('flow_pct_yellow', 1) }}"></td>
+                                    <td><input type="text" inputmode="decimal" id="config_flow_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('flow_violations_red', 0) }}"></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <!-- Section 2: Mean value permissible deviations (cycle mean) -->
+                    <div class="col-12 mt-3">
+                        <h6 class="text-primary mb-2"><i class="fas fa-balance-scale"></i> Mean value permissible deviations (cycle mean)</h6>
+                        <p class="text-muted small mb-2">Used to color Mean DB/WB/Tsup/Tmean/flow deviation columns. Green: within limit; yellow: &gt; half limit; red: &gt; limit.</p>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="config_mean_db_k" class="font-weight-bold">Mean DB ± (K)</label>
+                        <input type="text" inputmode="decimal" id="config_mean_db_k" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_db_k', 0.6) }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="config_mean_wb_k" class="font-weight-bold">Mean WB ± (K)</label>
+                        <input type="text" inputmode="decimal" id="config_mean_wb_k" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_wb_k', 0.4) }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="config_mean_tsup_k" class="font-weight-bold">Mean Tsup ± (K)</label>
+                        <input type="text" inputmode="decimal" id="config_mean_tsup_k" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_tsup_k', 0.5) }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="config_mean_flow_pct" class="font-weight-bold">Mean flow ± (%)</label>
+                        <input type="text" inputmode="decimal" id="config_mean_flow_pct" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_flow_pct', 1) }}">
+                    </div>
+                    <div class="col-md-3 mt-2">
+                        <label for="config_mean_tmean_k" class="font-weight-bold">Mean Tmean ± (K) <span class="badge badge-warning">lab proposal</span></label>
+                        <input type="text" inputmode="decimal" id="config_mean_tmean_k" class="form-control form-control-sm config-numeric" value="{{ deviations.get('mean_tmean_k', 0.5) }}">
+                        <small class="text-muted">Cycle mean of T_mean_log vs ecodesign Table 3. Variable-flow tests only. The draft defines no tolerance; 0.5 K mirrors the Interval H mean Tsup band.</small>
+                    </div>
+                    <div class="col-12 mt-3">
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="fas fa-save"></i> Save Configuration
+                        </button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="resetConfigToDefaults()">
+                            <i class="fas fa-undo"></i> Reset to Defaults
+                        </button>
+                        <small class="text-muted ml-3">
+                            <i class="fas fa-info-circle"></i> Transient bands affect calculations and plots. Mean/violation thresholds affect table coloring only.
+                        </small>
+                    </div>
+                </form>
+                <hr class="my-3">
+                <h6 class="mb-2"><i class="fas fa-bolt"></i> Design parameters (Pdesign, fixed-flow set value)</h6>
+                <p class="text-muted small">One row per unit. Saving here writes to the unit profile that the calculations read, so the numbers below are always the effective ones. Pdesign: UA = Pdesign/(16−(-10)); Qset = UA×(16−DB setpoint). The fixed-flow set applies to entries with <code>flow_config = fixed</code> and is ignored for variable flow.</p>
+                {% if units_without_pdesign %}
+                <div class="alert alert-warning py-2 small mb-2">
+                    <strong>Units with entries but no Pdesign:</strong> {{ units_without_pdesign|join(', ') }}. Fill Pdesign to get Qset and Mean Q dev for them.
+                </div>
+                {% endif %}
+                {% if unresolved_entry_count %}
+                <div class="alert alert-warning py-2 small mb-2">
+                    <strong>{{ unresolved_entry_count }}</strong> entr{{ 'y' if unresolved_entry_count == 1 else 'ies' }} carry no HP id and match no profile pattern, so no unit parameters can be applied to them. Give the unit a filename pattern on the <a href="{{ url_for('profiles_page') }}">Profiles</a> page.
+                </div>
+                {% endif %}
+                <div class="table-responsive mb-2">
+                    <table class="table table-sm table-bordered" id="unitDesignTable">
+                        <thead><tr><th>Unit</th><th>Pdesign (kW)</th><th>Flow mode</th><th>Fixed-flow set type</th><th>Fixed-flow set value</th><th>Entries</th><th>Actions</th></tr></thead>
+                        <tbody>
+                        {% for row in unit_design_rows or [] %}
+                        <tr data-row-id="{{ row.row_id }}"
+                            data-profile-id="{{ row.profile_id or '' }}"
+                            data-hp-id="{{ row.hp_id or '' }}"
+                            data-kind="{{ row.kind }}"
+                            data-destination="{{ row.destination }}">
+                            <td>
+                                <strong>{{ row.unit_label }}</strong>
+                                {% if row.kind == 'profile' %}
+                                    <br><small class="text-muted">{{ row.display_name }}</small>
+                                    <br><small class="text-success">{{ row.source_label }}</small>
+                                {% elif row.kind == 'legacy' %}
+                                    <br><small class="text-warning" title="Stored in the hp_design table of this database. Saving converts it into a profile.">{{ row.source_label }}</small>
+                                {% else %}
+                                    <br><small class="text-danger">{{ row.source_label }}</small>
+                                {% endif %}
+                            </td>
+                            <td><input type="text" inputmode="decimal" class="form-control form-control-sm unit-pdesign" value="{{ row.pdesign_kw if row.pdesign_kw is not none else '' }}" placeholder="kW"></td>
+                            <td>
+                                <select class="form-control form-control-sm unit-flow-mode">
+                                    <option value="per_test" {{ 'selected' if row.flow_mode == 'per_test' else '' }}>per test</option>
+                                    <option value="fixed" {{ 'selected' if row.flow_mode == 'fixed' else '' }}>fixed</option>
+                                    <option value="variable" {{ 'selected' if row.flow_mode == 'variable' else '' }}>variable</option>
+                                </select>
+                            </td>
+                            <td>
+                                <select class="form-control form-control-sm unit-flow-type" {{ 'disabled' if row.flow_mode == 'variable' else '' }}>
+                                    <option value="" {{ 'selected' if not row.flow_type else '' }}>—</option>
+                                    <option value="mass" {{ 'selected' if row.flow_type == 'mass' else '' }}>Mass (kg/s)</option>
+                                    <option value="volume" {{ 'selected' if row.flow_type == 'volume' else '' }}>Volume (m³/h)</option>
+                                </select>
+                            </td>
+                            <td style="width: 110px;">
+                                <input type="text" inputmode="decimal" class="form-control form-control-sm unit-flow-set" value="{{ row.flow_set_value if row.flow_set_value is not none else '' }}" placeholder="—" {{ 'disabled' if row.flow_mode == 'variable' else '' }}>
+                                {% if row.flow_incomplete %}
+                                    <small class="text-danger" title="resolve_flow_set needs both the type and the value; with only the type no flow check runs">type without value</small>
+                                {% elif row.flow_expected and row.flow_set_value is none %}
+                                    <small class="text-warning" title="This unit has fixed-flow entries but no flow setpoint, so the flow check cannot run">needed</small>
+                                {% endif %}
+                            </td>
+                            <td class="small text-muted">
+                                {{ row.entry_count }}
+                                {% if row.fixed_entry_count %}<br>({{ row.fixed_entry_count }} fixed flow){% endif %}
+                            </td>
+                            <td>
+                                <button type="button" class="btn btn-sm btn-primary save-unit-design"><i class="fas fa-save"></i> Save</button>
+                                {% if row.kind == 'legacy' %}
+                                <button type="button" class="btn btn-sm btn-outline-danger delete-hp-design" data-hp-id="{{ row.hp_id }}" title="Delete this legacy hp_design row"><i class="fas fa-trash"></i></button>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <form id="addUnitDesignForm" class="form-inline flex-wrap">
+                    <label class="mr-2">Add unit:</label>
+                    <input type="text" id="new_profile_id" class="form-control form-control-sm mr-2" placeholder="profile id, e.g. BAM_HP4" style="width: 170px;">
+                    <input type="text" id="new_display_name" class="form-control form-control-sm mr-2" placeholder="display name" style="width: 150px;">
+                    <input type="text" inputmode="decimal" id="new_pdesign_kw" class="form-control form-control-sm mr-2" placeholder="Pdesign (kW)" style="width: 120px;">
+                    <select id="new_flow_mode" class="form-control form-control-sm mr-2" style="width: 110px;">
+                        <option value="per_test">per test</option>
+                        <option value="fixed">fixed</option>
+                        <option value="variable">variable</option>
+                    </select>
+                    <select id="new_flow_type" class="form-control form-control-sm mr-2" style="width: 110px;">
+                        <option value="">—</option>
+                        <option value="mass">Mass (kg/s)</option>
+                        <option value="volume">Volume (m³/h)</option>
+                    </select>
+                    <input type="text" inputmode="decimal" id="new_flow_set_value" class="form-control form-control-sm mr-2" placeholder="Fixed-flow set" style="width: 110px;">
+                    <input type="text" id="new_hp_id_aliases" class="form-control form-control-sm mr-2" placeholder="HP id aliases" style="width: 130px;">
+                    <input type="text" id="new_filename_patterns" class="form-control form-control-sm mr-2" placeholder="filename patterns" style="width: 150px;">
+                    <button type="submit" class="btn btn-sm btn-success"><i class="fas fa-plus"></i> Add unit</button>
+                </form>
+                <small class="form-text text-muted">A new unit needs at least one HP id alias or filename pattern, otherwise no entry can ever resolve to it. Full unit settings (BUH cap, climate, application) live on the <a href="{{ url_for('profiles_page') }}">Profiles</a> page.</small>
+                <div id="configAlertContainer" class="mt-2"></div>
+            </div>
+        </div>
+        
+        <div class="alert alert-info" style="margin-top: 15px; font-size: 0.9em;">
+            <strong><i class="fas fa-database"></i> Database Relationship:</strong> This page displays deviation statistics stored in the same database as the "Mean Values" page. 
+            <ul class="mb-0 mt-2" style="padding-left: 20px;">
+                <li><strong>Same Database:</strong> Both pages use the <code>results</code> table. Deleting an entry on "Mean Values" also removes it from this page.</li>
+                <li><strong>Manual Calculation:</strong> Deviation statistics are <strong>NOT</strong> automatically calculated when entries are added/updated. Click "Calculate Statistics" to compute or update them.</li>
+                <li><strong>Persistent Storage:</strong> Once calculated, statistics are saved in the database and persist across sessions.</li>
+            </ul>
+        </div>
+        <p class="text-muted" style="font-size: 0.9em; margin-top: 10px;">
+            <i class="fas fa-info-circle"></i> 
+            The tool treats the "T_outdoor (WB)" column as wetbulb temperature. If entries show unrealistic deviations, 
+            this may indicate that the column contains relative humidity data instead, requiring manual data correction.
+            Maximum deviations are shown in Kelvin (K) for temperature differences.
+        </p>
+        <div class="mt-3">
+            <button class="btn btn-sm btn-outline-info" type="button" data-toggle="collapse" data-target="#filteringHelp" aria-expanded="false" aria-controls="filteringHelp">
+                <i class="fas fa-filter"></i> Filtering Help
+            </button>
+            <div class="collapse mt-2" id="filteringHelp">
+                <div class="alert alert-info" style="font-size: 0.9em;">
+                    <strong><i class="fas fa-filter"></i> Filtering Help:</strong>
+                    <ul class="mb-0 mt-2" style="padding-left: 20px;">
+                        <li><strong>Numeric Filters:</strong> Use operators for deviation columns (Mean DB Dev, Mean WB Dev, Mean Tsup Dev, Mean Tmean Dev, etc.)
+                            <ul style="margin-top: 5px;">
+                                <li><code>&gt;1</code> = greater than 1</li>
+                                <li><code>&lt;5</code> = less than 5</li>
+                                <li><code>&gt;=2</code> = greater than or equal to 2</li>
+                                <li><code>&lt;=3</code> = less than or equal to 3</li>
+                                <li><code>0.5-2</code> = range between 0.5 and 2</li>
+                                <li><code>=1.5</code> = exact value 1.5</li>
+                                <li><code>!=2</code> = not equal to 2</li>
+                            </ul>
+                        </li>
+                        <li><strong>Text Filters:</strong> Use wildcards for text columns (File Name, Test Condition, etc.)
+                            <ul style="margin-top: 5px;">
+                                <li><code>*</code> = any characters (e.g., <code>HP*</code>)</li>
+                                <li><code>?</code> = single character (e.g., <code>HP?</code>)</li>
+                                <li><code>=text</code> or <code>"text"</code> = exact match</li>
+                                <li><code>^text</code> = starts with</li>
+                                <li><code>text$</code> = ends with</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Calculation Status and Controls -->
+    <div class="alert alert-info" style="margin-bottom: 20px;">
+        <div class="d-flex justify-content-between align-items-center flex-wrap">
+            <div>
+                <strong>Statistics Status:</strong> 
+                {% if calculated_entries > 0 %}
+                    <span class="badge badge-success">{{ calculated_entries }} calculated</span> 
+                    out of <span class="badge badge-secondary">{{ total_entries }} total entries</span>
+                    {% if calculated_entries < total_entries %}
+                        <span class="badge badge-warning">{{ total_entries - calculated_entries }} missing</span>
+                    {% endif %}
+                {% else %}
+                    <span class="badge badge-warning">No statistics calculated yet</span>
+                {% endif %}
+            </div>
+            <div class="mt-2 mt-md-0">
+                <button class="btn btn-sm btn-outline-secondary" onclick="selectAll()">
+                    <i class="fas fa-check-square"></i> Select All
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="selectNone()">
+                    <i class="fas fa-square"></i> Select None
+                </button>
+                <button class="btn btn-sm btn-outline-primary" onclick="selectMissing()">
+                    <i class="fas fa-filter"></i> Select Missing
+                </button>
+                <button class="btn btn-primary" id="calculateBtn" onclick="calculateDeviations()">
+                    <i class="fas fa-calculator"></i> 
+                    <span id="calculateBtnText">Calculate Statistics</span>
+                    <span id="selectedCount" class="badge badge-light ml-1" style="display: none;">0</span>
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Progress Bar (hidden by default) -->
+    <div id="progressContainer" style="display: none; margin-bottom: 20px;">
+        <div class="progress" style="height: 30px;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                 role="progressbar" 
+                 id="progressBar" 
+                 style="width: 0%">
+                <span id="progressText">0%</span>
+            </div>
+        </div>
+        <p class="text-center mt-2" id="progressMessage">Calculating deviations...</p>
+    </div>
+    
+    <!-- Filter Status Bar -->
+    <div class="filter-status" id="filterStatus">
+        <div>
+            <i class="fas fa-filter"></i>
+            <span id="filterMessage">Showing all entries</span>
+        </div>
+        <button class="btn btn-sm btn-secondary" onclick="clearAllFilters()">
+            <i class="fas fa-times"></i> Clear All Filters
+        </button>
+    </div>
+    
+    <!-- Deviation Statistics Table -->
+    <div class="table-responsive">
+        <table class="table table-striped table-hover" id="deviationsTable">
+            <thead>
+                <tr>
+                    <th>
+                        <input type="checkbox" id="selectAllCheckbox" onclick="toggleSelectAll()" title="Select/Deselect All">
+                    </th>
+                    <th>#</th>
+                    <th>File Name</th>
+                    <th>Data Set</th>
+                    <th>COP Dataset</th>
+                    <th>Dpfix</th>
+                    <th>Flow Config</th>
+                    <th>Lab Id</th>
+                    <th>HP Id</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Duration (s)</th>
+                    <th>COPCorrwBUH</th>
+                    <th>Cop Carnot Corr</th>
+                    <th>Test Condition</th>
+                    <th>Setpoint (DB/WB/Tsup/Q/flow)</th>
+                    <th>Mean DB Dev (K)</th>
+                    <th>Mean WB Dev (K)</th>
+                    <th>Mean Tsup Dev (K)</th>
+                    <th title="Cycle mean of T_mean_log minus the ecodesign Table 3 mean. Variable-flow tests only; band is a BAM lab proposal.">Mean Tmean Dev (K)</th>
+                    <th>Mean Q dev (kW)</th>
+                    <th>Mean Q dev (%)</th>
+                    <th>Mean flow dev (%)</th>
+                    <th>Total Points<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_total_points" title="Update this stat">Update</button></th>
+                    <th>DB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_outside_count" title="Update this stat">Update</button></th>
+                    <th>DB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_percentage" title="Update this stat">Update</button></th>
+                    <th>WB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_outside_count" title="Update this stat">Update</button></th>
+                    <th>WB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_percentage" title="Update this stat">Update</button></th>
+                    <th>Tsup Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_tsup_outside_count" title="Update this stat">Update</button></th>
+                    <th>Tsup %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_tsup_percentage" title="Update this stat">Update</button></th>
+                    <th>dTreturn Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_outside_count" title="Update this stat">Update</button></th>
+                    <th>dTreturn %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_percentage" title="Update this stat">Update</button></th>
+                    <th>Flow Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_outside_count" title="Update this stat">Update</button></th>
+                    <th>Flow %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_percentage" title="Update this stat">Update</button></th>
+                    <th>Max DB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_pos" title="Update this stat">Update</button></th>
+                    <th>Max DB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_neg" title="Update this stat">Update</button></th>
+                    <th>Max WB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_pos" title="Update this stat">Update</button></th>
+                    <th>Max WB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_neg" title="Update this stat">Update</button></th>
+                    <th>Max Tsup + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_tsup_pos" title="Update this stat">Update</button></th>
+                    <th>Max Tsup − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_tsup_neg" title="Update this stat">Update</button></th>
+                    <th>Max dTreturn + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_pos" title="Update this stat">Update</button></th>
+                    <th>Max dTreturn − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_neg" title="Update this stat">Update</button></th>
+                    <th>Max Flow + (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_pos_pct" title="Update this stat">Update</button></th>
+                    <th>Max Flow − (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_neg_pct" title="Update this stat">Update</button></th>
+                    <th>Avg Timestep (s)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_avg_timestep" title="Update this stat">Update</button></th>
+                    <th>Actions</th>
+                </tr>
+                <tr class="filter-row">
+                    <th></th>
+                    <th></th>
+                    <th><input type="text" class="column-filter" data-column="2" placeholder="Filter files..."></th>
+                    <th><input type="text" class="column-filter" data-column="3" placeholder="Filter dataset..."></th>
+                    <th><input type="text" class="column-filter" data-column="4" placeholder="Filter COP Dataset..."></th>
+                    <th><input type="text" class="column-filter" data-column="5" placeholder="Filter Dpfix..."></th>
+                    <th><input type="text" class="column-filter" data-column="6" placeholder="Filter Flow Config..."></th>
+                    <th><input type="text" class="column-filter" data-column="7" placeholder="Filter Lab Id..."></th>
+                    <th><input type="text" class="column-filter" data-column="8" placeholder="Filter HP Id..."></th>
+                    <th><input type="text" class="column-filter" data-column="9" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="10" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="11" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="12" placeholder="Filter COPCorrwBUH..."></th>
+                    <th><input type="text" class="column-filter" data-column="13" placeholder="Filter Cop Carnot Corr..."></th>
+                    <th><input type="text" class="column-filter" data-column="14" placeholder="Filter condition..."></th>
+                    <th></th>
+                    <th><input type="text" class="column-filter" data-column="16" placeholder="Filter: >1, <5, 0.5-2, =1.5" title="Filter numbers: >1 (greater than), <5 (less than), 0.5-2 (range), =1.5 (exact)"></th>
+                    <th><input type="text" class="column-filter" data-column="17" placeholder="Filter: >1, <5, 0.5-2, =1.5" title="Filter numbers: >1 (greater than), <5 (less than), 0.5-2 (range), =1.5 (exact)"></th>
+                    <th><input type="text" class="column-filter" data-column="18" placeholder="Filter: >1, <5, 0.5-2, =1.5" title="Filter numbers"></th>
+                    <th><input type="text" class="column-filter" data-column="19" placeholder="Filter: >0.5, <2" title="Mean Tmean dev (K)"></th>
+                    <th><input type="text" class="column-filter" data-column="20" placeholder="Filter: >0.5, <2" title="Mean Q dev (kW)"></th>
+                    <th><input type="text" class="column-filter" data-column="21" placeholder="Filter: >5, >10" title="Mean Q dev (%)"></th>
+                    <th><input type="text" class="column-filter" data-column="22" placeholder="Filter: >1, >2" title="Mean flow dev (%)"></th>
+                    <th><input type="text" class="column-filter" data-column="23" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="24" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="25" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="26" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="27" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="28" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="29" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="30" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="31" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="32" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="33" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="34" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="35" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="36" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="37" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="38" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="39" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="40" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="41" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="42" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="43" placeholder="Filter numbers..."></th>
+                    <th></th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in entries %}
+                <tr data-rowid="{{ entry.rowid }}" class="{% if not entry.has_statistics %}table-warning{% endif %}">
+                    <td>
+                        <input type="checkbox" class="row-checkbox" data-rowid="{{ entry.rowid }}" 
+                               {% if not entry.has_statistics %}checked{% endif %}>
+                    </td>
+                    <td class="stat-highlight"><strong>{{ loop.index }}</strong></td>
+                    <td>{{ entry.file_name }}</td>
+                    <td>{{ entry.data_set }}</td>
+                    <td>
+                        {% if column_name_map.get('COP') %}
+                            {% set cop_key = column_name_map['COP'] %}
+                            {% set cop_val = entry.get(cop_key) %}
+                            {% if cop_val is not none and cop_val != '' and cop_val != 'None' and cop_val != 'none' %}
+                                {{ cop_val }}
+                            {% else %}
+                                <span class="text-muted">None</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">None</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('Dpfix') %}
+                            {% set dpfix_key = column_name_map['Dpfix'] %}
+                            {% set dpfix_val = entry.get(dpfix_key) %}
+                            {% if dpfix_val is not none and dpfix_val != '' and dpfix_val != 'None' and dpfix_val != 'none' %}
+                                {{ dpfix_val }}
+                            {% else %}
+                                <span class="text-muted">None</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">None</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('Flow') %}
+                            {% set flow_key = column_name_map['Flow'] %}
+                            {% if entry.get(flow_key) is not none and entry.get(flow_key) != '' %}
+                                {{ entry[flow_key] }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('Lab') %}
+                            {% set lab_key = column_name_map['Lab'] %}
+                            {% if entry.get(lab_key) is not none and entry.get(lab_key) != '' %}
+                                {{ entry[lab_key] }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('HP') %}
+                            {% set hp_key = column_name_map['HP'] %}
+                            {% if entry.get(hp_key) is not none and entry.get(hp_key) != '' %}
+                                {{ entry[hp_key] }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ entry.start_time|int if entry.start_time else '-' }}</td>
+                    <td>{{ entry.end_time|int if entry.end_time else '-' }}</td>
+                    <td class="stat-highlight">
+                        {% if entry.cycle_duration is not none %}
+                            {{ "%.0f"|format(entry.cycle_duration) }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('COPCorrwBUH') %}
+                            {% set copbuh_key = column_name_map['COPCorrwBUH'] %}
+                            {% set copbuh_val = entry.get(copbuh_key) %}
+                            {% if copbuh_val is not none and copbuh_val != '' and copbuh_val != 'None' %}
+                                {{ "%.3f"|format(copbuh_val|float) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if column_name_map.get('CopCarnotCorr') %}
+                            {% set carnot_key = column_name_map['CopCarnotCorr'] %}
+                            {% set carnot_val = entry.get(carnot_key) %}
+                            {% if carnot_val is not none and carnot_val != '' and carnot_val != 'None' %}
+                                {{ "%.3f"|format(carnot_val|float) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.test_condition %}
+                            <span class="badge badge-primary">{{ entry.test_condition }}</span>
+                        {% else %}
+                            <span class="badge badge-secondary">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.db_setpoint is not none %}
+                            <small>
+                                DB: {{ entry.db_setpoint }}°C<br>
+                                WB: {% if entry.wb_setpoint is not none %}{{ entry.wb_setpoint }}°C{% else %}<span class="text-muted">-</span>{% endif %}<br>
+                                Tsup: {% if entry.tsup_setpoint is not none %}{{ entry.tsup_setpoint }}°C{% else %}<span class="text-muted">-</span>{% endif %}
+                                {% if entry.tmean_setpoint is not none %}<br><span {% if not entry.tmean_is_variable_flow %}class="text-muted"{% endif %}
+                                    title="Ecodesign Table 3 mean water temperature{% if not entry.tmean_is_variable_flow %} — not applied: this entry is not variable flow{% endif %}">Tmean: {{ entry.tmean_setpoint }}°C</span>{% endif %}
+                                {% if entry.qset_kw is not none %}<br>Qset: {{ "%.2f"|format(entry.qset_kw) }} kW{% endif %}
+                                {% if entry.flow_setpoint_display %}<br>{{ entry.flow_setpoint_display }}{% endif %}
+                            </small>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_db_deviation is not none %}
+                            {% set limit = deviations.get('mean_db_k', 0.6) %}
+                            {% set v = entry.mean_db_deviation %}
+                            {% set av = v|abs %}
+                            {% if av > limit %}<span class="badge-violation">{% elif av > (limit / 2) %}<span class="badge-warning">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_db_deviation) }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_wb_deviation is not none %}
+                            {% set limit = deviations.get('mean_wb_k', 0.4) %}
+                            {% set v = entry.mean_wb_deviation %}
+                            {% set av = v|abs %}
+                            {% if av > limit %}<span class="badge-violation">{% elif av > (limit / 2) %}<span class="badge-warning">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_wb_deviation) }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_tsup_deviation is not none %}
+                            {% set limit = deviations.get('mean_tsup_k', 0.5) %}
+                            {% set v = entry.mean_tsup_deviation %}
+                            {% set av = v|abs %}
+                            {% if av > limit %}<span class="badge-violation">{% elif av > (limit / 2) %}<span class="badge-warning">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_tsup_deviation) }}</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_tmean_deviation is not none %}
+                            {% set limit = deviations.get('mean_tmean_k', 0.5) %}
+                            {% set v = entry.mean_tmean_deviation %}
+                            {% set av = v|abs %}
+                            {% if av > limit %}<span class="badge-violation">{% elif av > (limit / 2) %}<span class="badge-warning">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_tmean_deviation) }}</span>
+                        {% elif not entry.tmean_is_variable_flow %}
+                            <span class="text-muted" title="Not variable flow — the Table 3 mean is only required to be held when the flow is variable. This entry is judged on Tsup. Avg T Mean Log is still stored; this column is the deviation from the Table 3 mean.">n/a (fixed flow)</span>
+                        {% elif entry.tmean_setpoint is none %}
+                            <span class="text-muted" title="No Table 3 mean for this test condition, climate and application.">-</span>
+                        {% else %}
+                            <span class="text-muted" title="T_mean_log not calculated for this cycle yet — recalculate or re-extract.">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_q_dev_kw is not none %}
+                            {{ "%+.3f"|format(entry.mean_q_dev_kw) }}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.mean_q_dev_pct is not none %}
+                            {% set qv = entry.mean_q_dev_pct %}
+                            {% set aqv = qv|abs %}
+                            {% if aqv > deviations.get('mean_q_pct_red', 10) %}
+                                <span class="badge-violation">{{ "%+.2f"|format(entry.mean_q_dev_pct) }}%</span>
+                            {% elif aqv > deviations.get('mean_q_pct_yellow', 5) %}
+                                <span class="badge-warning">{{ "%+.2f"|format(entry.mean_q_dev_pct) }}%</span>
+                            {% else %}
+                                <span class="badge-good">{{ "%+.2f"|format(entry.mean_q_dev_pct) }}%</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tmean_is_variable_flow %}
+                            <span class="text-muted" title="Variable flow — no flow set to hold. This entry is judged on Tmean / Tsup.">n/a (variable flow)</span>
+                        {% elif entry.mean_flow_dev_pct is not none %}
+                            {% set flimit = deviations.get('mean_flow_pct', 1) %}
+                            {% set fv = entry.mean_flow_dev_pct %}
+                            {% set afv = fv|abs %}
+                            {% if afv > flimit %}<span class="badge-violation">{% elif afv > (flimit / 2) %}<span class="badge-warning">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_flow_dev_pct) }}%</span>
+                        {% elif entry.flow_setpoint is not none %}
+                            {{ no_data_cell(entry) }}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td class="stat-highlight">
+                        {% if entry.total_points is not none %}
+                            {{ entry.total_points }}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.db_outside_band_count is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.db_outside_band_count > deviations.get('db_violations_red', 0) %}
+                            <span class="badge-violation">{{ entry.db_outside_band_count }}</span>
+                        {% else %}
+                            <span class="badge-good">{{ entry.db_outside_band_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.db_percentage is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.db_percentage > deviations.get('db_pct_red', 5) %}
+                            <span class="badge-violation">{{ "%.2f"|format(entry.db_percentage) }}%</span>
+                        {% elif entry.db_percentage > deviations.get('db_pct_yellow', 1) %}
+                            <span class="badge-warning">{{ "%.2f"|format(entry.db_percentage) }}%</span>
+                        {% else %}
+                            <span class="badge-good">{{ "%.2f"|format(entry.db_percentage) }}%</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.wb_outside_band_count is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.wb_outside_band_count > deviations.get('wb_violations_red', 0) %}
+                            <span class="badge-violation">{{ entry.wb_outside_band_count }}</span>
+                        {% else %}
+                            <span class="badge-good">{{ entry.wb_outside_band_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.wb_percentage is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.wb_percentage > deviations.get('wb_pct_red', 5) %}
+                            <span class="badge-violation">{{ "%.2f"|format(entry.wb_percentage) }}%</span>
+                        {% elif entry.wb_percentage > deviations.get('wb_pct_yellow', 1) %}
+                            <span class="badge-warning">{{ "%.2f"|format(entry.wb_percentage) }}%</span>
+                        {% else %}
+                            <span class="badge-good">{{ "%.2f"|format(entry.wb_percentage) }}%</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tsup_outside_band_count is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.tsup_outside_band_count > deviations.get('tsup_violations_red', 0) %}
+                            <span class="badge-violation">{{ entry.tsup_outside_band_count }}</span>
+                        {% else %}
+                            <span class="badge-good">{{ entry.tsup_outside_band_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tsup_percentage is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.tsup_percentage > deviations.get('tsup_pct_red', 5) %}
+                            <span class="badge-violation">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
+                        {% elif entry.tsup_percentage > deviations.get('tsup_pct_yellow', 1) %}
+                            <span class="badge-warning">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
+                        {% else %}
+                            <span class="badge-good">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.dtreturn_outside_band_count is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.dtreturn_outside_band_count > deviations.get('dtreturn_violations_red', 0) %}
+                            <span class="badge-violation">{{ entry.dtreturn_outside_band_count }}</span>
+                        {% else %}
+                            <span class="badge-good">{{ entry.dtreturn_outside_band_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.dtreturn_percentage is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.dtreturn_percentage > deviations.get('dtreturn_pct_red', 5) %}
+                            <span class="badge-violation">{{ "%.2f"|format(entry.dtreturn_percentage) }}%</span>
+                        {% elif entry.dtreturn_percentage > deviations.get('dtreturn_pct_yellow', 1) %}
+                            <span class="badge-warning">{{ "%.2f"|format(entry.dtreturn_percentage) }}%</span>
+                        {% else %}
+                            <span class="badge-good">{{ "%.2f"|format(entry.dtreturn_percentage) }}%</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tmean_is_variable_flow %}
+                            <span class="text-muted" title="Variable flow — flow violations are not scored.">n/a</span>
+                        {% elif entry.flow_outside_count is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.flow_outside_count > deviations.get('flow_violations_red', 0) %}
+                            <span class="badge-violation">{{ entry.flow_outside_count }}</span>
+                        {% else %}
+                            <span class="badge-good">{{ entry.flow_outside_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tmean_is_variable_flow %}
+                            <span class="text-muted" title="Variable flow — flow % is not scored.">n/a</span>
+                        {% elif entry.flow_percentage is none %}
+                            {{ no_data_cell(entry) }}
+                        {% elif entry.flow_percentage > deviations.get('flow_pct_red', 5) %}
+                            <span class="badge-violation">{{ "%.2f"|format(entry.flow_percentage) }}%</span>
+                        {% elif entry.flow_percentage > deviations.get('flow_pct_yellow', 1) %}
+                            <span class="badge-warning">{{ "%.2f"|format(entry.flow_percentage) }}%</span>
+                        {% else %}
+                            <span class="badge-good">{{ "%.2f"|format(entry.flow_percentage) }}%</span>
+                        {% endif %}
+                    </td>
+                    {% set db_band = deviations.get('DB', {}).get('value', 1.0) %}
+                    <td>{{ extreme_cell(entry.max_db_pos, db_band, true, '', entry) }}</td>
+                    <td>{{ extreme_cell(entry.max_db_neg, -db_band, false, '', entry) }}</td>
+                    {% set wb_band = deviations.get('WB', {}).get('value', 1.0) %}
+                    <td>{{ extreme_cell(entry.max_wb_pos, wb_band, true, '', entry) }}</td>
+                    <td>{{ extreme_cell(entry.max_wb_neg, -wb_band, false, '', entry) }}</td>
+                    {% set tsup_band = deviations.get('Tsup', {}).get('value', 0.5) %}
+                    <td>{{ extreme_cell(entry.max_tsup_pos, tsup_band, true, '', entry) }}</td>
+                    <td>{{ extreme_cell(entry.max_tsup_neg, -tsup_band, false, '', entry) }}</td>
+                    <td>{{ extreme_cell(entry.max_dtreturn_pos, deviations.get('dTreturn', {}).get('upper', 2.0), true, '', entry) }}</td>
+                    <td>{{ extreme_cell(entry.max_dtreturn_neg, deviations.get('dTreturn', {}).get('lower', -2.0), false, '', entry) }}</td>
+                    {% set flow_band = deviations.get('flow_instantaneous_pct', 2.5) %}
+                    <td>
+                        {% if entry.tmean_is_variable_flow %}
+                            <span class="text-muted">n/a</span>
+                        {% else %}
+                            {{ extreme_cell(entry.max_flow_pos_pct, flow_band, true, '%', entry) }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.tmean_is_variable_flow %}
+                            <span class="text-muted">n/a</span>
+                        {% else %}
+                            {{ extreme_cell(entry.max_flow_neg_pct, -flow_band, false, '%', entry) }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.avg_timestep_size is not none %}
+                            {{ "%.3f"|format(entry.avg_timestep_size) }}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if entry.has_statistics %}
+                            <button class="btn btn-sm btn-primary btn-plot" 
+                                    onclick="plotDeviation('{{ entry.file_name }}', {{ entry.data_set }}, {{ entry.start_time }}, {{ entry.end_time }})">
+                                <i class="fas fa-chart-line"></i> Plot
+                            </button>
+                            {% if entry.flow_setpoint is not none and column_name_map.get('HP') %}
+                            <button class="btn btn-sm btn-info btn-plot mt-1 btn-plot-flow" 
+                                    data-file-name="{{ entry.file_name }}" data-dataset="{{ entry.data_set }}" 
+                                    data-start-time="{{ entry.start_time }}" data-end-time="{{ entry.end_time }}" 
+                                    data-hp-id="{{ entry.get(column_name_map['HP']) or '' }}">
+                                <i class="fas fa-tint"></i> Flow
+                            </button>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted"><small>Calculate first</small></span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Plot Modal -->
+    <div class="modal fade plot-modal" id="plotModal" tabindex="-1" role="dialog">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Permissible Deviation Plot</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <div class="modal-body" id="plotModalBody">
+                    <div class="text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                        <p>Generating plot...</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Filtering functionality (similar to index.html)
+    let allRows = [];
+    
+    $(document).ready(function() {
+        // Store all rows
+        $('#deviationsTable tbody tr').each(function() {
+            allRows.push($(this));
+        });
+        
+        // Apply filters on input
+        $('.column-filter').on('input', function() {
+            applyFilters();
+        });
+        
+        // Highlight active filters
+        $('.column-filter').on('input', function() {
+            if ($(this).val().trim() !== '') {
+                $(this).addClass('active');
+            } else {
+                $(this).removeClass('active');
+            }
+        });
+    });
+    
+    function applyFilters() {
+        let visibleCount = 0;
+        
+        $('#deviationsTable tbody tr').each(function() {
+            let row = $(this);
+            let show = true;
+            
+            // Check each filter
+            $('.column-filter').each(function() {
+                let filterValue = $(this).val().trim();
+                if (filterValue === '') return;
+                
+                let columnIndex = parseInt($(this).data('column'));
+                let cell = row.find('td').eq(columnIndex);
+                let cellText = cell.text().trim();
+                let cellTextLower = cellText.toLowerCase();
+                let filterValueLower = filterValue.toLowerCase();
+                
+                // Try to parse as number for numeric comparison
+                let cellNum = parseFloat(cellText);
+                let isNumeric = !isNaN(cellNum) && cellText !== '-' && cellText !== 'N/A' && cellText !== '';
+                
+                if (isNumeric) {
+                    // Numeric filtering with operators
+                    if (filterValue.startsWith('>=')) {
+                        let threshold = parseFloat(filterValue.substring(2));
+                        show = show && !isNaN(threshold) && cellNum >= threshold;
+                    } else if (filterValue.startsWith('<=')) {
+                        let threshold = parseFloat(filterValue.substring(2));
+                        show = show && !isNaN(threshold) && cellNum <= threshold;
+                    } else if (filterValue.startsWith('!=') || filterValue.startsWith('<>')) {
+                        let threshold = parseFloat(filterValue.substring(2));
+                        show = show && !isNaN(threshold) && Math.abs(cellNum - threshold) >= 0.0001;
+                    } else if (filterValue.startsWith('>')) {
+                        let threshold = parseFloat(filterValue.substring(1));
+                        show = show && !isNaN(threshold) && cellNum > threshold;
+                    } else if (filterValue.startsWith('<')) {
+                        let threshold = parseFloat(filterValue.substring(1));
+                        show = show && !isNaN(threshold) && cellNum < threshold;
+                    } else if (filterValue.startsWith('=')) {
+                        // Exact match: "=10"
+                        let threshold = parseFloat(filterValue.substring(1));
+                        show = show && !isNaN(threshold) && Math.abs(cellNum - threshold) < 0.0001;
+                    } else if (filterValue.includes('-') && !filterValue.includes('*') && !filterValue.includes('?')) {
+                        // Range: "10-20" (but not if it contains wildcards)
+                        let parts = filterValue.split('-');
+                        if (parts.length === 2) {
+                            let min = parseFloat(parts[0]);
+                            let max = parseFloat(parts[1]);
+                            show = show && !isNaN(min) && !isNaN(max) && cellNum >= min && cellNum <= max;
+                        } else {
+                            // Fall back to text matching
+                            show = show && cellTextLower.indexOf(filterValueLower) !== -1;
+                        }
+                    } else {
+                        // Try exact numeric match first
+                        let filterNum = parseFloat(filterValue);
+                        if (!isNaN(filterNum)) {
+                            show = show && Math.abs(cellNum - filterNum) < 0.0001;
+                        } else {
+                            // Fall back to text matching
+                            show = show && cellTextLower.indexOf(filterValueLower) !== -1;
+                        }
+                    }
+                } else {
+                    // Text matching (with wildcard support)
+                    // Exact match with quotes
+                    if ((filterValue.startsWith('"') && filterValue.endsWith('"')) || 
+                        (filterValue.startsWith("'") && filterValue.endsWith("'"))) {
+                        let exactMatch = filterValue.slice(1, -1);
+                        show = show && cellTextLower === exactMatch.toLowerCase();
+                    } else if (filterValue.startsWith('=')) {
+                        // Exact match with = prefix
+                        let exactMatch = filterValue.substring(1);
+                        show = show && cellTextLower === exactMatch.toLowerCase();
+                    } else if (filterValue.startsWith('^')) {
+                        // Begins with
+                        let beginsWith = filterValue.substring(1);
+                        show = show && cellTextLower.startsWith(beginsWith.toLowerCase());
+                    } else if (filterValue.endsWith('$') && !filterValue.endsWith('\\$')) {
+                        // Ends with
+                        let endsWith = filterValue.slice(0, -1);
+                        show = show && cellTextLower.endsWith(endsWith.toLowerCase());
+                    } else {
+                        // Simple text matching (can contain wildcards * and ?)
+                        let pattern = filterValueLower.replace(/\*/g, '.*').replace(/\?/g, '.');
+                        let regex = new RegExp('^' + pattern + '$');
+                        show = show && regex.test(cellTextLower);
+                    }
+                }
+                
+                if (!show) return false; // Short-circuit if filter doesn't match
+            });
+            
+            if (show) {
+                row.show();
+                visibleCount++;
+            } else {
+                row.hide();
+            }
+        });
+        
+        // Update filter message
+        let totalCount = allRows.length;
+        if (visibleCount === totalCount) {
+            $('#filterMessage').text('Showing all entries');
+        } else {
+            $('#filterMessage').text(`Showing ${visibleCount} of ${totalCount} entries`);
+        }
+    }
+    
+    function clearAllFilters() {
+        $('.column-filter').val('').removeClass('active');
+        applyFilters();
+    }
+    
+    function getSelectedRowIds() {
+        const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+        return Array.from(checkboxes).map(cb => parseInt(cb.dataset.rowid));
+    }
+    
+    function updateSelectedCount() {
+        const selected = getSelectedRowIds();
+        const count = selected.length;
+        const countBadge = $('#selectedCount');
+        const btnText = $('#calculateBtnText');
+        
+        if (count > 0) {
+            countBadge.text(count).show();
+            btnText.text('Calculate Selected');
+        } else {
+            countBadge.hide();
+            btnText.text('Calculate Missing');
+        }
+    }
+    
+    function selectAll() {
+        $('.row-checkbox').prop('checked', true);
+        $('#selectAllCheckbox').prop('checked', true);
+        updateSelectedCount();
+    }
+    
+    function selectNone() {
+        $('.row-checkbox').prop('checked', false);
+        $('#selectAllCheckbox').prop('checked', false);
+        updateSelectedCount();
+    }
+    
+    function selectMissing() {
+        $('.row-checkbox').each(function() {
+            const row = $(this).closest('tr');
+            const hasStats = !row.hasClass('table-warning');
+            $(this).prop('checked', !hasStats);
+        });
+        updateSelectAllCheckbox();
+        updateSelectedCount();
+    }
+    
+    function toggleSelectAll() {
+        const isChecked = $('#selectAllCheckbox').prop('checked');
+        $('.row-checkbox').prop('checked', isChecked);
+        updateSelectedCount();
+    }
+    
+    function updateSelectAllCheckbox() {
+        const total = $('.row-checkbox').length;
+        const checked = $('.row-checkbox:checked').length;
+        const selectAll = $('#selectAllCheckbox');
+        
+        if (checked === 0) {
+            selectAll.prop('checked', false);
+            selectAll.prop('indeterminate', false);
+        } else if (checked === total) {
+            selectAll.prop('checked', true);
+            selectAll.prop('indeterminate', false);
+        } else {
+            selectAll.prop('checked', false);
+            selectAll.prop('indeterminate', true);
+        }
+    }
+    
+    async function calculateDeviations() {
+        const selectedIds = getSelectedRowIds();
+        const hasSelection = selectedIds.length > 0;
+        
+        let confirmMsg;
+        if (hasSelection) {
+            confirmMsg = `This will calculate deviation statistics for ${selectedIds.length} selected entries. Continue?`;
+        } else {
+            confirmMsg = 'This will calculate deviation statistics for all entries missing statistics. Continue?';
+        }
+        
+        if (!confirm(confirmMsg)) {
+            return;
+        }
+        
+        // Show progress
+        $('#progressContainer').show();
+        $('#calculateBtn').prop('disabled', true);
+        $('#progressBar').css('width', '0%');
+        $('#progressText').text('0%');
+        $('#progressMessage').text('Starting calculation...');
+        
+        try {
+            // For large selections, batch to avoid timeouts and huge payloads.
+            if (hasSelection && selectedIds.length > 25) {
+                const batchSize = selectedIds.length > 200 ? 5 : (selectedIds.length > 80 ? 10 : 25);
+                let totalCalculated = 0;
+                let totalErrors = 0;
+                let warnings = [];
+                for (let i = 0; i < selectedIds.length; i += batchSize) {
+                    const batch = selectedIds.slice(i, i + batchSize);
+                    const done = Math.min(i, selectedIds.length);
+                    const pct = Math.floor((done / selectedIds.length) * 100);
+                    $('#progressBar').css('width', `${pct}%`);
+                    $('#progressText').text(`${pct}%`);
+                    $('#progressMessage').text(`Calculating selected entries... (${done}/${selectedIds.length})`);
+
+                    let data = null;
+                    for (let attempt = 1; attempt <= 2; attempt++) {
+                        try {
+                            const resp = await fetch('/calculate_deviations', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ entry_ids: batch, skip_existing: true })
+                            });
+                            data = await resp.json();
+                            break;
+                        } catch (e) {
+                            if (attempt === 2) throw e;
+                            await new Promise(r => setTimeout(r, 800));
+                        }
+                    }
+                    if (!data.success) throw new Error(data.message || 'Unknown error');
+                    totalCalculated += (data.calculated || 0);
+                    totalErrors += (data.errors || 0);
+                    if (data.warnings && data.warnings.length) warnings = warnings.concat(data.warnings);
+
+                    const doneAfter = Math.min(i + batch.length, selectedIds.length);
+                    const pctAfter = Math.floor((doneAfter / selectedIds.length) * 100);
+                    $('#progressBar').css('width', `${pctAfter}%`);
+                    $('#progressText').text(`${pctAfter}%`);
+                    $('#progressMessage').text(`Calculating selected entries... (${doneAfter}/${selectedIds.length})`);
+                }
+                $('#progressBar').css('width', '100%');
+                $('#progressText').text('100%');
+                let message = `Completed! Calculated ${totalCalculated} entries.`;
+                if (totalErrors > 0) message += ` ${totalErrors} errors occurred.`;
+                $('#progressMessage').text(message);
+                if (warnings.length > 0) {
+                    let warningHtml = '<div class="alert alert-warning mt-3" style="max-height: 300px; overflow-y: auto;"><strong>Warnings:</strong><ul class="mb-0">';
+                    warnings.slice(0, 50).forEach(function(warning) { warningHtml += '<li>' + warning + '</li>'; });
+                    warningHtml += '</ul></div>';
+                    $('#progressMessage').after(warningHtml);
+                }
+                setTimeout(function() { window.location.reload(); }, warnings.length > 0 ? 5000 : 2000);
+            } else {
+                // Small selection or missing-only path: single request is fine.
+                const resp = await fetch('/calculate_deviations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entry_ids: hasSelection ? selectedIds : null, skip_existing: true })
+                });
+                const response = await resp.json();
+                if (!response.success) throw new Error(response.message || 'Unknown error');
+
+                $('#progressBar').css('width', '100%');
+                $('#progressText').text('100%');
+                let message = `Completed! Calculated ${response.calculated} entries.`;
+                if (response.skipped > 0) message += ` Skipped ${response.skipped} entries (already calculated).`;
+                if (response.errors > 0) message += ` ${response.errors} errors occurred.`;
+                $('#progressMessage').text(message);
+
+                if (response.warnings && response.warnings.length > 0) {
+                    let warningHtml = '<div class="alert alert-warning mt-3" style="max-height: 300px; overflow-y: auto;"><strong>Warnings:</strong><ul class="mb-0">';
+                    response.warnings.forEach(function(warning) { warningHtml += '<li>' + warning + '</li>'; });
+                    warningHtml += '</ul></div>';
+                    $('#progressMessage').after(warningHtml);
+                }
+                setTimeout(function() { window.location.reload(); }, response.warnings && response.warnings.length > 0 ? 5000 : 2000);
+            }
+        } catch (e) {
+            alert('Error calculating deviations: ' + (e.message || e));
+            $('#progressContainer').hide();
+            $('#calculateBtn').prop('disabled', false);
+        }
+    }
+    
+    // Update checkbox states on change
+    $(document).ready(function() {
+        $('.row-checkbox').on('change', function() {
+            updateSelectAllCheckbox();
+            updateSelectedCount();
+        });
+        
+        // Initial update
+        updateSelectedCount();
+        updateSelectAllCheckbox();
+    });
+    
+    // Configuration form handling
+    $('#deviationsConfigForm').on('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = {
+            'DB': {
+                value: parseFloat($('#config_DB_value').val()),
+                unit: 'K',
+                description: 'Dry-bulb temperature deviation band (transient)',
+                standard_reference: 'SN EN 14511-3:2022 Table 6, Interval H'
+            },
+            'WB': {
+                value: parseFloat($('#config_WB_value').val()),
+                unit: 'K',
+                description: 'Wet-bulb temperature deviation band (transient)',
+                standard_reference: 'SN EN 14511-3:2022 Table 6, Interval H'
+            },
+            'Tsup': {
+                value: parseFloat($('#config_Tsup_value').val()),
+                unit: 'K',
+                description: 'Supply temperature deviation band (transient)',
+                standard_reference: 'SN EN 14511-3:2022 Table 6, Interval H - Arithmetical mean'
+            },
+            'dTreturn': {
+                lower: parseFloat($('#config_dTreturn_lower').val()),
+                upper: parseFloat($('#config_dTreturn_upper').val()),
+                unit: 'K',
+                description: 'Return temperature difference band (transient): dTreturn = T_return_emu − T_return_calc',
+                standard_reference: ''
+            },
+            mean_db_k: parseFloat($('#config_mean_db_k').val()),
+            mean_wb_k: parseFloat($('#config_mean_wb_k').val()),
+            mean_tsup_k: parseFloat($('#config_mean_tsup_k').val()),
+            mean_tmean_k: parseFloat($('#config_mean_tmean_k').val()),
+            db_pct_red: parseFloat($('#config_db_pct_red').val()),
+            db_pct_yellow: parseFloat($('#config_db_pct_yellow').val()),
+            wb_pct_red: parseFloat($('#config_wb_pct_red').val()),
+            wb_pct_yellow: parseFloat($('#config_wb_pct_yellow').val()),
+            db_violations_red: parseFloat($('#config_db_violations_red').val()) || 0,
+            wb_violations_red: parseFloat($('#config_wb_violations_red').val()) || 0,
+            tsup_pct_red: parseFloat($('#config_tsup_pct_red').val()),
+            tsup_pct_yellow: parseFloat($('#config_tsup_pct_yellow').val()),
+            tsup_violations_red: parseFloat($('#config_tsup_violations_red').val()) || 0,
+            dtreturn_pct_red: parseFloat($('#config_dtreturn_pct_red').val()),
+            dtreturn_pct_yellow: parseFloat($('#config_dtreturn_pct_yellow').val()),
+            dtreturn_violations_red: parseFloat($('#config_dtreturn_violations_red').val()) || 0,
+            mean_q_pct_red: parseFloat($('#config_mean_q_pct_red').val()),
+            mean_q_pct_yellow: parseFloat($('#config_mean_q_pct_yellow').val()),
+            mean_flow_pct: parseFloat($('#config_mean_flow_pct').val()),
+            flow_instantaneous_pct: parseFloat($('#config_flow_instantaneous_pct').val()),
+            flow_pct_red: parseFloat($('#config_flow_pct_red').val()),
+            flow_pct_yellow: parseFloat($('#config_flow_pct_yellow').val()),
+            flow_violations_red: parseFloat($('#config_flow_violations_red').val()) || 0
+        };
+        
+        // Validate
+        if (isNaN(formData.DB.value) || formData.DB.value < 0 || isNaN(formData.WB.value) || formData.WB.value < 0 || isNaN(formData.Tsup.value) || formData.Tsup.value < 0) {
+            showConfigAlert('danger', 'Invalid transient band values. Please enter non-negative numbers.');
+            return;
+        }
+        if (isNaN(formData.dTreturn.lower) || isNaN(formData.dTreturn.upper) || formData.dTreturn.lower >= formData.dTreturn.upper) {
+            showConfigAlert('danger', 'Invalid dTreturn bounds. Please enter numbers where lower < upper (e.g. -2 and 2).');
+            return;
+        }
+        if ([formData.mean_db_k, formData.mean_wb_k, formData.mean_tsup_k, formData.mean_tmean_k].some(v => isNaN(v) || v < 0)) {
+            showConfigAlert('danger', 'Invalid mean deviation limits. Please enter non-negative numbers.');
+            return;
+        }
+        
+        const submitBtn = $(this).find('button[type="submit"]');
+        const originalText = submitBtn.html();
+        submitBtn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Saving...');
+        
+        $.ajax({
+            url: '/save_permissible_deviations',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(formData),
+            success: function(response) {
+                if (response.success) {
+                    showConfigAlert('success', response.message || 'Configuration saved successfully!');
+                } else {
+                    showConfigAlert('danger', response.message || 'Failed to save configuration.');
+                }
+            },
+            error: function(xhr, status, error) {
+                showConfigAlert('danger', 'Error saving configuration: ' + error);
+            },
+            complete: function() {
+                submitBtn.prop('disabled', false).html(originalText);
+            }
+        });
+    });
+    
+    function resetConfigToDefaults() {
+        if (confirm('Reset all values to default standards? This will discard any custom changes.')) {
+            $('#config_DB_value').val(1.0);
+            $('#config_WB_value').val(1.0);
+            $('#config_Tsup_value').val(0.5);
+            $('#config_dTreturn_lower').val(-2.0);
+            $('#config_dTreturn_upper').val(2.0);
+            $('#config_mean_db_k').val(0.6);
+            $('#config_mean_wb_k').val(0.4);
+            $('#config_mean_tsup_k').val(0.5);
+            $('#config_mean_tmean_k').val(0.5);
+            $('#config_db_pct_red').val(5);
+            $('#config_db_pct_yellow').val(1);
+            $('#config_wb_pct_red').val(5);
+            $('#config_wb_pct_yellow').val(1);
+            $('#config_db_violations_red').val(0);
+            $('#config_wb_violations_red').val(0);
+            $('#config_tsup_pct_red').val(5);
+            $('#config_tsup_pct_yellow').val(1);
+            $('#config_tsup_violations_red').val(0);
+            $('#config_dtreturn_pct_red').val(5);
+            $('#config_dtreturn_pct_yellow').val(1);
+            $('#config_dtreturn_violations_red').val(0);
+            $('#config_mean_q_pct_red').val(10);
+            $('#config_mean_q_pct_yellow').val(5);
+            $('#config_mean_flow_pct').val(1);
+            $('#config_flow_instantaneous_pct').val(2.5);
+            $('#config_flow_pct_red').val(5);
+            $('#config_flow_pct_yellow').val(1);
+            $('#config_flow_violations_red').val(0);
+            showConfigAlert('info', 'Values reset to defaults. Click "Save Configuration" to apply.');
+        }
+    }
+    
+    function showConfigAlert(type, message) {
+        const alertHtml = `
+            <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+                ${message}
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+        `;
+        $('#configAlertContainer').html(alertHtml);
+        
+        // Auto-dismiss after 5 seconds
+        setTimeout(function() {
+            $('#configAlertContainer .alert').alert('close');
+        }, 5000);
+    }
+    
+    // Variable flow has no flow setpoint, so those fields cannot be filled.
+    $(document).on('change', '.unit-flow-mode', function() {
+        const row = $(this).closest('tr');
+        const isVariable = $(this).val() === 'variable';
+        row.find('.unit-flow-type, .unit-flow-set').prop('disabled', isVariable);
+        if (isVariable) {
+            row.find('.unit-flow-type').val('');
+            row.find('.unit-flow-set').val('');
+        }
+    });
+
+    // Unit design – save one row into its profile
+    $(document).on('click', '.save-unit-design', function() {
+        const row = $(this).closest('tr');
+        const kind = row.data('kind');
+        const profileId = String(row.data('profile-id') || '');
+        const hpId = String(row.data('hp-id') || '');
+        const flowMode = row.find('.unit-flow-mode').val() || 'per_test';
+        const flowType = (row.find('.unit-flow-type').val() || '').trim();
+        const payload = {
+            profile_id: profileId || (hpId ? 'UNIT_' + hpId : ''),
+            hp_id: hpId,
+            pdesign_kw: (row.find('.unit-pdesign').val() || '').trim(),
+            flow_mode: flowMode,
+            flow_type: flowMode === 'variable' ? '' : flowType,
+            flow_set_value: flowMode === 'variable' ? '' : (row.find('.unit-flow-set').val() || '').trim(),
+            destination: row.data('destination') || 'local'
+        };
+        if (!payload.profile_id) {
+            showConfigAlert('danger', 'This row has no unit to save to.');
+            return;
+        }
+        if (kind !== 'profile' && !confirm('This unit has no profile yet. Create profile "' + payload.profile_id + '" from this row?')) {
+            return;
+        }
+        const btn = $(this);
+        const orig = btn.html();
+        btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i>');
+        $.ajax({
+            url: '/api/unit_design',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(payload),
+            success: function(res) {
+                if (res.success) {
+                    showConfigAlert('success', res.message || 'Unit saved.');
+                    setTimeout(function() { location.reload(); }, 1200);
+                } else {
+                    showConfigAlert('danger', res.message || 'Failed to save.');
+                }
+            },
+            error: function(xhr, st, err) {
+                showConfigAlert('danger', 'Error: ' + (xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : err));
+            },
+            complete: function() {
+                btn.prop('disabled', false).html(orig);
+            }
+        });
+    });
+    // Legacy hp_design row – delete
+    $(document).on('click', '.delete-hp-design', function() {
+        const hpId = $(this).data('hp-id');
+        if (!confirm('Remove Pdesign for HP' + hpId + '? This does not delete any test data.')) return;
+        const btn = $(this);
+        $.ajax({
+            url: '/api/hp_design/' + encodeURIComponent(hpId),
+            method: 'DELETE',
+            success: function(res) {
+                if (res.success) {
+                    showConfigAlert('success', res.message || 'HP design removed.');
+                    btn.closest('tr').remove();
+                } else {
+                    showConfigAlert('danger', res.message || 'Failed to delete.');
+                }
+            },
+            error: function(xhr, st, err) {
+                showConfigAlert('danger', 'Error: ' + (xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : err));
+            }
+        });
+    });
+    // Unit design – add a new unit (creates a profile)
+    $('#addUnitDesignForm').on('submit', function(e) {
+        e.preventDefault();
+        const profileId = ($('#new_profile_id').val() || '').trim();
+        const flowMode = $('#new_flow_mode').val() || 'per_test';
+        const aliases = ($('#new_hp_id_aliases').val() || '').trim();
+        const patterns = ($('#new_filename_patterns').val() || '').trim();
+        if (!profileId) {
+            showConfigAlert('danger', 'Please enter a profile id (e.g. BAM_HP4).');
+            return;
+        }
+        if (!aliases && !patterns) {
+            showConfigAlert('danger', 'Give an HP id alias or a filename pattern, otherwise no entry can resolve to this unit.');
+            return;
+        }
+        const payload = {
+            profile_id: profileId,
+            display_name: ($('#new_display_name').val() || '').trim(),
+            pdesign_kw: ($('#new_pdesign_kw').val() || '').trim(),
+            flow_mode: flowMode,
+            flow_type: flowMode === 'variable' ? '' : ($('#new_flow_type').val() || '').trim(),
+            flow_set_value: flowMode === 'variable' ? '' : ($('#new_flow_set_value').val() || '').trim(),
+            hp_id_aliases: aliases,
+            filename_patterns: patterns,
+            destination: 'local'
+        };
+        const btn = $(this).find('button[type="submit"]');
+        const orig = btn.html();
+        btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i>');
+        $.ajax({
+            url: '/api/unit_design',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(payload),
+            success: function(res) {
+                if (res.success) {
+                    showConfigAlert('success', res.message || 'Unit added.');
+                    setTimeout(function() { location.reload(); }, 1200);
+                } else {
+                    showConfigAlert('danger', res.message || 'Failed to add.');
+                }
+            },
+            error: function(xhr, st, err) {
+                showConfigAlert('danger', 'Error: ' + (xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : err));
+            },
+            complete: function() {
+                btn.prop('disabled', false).html(orig);
+            }
+        });
+    });
+    
+    function plotDeviation(fileName, dataSet, startTime, endTime) {
+        $('#plotModal').modal('show');
+        $('#plotModal').find('.modal-title').text('Permissible Deviation Plot');
+        $('#plotModalBody').html(`
+            <div class="text-center">
+                <div class="spinner-border" role="status">
+                    <span class="sr-only">Loading...</span>
+                </div>
+                <p>Generating plots...</p>
+            </div>
+        `);
+        
+        // Request plot from server
+        $.ajax({
+            url: '/plot_deviation',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                file_name: fileName,
+                data_set: dataSet,
+                start_time: startTime,
+                end_time: endTime
+            }),
+            success: function(response) {
+                if (response.success) {
+                    let plotHtml = '<div class="deviation-plots">';
+                    
+                    // DB/WB plot (air-source only; omitted for water-to-water)
+                    if (response.image_dbwb) {
+                        plotHtml += '<div class="mb-4">';
+                        plotHtml += '<h5 class="mb-3">DB/WB Temperature Deviation</h5>';
+                        plotHtml += `<img src="${response.image_dbwb}" alt="DB/WB Deviation Plot" class="img-fluid" style="max-width: 100%;">`;
+                        plotHtml += '</div>';
+                    } else {
+                        plotHtml += '<div class="alert alert-info mt-3">';
+                        plotHtml += '<i class="fas fa-info-circle"></i> DB/WB plot not available (outdoor air not measured or not applicable for this unit).';
+                        plotHtml += '</div>';
+                    }
+                    
+                    // Tsup plot (if available)
+                    if (response.image_tsup) {
+                        plotHtml += '<div class="mb-4">';
+                        plotHtml += '<h5 class="mb-3">Tsup Temperature Deviation</h5>';
+                        plotHtml += `<img src="${response.image_tsup}" alt="Tsup Deviation Plot" class="img-fluid" style="max-width: 100%;">`;
+                        plotHtml += '</div>';
+                    } else {
+                        plotHtml += '<div class="alert alert-info mt-3">';
+                        plotHtml += '<i class="fas fa-info-circle"></i> Tsup plot not available (T_supply column not found in data).';
+                        plotHtml += '</div>';
+                    }
+                    
+                    // dTreturn plot (third plot)
+                    if (response.image_dtreturn) {
+                        plotHtml += '<div class="mb-4">';
+                        plotHtml += '<h5 class="mb-3">dTreturn Deviation (T_return_emu − T_return_calc)</h5>';
+                        plotHtml += `<img src="${response.image_dtreturn}" alt="dTreturn Deviation Plot" class="img-fluid" style="max-width: 100%;">`;
+                        plotHtml += '</div>';
+                    } else {
+                        plotHtml += '<div class="alert alert-info mt-3">';
+                        plotHtml += '<i class="fas fa-info-circle"></i> dTreturn plot not available (T_return_emu / T_return_calc missing).';
+                        plotHtml += '</div>';
+                    }
+                    
+                    plotHtml += '</div>';
+                    $('#plotModalBody').html(plotHtml);
+                } else {
+                    $('#plotModalBody').html(`
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> ${response.message}
+                        </div>
+                    `);
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#plotModalBody').html(`
+                    <div class="alert alert-danger">
+                        <strong>Error:</strong> Failed to generate plot. ${error}
+                    </div>
+                `);
+            }
+        });
+    }
+    
+    $(document).on('click', '.btn-plot-flow', function() {
+        const btn = $(this);
+        plotFlowDeviation(
+            btn.data('fileName'),
+            btn.data('dataset'),
+            btn.data('startTime'),
+            btn.data('endTime'),
+            btn.data('hpId') || ''
+        );
+    });
+    function plotFlowDeviation(fileName, dataSet, startTime, endTime, hpId) {
+        $('#plotModal').modal('show');
+        $('#plotModal').find('.modal-title').text('Flow Permissible Deviation');
+        $('#plotModalBody').html(`
+            <div class="text-center">
+                <div class="spinner-border" role="status">
+                    <span class="sr-only">Loading...</span>
+                </div>
+                <p>Generating flow plot...</p>
+            </div>
+        `);
+        $.ajax({
+            url: '/plot_flow_deviation',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                file_name: fileName,
+                data_set: dataSet,
+                start_time: startTime,
+                end_time: endTime,
+                hp_id: hpId || ''
+            }),
+            success: function(response) {
+                if (response.success && response.image) {
+                    $('#plotModalBody').html('<img src="' + response.image + '" alt="Flow Deviation" class="img-fluid" style="max-width: 100%;">');
+                } else {
+                    $('#plotModalBody').html('<div class="alert alert-danger">' + (response.message || 'Failed to generate flow plot') + '</div>');
+                }
+            },
+            error: function(xhr, status, error) {
+                $('#plotModalBody').html('<div class="alert alert-danger"><strong>Error:</strong> ' + error + '</div>');
+            }
+        });
+    }
+
+    // ---- Per-column update for deviation stats ----
+    function setUpdateProgress(visible, percent, message) {
+        if (visible) {
+            $('#progressContainer').show();
+            $('#progressBar').css('width', `${percent}%`);
+            $('#progressText').text(`${percent}%`);
+            $('#progressMessage').text(message || 'Updating...');
+        } else {
+            $('#progressContainer').hide();
+        }
+    }
+
+    async function updateDeviationStat(statKey) {
+        const selected = getSelectedRowIds();
+        if (selected.length === 0) {
+            alert('Please select one or more entries (checkboxes) first. Updating a single statistic for ALL entries can take a long time.');
+            return;
+        }
+        const scopeText = `${selected.length} selected entr${selected.length === 1 ? 'y' : 'ies'}`;
+        if (!confirm(`Update ${statKey} for ${scopeText}? This will recompute only this statistic.`)) return;
+        const buttons = document.querySelectorAll(`.update-dev-btn[data-stat="${statKey}"]`);
+        buttons.forEach(btn => { btn.disabled = true; btn.textContent = 'Updating...'; });
+        try {
+            // Batch selections to avoid long single requests/timeouts.
+            const batchSize = selected.length > 200 ? 5 : (selected.length > 80 ? 10 : 25);
+            let totalUpdated = 0;
+            setUpdateProgress(true, 0, `Updating ${statKey}... (0/${selected.length})`);
+            for (let i = 0; i < selected.length; i += batchSize) {
+                const batch = selected.slice(i, i + batchSize);
+                const done = Math.min(i, selected.length);
+                const pctBefore = Math.floor((done / selected.length) * 100);
+                setUpdateProgress(true, pctBefore, `Updating ${statKey}... (${done}/${selected.length})`);
+                buttons.forEach(btn => { btn.textContent = `Updating... (${done}/${selected.length})`; });
+                let data = null;
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    try {
+                        const resp = await fetch('/recalculate_deviation_stat', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ stat: statKey, entry_ids: batch })
+                        });
+                        data = await resp.json();
+                        break;
+                    } catch (e) {
+                        if (attempt === 2) throw e;
+                        await new Promise(r => setTimeout(r, 800));
+                    }
+                }
+                if (!data.success) {
+                    throw new Error(data.message || 'Unknown error');
+                }
+                totalUpdated += (data.updated || 0);
+                const doneAfter = Math.min(i + batch.length, selected.length);
+                const pctAfter = Math.floor((doneAfter / selected.length) * 100);
+                setUpdateProgress(true, pctAfter, `Updating ${statKey}... (${doneAfter}/${selected.length})`);
+            }
+            alert(`Updated ${statKey} for ${totalUpdated} entries (batch size ${batchSize}).`);
+            location.reload();
+        } catch (err) {
+            alert('Error: ' + (err.message || err));
+        } finally {
+            setUpdateProgress(false, 0, '');
+            buttons.forEach(btn => { btn.disabled = false; btn.textContent = 'Update'; });
+        }
+    }
+
+    $(document).on('click', '.update-dev-btn', function() {
+        const statKey = $(this).data('stat');
+        updateDeviationStat(statKey);
+    });
+</script>
+{% endblock %}
+

@@ -1,0 +1,19 @@
+{
+  "profile_id": "HPT_RRT5_TRET",
+  "display_name": "HPT air-to-water, return / indoor-air control placeholder (individual test)",
+  "unit_type": "air_water",
+  "buh_power_cap_kw": null,
+  "pdesign_kw": null,
+  "flow_type": "",
+  "flow_set_value": null,
+  "default_climate": null,
+  "default_application": null,
+  "filename_patterns": [
+    "HPT_RRT5_TRET*"
+  ],
+  "hp_id_aliases": [],
+  "notes": "Public placeholder for the HPT individual test on an air-to-water unit controlled on indoor air or return temperature rather than supply temperature. The Tsup check assumes supply control, so review it once the control mode is confirmed. Export files with the prefix HPT_RRT5_TRET_ so they resolve to this profile; no hp_id alias on purpose. Set climate and application per test (no BAM Average/MT default).",
+  "flow_mode": "per_test",
+  "wb_rule": "db_minus_1k",
+  "owner": "HPT"
+}

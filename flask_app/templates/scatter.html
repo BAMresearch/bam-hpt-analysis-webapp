@@ -1,0 +1,1111 @@
+{% extends "base.html" %}
+
+{% block title %}Scatter Plot Generator{% endblock %}
+
+{% block extra_css %}
+<style>
+    .page-header {
+        margin-bottom: 30px;
+        padding-bottom: 15px;
+        border-bottom: 2px solid #dee2e6;
+    }
+    .page-header h1 {
+        margin: 0;
+        color: #343a40;
+    }
+    
+    .section-card {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    
+    .section-card h3 {
+        margin-top: 0;
+        margin-bottom: 15px;
+        color: #495057;
+        font-size: 1.2rem;
+    }
+    
+    .entry-selection {
+        margin-bottom: 20px;
+    }
+    
+    .entry-count {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #28a745;
+        margin: 10px 0;
+    }
+    
+    .entry-table {
+        width: 100%;
+        font-size: 0.9rem;
+        margin-top: 15px;
+    }
+    
+    .entry-table th {
+        background-color: #e9ecef;
+        font-weight: 600;
+        padding: 8px;
+        text-align: left;
+        border-bottom: 2px solid #dee2e6;
+    }
+    
+    .entry-table td {
+        padding: 6px 8px;
+        border-bottom: 1px solid #dee2e6;
+    }
+    
+    .entry-table tr:hover {
+        background-color: #f1f3f5;
+    }
+    
+    .plot-config {
+        margin-bottom: 20px;
+    }
+    
+    .form-group {
+        margin-bottom: 15px;
+    }
+    
+    .form-group label {
+        font-weight: 600;
+        margin-bottom: 5px;
+        display: block;
+        color: #495057;
+    }
+    
+    .form-control {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        font-size: 0.95rem;
+    }
+    
+    .btn-generate {
+        background-color: #007bff;
+        color: white;
+        padding: 12px 30px;
+        font-size: 1.1rem;
+        font-weight: 600;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        margin-top: 20px;
+    }
+    
+    .btn-generate:hover {
+        background-color: #0056b3;
+    }
+    
+    .btn-generate:disabled {
+        background-color: #6c757d;
+        cursor: not-allowed;
+    }
+    
+    .plots-container {
+        margin-top: 30px;
+    }
+    
+    .plot-item {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    
+    .plot-item h4 {
+        margin-top: 0;
+        margin-bottom: 10px;
+        color: #343a40;
+    }
+    
+    .plot-image {
+        width: 100%;
+        max-width: 600px;
+        height: auto;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        margin: 15px 0;
+        cursor: pointer;
+        transition: transform 0.2s;
+    }
+    
+    .plot-image:hover {
+        transform: scale(1.02);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    
+    .plot-image.full-size {
+        max-width: 1200px;
+    }
+    
+    .plots-grid {
+        display: grid;
+        gap: 20px;
+        margin-top: 20px;
+        width: 100%;
+    }
+    
+    .plot-item {
+        width: 100%;
+        max-width: 100%;
+    }
+    
+    .plot-item img {
+        width: 100%;
+        height: auto;
+    }
+    
+    .plot-actions {
+        margin-top: 10px;
+    }
+    
+    .btn-download {
+        background-color: #28a745;
+        color: white;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-block;
+    }
+    
+    .btn-download:hover {
+        background-color: #218838;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 40px;
+        color: #6c757d;
+    }
+    
+    .loading-spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #007bff;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    .alert {
+        padding: 12px 20px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+    }
+    
+    .alert-info {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        color: #0c5460;
+    }
+    
+    .alert-warning {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        color: #856404;
+    }
+    
+    .checkbox-list {
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        padding: 10px;
+        background: white;
+    }
+    
+    .checkbox-item {
+        padding: 5px 0;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="page-header">
+        <div class="d-flex justify-content-between align-items-start flex-wrap">
+            <div>
+                <h1><i class="fas fa-scatter-plot"></i> Scatter Plot Generator</h1>
+                <p class="text-muted">Generate scatter plots for selected entries grouped by HP label and flow configuration</p>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm mt-2" type="button" data-toggle="collapse" data-target="#scatterBandsConfig" aria-expanded="false" aria-controls="scatterBandsConfig">
+                <i class="fas fa-sliders-h"></i> Mean permissible deviations (for bands)
+            </button>
+        </div>
+        <div class="collapse mt-3" id="scatterBandsConfig">
+            <div class="card card-body" style="background-color: #f8f9fa; border: 1px solid #dee2e6;">
+                <p class="text-muted small mb-2">Used only to draw bands on scatter plots. Does not affect the Permissible Deviations page.</p>
+                <div class="row">
+                    <div class="col">
+                        <label for="scatter_mean_db_k" class="small font-weight-bold">Mean DB ± (K)</label>
+                        <input type="text" inputmode="decimal" id="scatter_mean_db_k" class="form-control form-control-sm" value="{{ scatter_mean_limits.get('mean_db_k', 0.6) }}">
+                    </div>
+                    <div class="col">
+                        <label for="scatter_mean_wb_k" class="small font-weight-bold">Mean WB ± (K)</label>
+                        <input type="text" inputmode="decimal" id="scatter_mean_wb_k" class="form-control form-control-sm" value="{{ scatter_mean_limits.get('mean_wb_k', 0.4) }}">
+                    </div>
+                    <div class="col">
+                        <label for="scatter_mean_tsup_k" class="small font-weight-bold">Mean Tsup ± (K)</label>
+                        <input type="text" inputmode="decimal" id="scatter_mean_tsup_k" class="form-control form-control-sm" value="{{ scatter_mean_limits.get('mean_tsup_k', 0.5) }}">
+                    </div>
+                    <div class="col">
+                        <label for="scatter_mean_q_pct" class="small font-weight-bold">Mean Q ± (%)</label>
+                        <input type="text" inputmode="decimal" id="scatter_mean_q_pct" class="form-control form-control-sm" value="{{ scatter_mean_limits.get('mean_q_pct', 5) }}">
+                    </div>
+                    <div class="col">
+                        <label for="scatter_mean_flow_pct" class="small font-weight-bold">Mean flow ± (%)</label>
+                        <input type="text" inputmode="decimal" id="scatter_mean_flow_pct" class="form-control form-control-sm" value="{{ scatter_mean_limits.get('mean_flow_pct', 1) }}">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Entry Selection Section -->
+    <div class="section-card">
+        <h3>Entry Selection</h3>
+        <div class="entry-selection">
+            {% if using_scatter_dataset %}
+            <div class="alert alert-success">
+                <strong>Using Scatter Dataset:</strong> Showing entries marked in the <code>scatter_dataset</code> column. 
+                Manage entries on the <a href="{{ url_for('index') }}">Mean Values</a> page using the "Dataset Management" buttons.
+            </div>
+            {% else %}
+            <div class="alert alert-warning">
+                <strong>No Entries Selected:</strong> No entries are currently marked for scatter plots. 
+                Go to the <a href="{{ url_for('index') }}">Mean Values</a> page, filter and select entries, then use the "Add to Scatter Dataset" button to add them.
+                <br><small>Tip: You can use the "Reset to Default" button below to quickly select all entries with <code>COP_Dataset = "YES"</code> as a starting point.</small>
+            </div>
+            {% endif %}
+            
+            <div class="entry-count">
+                Selected: <span id="selectedCount">{{ default_entries|length }}</span> entries
+            </div>
+            
+            <div style="margin-top: 15px;">
+                <button class="btn btn-warning" onclick="resetScatterSelection()">
+                    <i class="fas fa-undo"></i> Reset to Default (Based on COP_Dataset)
+                </button>
+            </div>
+        </div>
+        
+        <!-- Entry Details Table (Always Visible) -->
+        <div id="entryDetailsTable">
+            <h4 style="margin-top: 20px; margin-bottom: 10px;">Selected Entries Details</h4>
+            <div style="max-height: 300px; overflow-y: auto;">
+                <table class="entry-table">
+                    <thead>
+                        <tr>
+                            <th>File Name</th>
+                            <th>Data Set</th>
+                            <th>Start Time</th>
+                            <th>End Time</th>
+                            <th>Test Condition</th>
+                            {% if column_name_map.get('HP_ID') %}
+                            <th>HP ID</th>
+                            {% endif %}
+                            {% if column_name_map.get('Lab_ID') %}
+                            <th>Lab ID</th>
+                            {% endif %}
+                            {% if column_name_map.get('Flow_Config') %}
+                            <th>Flow Config</th>
+                            {% endif %}
+                            <th>Climate</th>
+                            <th>Application</th>
+                        </tr>
+                    </thead>
+                    <tbody id="selectedEntriesTableBody">
+                        {% for entry in default_entries %}
+                        <tr>
+                            <td>{{ entry.file_name }}</td>
+                            <td>{{ entry.data_set }}</td>
+                            <td>{{ entry.start_time if entry.start_time else '-' }}</td>
+                            <td>{{ entry.end_time if entry.end_time else '-' }}</td>
+                            <td>{{ entry.extracted_test_condition if entry.extracted_test_condition else '-' }}</td>
+                            {% if column_name_map.get('HP_ID') %}
+                            <td>{{ entry.get(column_name_map.get('HP_ID'), '-') }}</td>
+                            {% endif %}
+                            {% if column_name_map.get('Lab_ID') %}
+                            <td>{{ entry.get(column_name_map.get('Lab_ID'), '-') }}</td>
+                            {% endif %}
+                            {% if column_name_map.get('Flow_Config') %}
+                            <td>{{ entry.get(column_name_map.get('Flow_Config'), '-') }}</td>
+                            {% endif %}
+                            <td>{{ entry._resolved_climate or '-' }}</td>
+                            <td>{{ entry._resolved_application or '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Plot Configuration Section -->
+    <div class="section-card">
+        <h3>Plot Configuration</h3>
+        <div class="plot-config">
+            <div class="form-group">
+                <label>Unit / flow combinations (select one or more):</label>
+                <div style="margin-top: 10px; margin-bottom: 10px;">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectAllCombinations()">
+                        <i class="fas fa-check-square"></i> Select All
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="deselectAllCombinations()">
+                        <i class="fas fa-square"></i> Deselect All
+                    </button>
+                </div>
+                {% if unresolved_files %}
+                <div class="alert alert-warning py-2" style="font-size: 0.9rem;">
+                    These files have no unit profile and no HP ID, so each file is listed separately.
+                    Assign a unit profile on Cycle Extract or review so series stay comparable:
+                    {{ unresolved_files | join(', ') }}
+                </div>
+                {% endif %}
+                <div class="parameter-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; padding: 10px; border: 1px solid #dee2e6; border-radius: 4px; background: white; margin-bottom: 20px;">
+                    {% for combo in available_combinations %}
+                    <div class="checkbox-item" style="display: flex; align-items: center; padding: 4px 0;">
+                        <input type="checkbox" class="combination-checkbox" id="combo_{{ loop.index0 }}" 
+                               data-hp="{{ combo.unit_key }}" data-flow="{{ combo.flow }}" 
+                               value="{{ combo.unit_key }}|{{ combo.flow }}" checked style="margin-right: 6px; cursor: pointer;">
+                        <label for="combo_{{ loop.index0 }}" style="margin: 0; cursor: pointer; font-size: 0.9rem; flex: 1;">
+                            {{ combo.label }}{% if combo.flow %} ({{ combo.flow }}){% endif %}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            {% if available_climate_app and available_climate_app|length > 1 %}
+            <div class="form-group">
+                <label>Climate / Application slice (select one or more):</label>
+                <div style="margin-top: 10px; margin-bottom: 10px;">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectAllClimateApp()">
+                        <i class="fas fa-check-square"></i> Select All
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="deselectAllClimateApp()">
+                        <i class="fas fa-square"></i> Deselect All
+                    </button>
+                </div>
+                <div class="parameter-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; padding: 10px; border: 1px solid #dee2e6; border-radius: 4px; background: white; margin-bottom: 20px;">
+                    {% for ca in available_climate_app %}
+                    <div class="checkbox-item" style="display: flex; align-items: center; padding: 4px 0;">
+                        <input type="checkbox" class="climate-app-checkbox" id="ca_{{ loop.index0 }}"
+                               data-climate="{{ ca.climate }}" data-application="{{ ca.application }}"
+                               value="{{ ca.climate }}|{{ ca.application }}" checked style="margin-right: 6px; cursor: pointer;">
+                        <label for="ca_{{ loop.index0 }}" style="margin: 0; cursor: pointer; font-size: 0.9rem; flex: 1;">
+                            {{ ca.label }}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+                <small class="text-muted">
+                    When entries span multiple climate / application slices the plot legend shows which slice each series uses.
+                    If only one slice is selected, plots look the same as before.
+                </small>
+            </div>
+            {% elif available_climate_app and available_climate_app|length == 1 %}
+            <div class="form-group">
+                <small class="text-muted">
+                    <i class="fas fa-info-circle"></i>
+                    All selected entries use the <strong>{{ available_climate_app[0].label }}</strong> climate / application slice.
+                </small>
+            </div>
+            {% endif %}
+
+            <div class="form-group">
+                <label>Y-Axis Parameters (select one or more):</label>
+                <div style="margin-top: 10px; margin-bottom: 10px;">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="selectAllParameters()">
+                        <i class="fas fa-check-square"></i> Select All
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="deselectAllParameters()">
+                        <i class="fas fa-square"></i> Deselect All
+                    </button>
+                </div>
+                <div class="parameter-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; padding: 10px; border: 1px solid #dee2e6; border-radius: 4px; background: white;">
+                    {% for param in available_parameters %}
+                    <div class="checkbox-item" style="display: flex; align-items: center; padding: 4px 0;">
+                        <input type="checkbox" class="parameter-checkbox" id="param_{{ loop.index0 }}" value="{{ param }}" style="margin-right: 6px; cursor: pointer;">
+                        <label for="param_{{ loop.index0 }}" style="margin: 0; cursor: pointer; font-size: 0.9rem; flex: 1;">
+                            {{ param.replace('_', ' ').title() }}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <button class="btn btn-generate" id="generatePlotsBtn" onclick="generatePlots()">
+            <i class="fas fa-chart-line"></i> Generate Plots
+        </button>
+    </div>
+    
+    <!-- Success/Error Messages -->
+    <div id="plotMessage" style="display: none; margin-top: 20px;"></div>
+    
+    <!-- Generated Plots Section -->
+    <div id="plotsContainer" class="plots-container" style="display: none;">
+        <div class="section-card">
+            <h3>Generated Plots</h3>
+            <div style="margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn btn-secondary" onclick="clearPlots()">
+                    <i class="fas fa-times"></i> Clear Plots
+                </button>
+                <button class="btn btn-primary" onclick="downloadAllPlots()" id="downloadAllBtn">
+                    <i class="fas fa-download"></i> Download All Plots
+                </button>
+            </div>
+            <div id="plotsList"></div>
+        </div>
+    </div>
+    
+    <!-- Loading Indicator -->
+    <div id="loadingIndicator" class="loading" style="display: none;">
+        <div class="loading-spinner"></div>
+        <p>Generating plots... This may take a moment.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Store selected entry IDs
+    let selectedEntryIds = {{ default_entries | map(attribute='rowid') | list | tojson | safe }};
+    const columnNameMap = {{ column_name_map | tojson | safe }};
+    
+    // Store all entries data for table updates
+    const allEntriesData = {
+        {% for entry in all_entries %}
+        {{ entry.rowid }}: {
+            rowid: {{ entry.rowid }},
+            file_name: {{ entry.file_name | tojson | safe }},
+            data_set: {{ entry.data_set | tojson | safe }},
+            start_time: {{ entry.start_time if entry.start_time else 'null' | tojson | safe }},
+            end_time: {{ entry.end_time if entry.end_time else 'null' | tojson | safe }},
+            test_condition: {{ entry.extracted_test_condition if entry.extracted_test_condition else 'null' | tojson | safe }},
+            {% if column_name_map.get('HP_ID') %}
+            hp_id: {{ entry.get(column_name_map.get('HP_ID'), 'null') | tojson | safe }},
+            {% endif %}
+            {% if column_name_map.get('Lab_ID') %}
+            lab_id: {{ entry.get(column_name_map.get('Lab_ID'), 'null') | tojson | safe }},
+            {% endif %}
+            {% if column_name_map.get('Flow_Config') %}
+            flow_config: {{ entry.get(column_name_map.get('Flow_Config'), 'null') | tojson | safe }},
+            {% endif %}
+        },
+        {% endfor %}
+    };
+    
+    function selectAllParameters() {
+        document.querySelectorAll('.parameter-checkbox').forEach(cb => cb.checked = true);
+    }
+    
+    function deselectAllParameters() {
+        document.querySelectorAll('.parameter-checkbox').forEach(cb => cb.checked = false);
+    }
+    
+    function selectAllCombinations() {
+        document.querySelectorAll('.combination-checkbox').forEach(cb => cb.checked = true);
+    }
+    
+    function deselectAllCombinations() {
+        document.querySelectorAll('.combination-checkbox').forEach(cb => cb.checked = false);
+    }
+
+    function selectAllClimateApp() {
+        document.querySelectorAll('.climate-app-checkbox').forEach(cb => cb.checked = true);
+    }
+
+    function deselectAllClimateApp() {
+        document.querySelectorAll('.climate-app-checkbox').forEach(cb => cb.checked = false);
+    }
+    
+    function updateSelectedCount() {
+        document.getElementById('selectedCount').textContent = selectedEntryIds.length;
+    }
+    
+    function updateEntryTable() {
+        const tbody = document.getElementById('selectedEntriesTableBody');
+        tbody.innerHTML = '';
+        
+        selectedEntryIds.forEach(rowid => {
+            const entry = allEntriesData[rowid];
+            if (!entry) return;
+            
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${entry.file_name}</td>
+                <td>${entry.data_set}</td>
+                <td>${entry.start_time !== null && entry.start_time !== undefined ? entry.start_time : '-'}</td>
+                <td>${entry.end_time !== null && entry.end_time !== undefined ? entry.end_time : '-'}</td>
+                <td>${entry.test_condition || '-'}</td>
+                ${columnNameMap.HP_ID ? `<td>${entry.hp_id || '-'}</td>` : ''}
+                ${columnNameMap.Lab_ID ? `<td>${entry.lab_id || '-'}</td>` : ''}
+                ${columnNameMap.Flow_Config ? `<td>${entry.flow_config || '-'}</td>` : ''}
+            `;
+            tbody.appendChild(row);
+        });
+    }
+    
+    function resetScatterSelection() {
+        if (!confirm('Reset scatter selection to default (based on COP_Dataset)? This will overwrite current selections.')) {
+            return;
+        }
+        
+        fetch('/reset_scatter_selection', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert(data.message);
+                location.reload();
+            } else {
+                alert('Error: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred while resetting selection');
+        });
+    }
+    
+    function clearPlots() {
+        document.getElementById('plotsContainer').style.display = 'none';
+        document.getElementById('plotsList').innerHTML = '';
+        document.getElementById('plotMessage').style.display = 'none';
+    }
+    
+    function showMessage(message, type) {
+        const messageDiv = document.getElementById('plotMessage');
+        if (!messageDiv) {
+            console.error('plotMessage div not found!');
+            return;
+        }
+        
+        const alertClass = type === 'success' ? 'alert-success' : 
+                          type === 'warning' ? 'alert-warning' : 
+                          type === 'danger' ? 'alert-danger' : 'alert-info';
+        
+        const title = type === 'success' ? 'Success!' : type === 'warning' ? 'Warning:' : 'Error:';
+        
+        // Convert newlines to <br> for HTML display, but preserve <details> and <pre> tags
+        let htmlMessage = message;
+        // Only convert newlines that aren't inside HTML tags
+        htmlMessage = htmlMessage.replace(/\n/g, '<br>');
+        // But restore newlines inside <pre> tags
+        htmlMessage = htmlMessage.replace(/<pre[^>]*>/g, (match) => {
+            return match.replace(/<br>/g, '\n');
+        });
+        htmlMessage = htmlMessage.replace(/<\/pre>/g, (match) => {
+            return match.replace(/<br>/g, '\n');
+        });
+        
+        messageDiv.className = `alert ${alertClass} alert-dismissible fade show`;
+        // Use innerHTML to allow HTML tags like <details> and <pre>
+        messageDiv.innerHTML = `
+            <strong>${title}</strong> 
+            <div style="margin-top: 10px;">${htmlMessage}</div>
+            <button type="button" class="close" onclick="document.getElementById('plotMessage').style.display='none'" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+        `;
+        messageDiv.style.display = 'block';
+        
+        // Scroll to message to ensure it's visible
+        setTimeout(() => {
+            messageDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+        
+        console.log('Displayed message:', type, message.substring(0, 200));
+        
+        // Auto-hide success messages after 5 seconds
+        if (type === 'success') {
+            setTimeout(() => {
+                if (messageDiv.style.display !== 'none') {
+                    messageDiv.style.display = 'none';
+                }
+            }, 5000);
+        }
+    }
+    
+    function generatePlots() {
+        // Get selected parameters
+        const selectedParams = Array.from(document.querySelectorAll('.parameter-checkbox:checked'))
+            .map(cb => cb.value);
+        
+        // Get selected HP/Flow combinations
+        const selectedCombinations = Array.from(document.querySelectorAll('.combination-checkbox:checked'))
+            .map(cb => {
+                const parts = cb.value.split('|');
+                return [parts[0], parts[1]];
+            });
+        
+        if (selectedParams.length === 0) {
+            alert('Please select at least one Y-axis parameter');
+            return;
+        }
+        // No front-end limit so user can run "all parameters" at once (backend may still enforce MAX_PARAMETERS if set)
+        if (selectedParams.length > 500) {
+            alert('You have ' + selectedParams.length + ' parameters selected. This may take a while and use a lot of memory. Consider selecting fewer if the page becomes slow.');
+        }
+        console.log('Generating plots for', selectedParams.length, 'parameter(s):', selectedParams);
+        if (selectedCombinations.length === 0) {
+            alert('Please select at least one unit / flow combination');
+            return;
+        }
+        
+        if (selectedEntryIds.length === 0) {
+            alert('Please select at least one entry');
+            return;
+        }
+
+        // Collect selected climate / application slices (empty list = no filter)
+        const climateAppBoxes = document.querySelectorAll('.climate-app-checkbox');
+        let selectedClimateApp = [];
+        if (climateAppBoxes.length > 0) {
+            selectedClimateApp = Array.from(document.querySelectorAll('.climate-app-checkbox:checked'))
+                .map(cb => {
+                    const parts = cb.value.split('|');
+                    return [parts[0], parts[1]];
+                });
+            if (selectedClimateApp.length === 0) {
+                alert('Please select at least one climate / application slice');
+                return;
+            }
+        }
+        
+        // Show loading indicator
+        document.getElementById('loadingIndicator').style.display = 'block';
+        document.getElementById('plotsContainer').style.display = 'none';
+        document.getElementById('generatePlotsBtn').disabled = true;
+        
+        // Single batch request so all plot images are cached in the same server process (fixes missing figures with multiple workers)
+        const scatterMeanLimits = (function() {
+            const elDb = document.getElementById('scatter_mean_db_k');
+            const elWb = document.getElementById('scatter_mean_wb_k');
+            const elTsup = document.getElementById('scatter_mean_tsup_k');
+            const elQ = document.getElementById('scatter_mean_q_pct');
+            const elFlow = document.getElementById('scatter_mean_flow_pct');
+            return {
+                mean_db_k: elDb ? (parseFloat(elDb.value) || 0.6) : 0.6,
+                mean_wb_k: elWb ? (parseFloat(elWb.value) || 0.4) : 0.4,
+                mean_tsup_k: elTsup ? (parseFloat(elTsup.value) || 0.5) : 0.5,
+                mean_q_pct: elQ ? (parseFloat(elQ.value) || 5) : 5,
+                mean_flow_pct: elFlow ? (parseFloat(elFlow.value) || 1) : 1
+            };
+        })();
+        
+        fetch('/generate_scatter_plots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                entry_ids: selectedEntryIds,
+                y_parameters: selectedParams,
+                column_name_map: columnNameMap,
+                selected_combinations: selectedCombinations,
+                selected_climate_app: selectedClimateApp,
+                scatter_mean_limits: scatterMeanLimits
+            })
+        })
+            .then(response => {
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                return response.json();
+            })
+            .then(data => {
+                document.getElementById('loadingIndicator').style.display = 'none';
+                document.getElementById('generatePlotsBtn').disabled = false;
+                console.log('Batch response:', data);
+                if (data.success && data.plots && Array.isArray(data.plots) && data.plots.length > 0) {
+                    console.log('Calling displayPlots with', data.plots.length, 'plots');
+                    const warn = (data.warnings && data.warnings.length) ? (' ' + data.warnings.join(' ')) : '';
+                    showMessage(`Successfully generated ${data.plots.length} plot(s)!` + warn, warn ? 'warning' : 'success');
+                    displayPlots(data.plots, selectedParams);
+                } else {
+                    const msg = (data && data.message) ? data.message : 'No plots generated. Check that selected entries have valid data.';
+                    showMessage(msg, 'warning');
+                }
+            })
+            .catch(error => {
+                document.getElementById('loadingIndicator').style.display = 'none';
+                document.getElementById('generatePlotsBtn').disabled = false;
+                console.error('Error generating plots:', error);
+                showMessage(`Error: ${error.message}. Check browser console (F12) for details.`, 'danger');
+            });
+    }
+    
+    function displayPlots(plots, selectedParams) {
+        console.log('displayPlots called with', plots.length, 'plots');
+        const plotsList = document.getElementById('plotsList');
+        const plotsContainer = document.getElementById('plotsContainer');
+        
+        if (!plotsList || !plotsContainer) {
+            console.error('plotsList or plotsContainer not found!');
+            alert('Error: Could not find plots container. Please refresh the page.');
+            return;
+        }
+        
+        plotsList.innerHTML = '';
+        
+        if (plots.length === 0) {
+            plotsList.innerHTML = '<div class="alert alert-warning">No plots generated. Check that selected entries have valid data.</div>';
+            plotsContainer.style.display = 'block';
+            return;
+        }
+        
+        console.log('Displaying', plots.length, 'plots');
+        
+        // Assign each plot a stable index for download/toggle (matches allGeneratedPlots order)
+        plots.forEach((p, i) => { p._idx = i; });
+        
+        // Helper function to title case
+        function toTitleCase(str) {
+            if (!str) return '';
+            return str.replace(/_/g, ' ').replace(/\w\S*/g, function(txt) {
+                return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
+            });
+        }
+        
+        // Group plots by parameter (param -> list of plots)
+        const plotsByParam = {};
+        plots.forEach(plot => {
+            const param = plot.y_parameter || 'Unknown';
+            if (!plotsByParam[param]) {
+                plotsByParam[param] = [];
+            }
+            plotsByParam[param].push(plot);
+        });
+        
+        // Canonical combo order: same column = same (hp_label, flow_config) in every section
+        const comboOrder = [];
+        const seen = new Set();
+        plots.forEach(plot => {
+            const key = `${plot.hp_label}|${plot.flow_config}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                comboOrder.push({ hp_label: plot.hp_label, flow_config: plot.flow_config, unit_label: plot.unit_label });
+            }
+        });
+        comboOrder.sort((a, b) => {
+            const ha = String(a.hp_label || '');
+            const hb = String(b.hp_label || '');
+            if (ha !== hb) return ha.localeCompare(hb, undefined, { numeric: true });
+            // fixed before var
+            const fa = (a.flow_config || '').toLowerCase();
+            const fb = (b.flow_config || '').toLowerCase();
+            if (fa === 'fixed' && fb !== 'fixed') return -1;
+            if (fa !== 'fixed' && fb === 'fixed') return 1;
+            return fa.localeCompare(fb);
+        });
+        const numColumns = comboOrder.length;
+        
+        console.log('Canonical combo order:', comboOrder.map(c => `HP${c.hp_label} (${c.flow_config})`));
+        
+        // Store plots for bulk download
+        window.allGeneratedPlots = plots;
+        
+        // Group plots by configuration for bulk download
+        const plotsByConfig = {};
+        plots.forEach(plot => {
+            const configKey = `HP${plot.hp_label}_${plot.flow_config}`;
+            if (!plotsByConfig[configKey]) {
+                plotsByConfig[configKey] = {
+                    hp_label: plot.hp_label,
+                    unit_label: plot.unit_label,
+                    flow_config: plot.flow_config,
+                    plots: []
+                };
+            }
+            plotsByConfig[configKey].plots.push(plot);
+        });
+        window.plotsByConfig = plotsByConfig;
+        
+        let plotIndex = 0;
+        // Section order: use selectedParams so order matches user's parameter selection
+        const paramOrder = (selectedParams && selectedParams.length) ? selectedParams : Object.keys(plotsByParam);
+        paramOrder.forEach(param => {
+            if (!plotsByParam[param] || plotsByParam[param].length === 0) return;
+            
+            const paramPlots = plotsByParam[param];
+            const plotByCombo = {};
+            paramPlots.forEach(p => {
+                const key = `${p.hp_label}|${p.flow_config}`;
+                plotByCombo[key] = p;
+            });
+            
+            // Add parameter header
+            const paramHeader = document.createElement('h4');
+            paramHeader.style.marginTop = '20px';
+            paramHeader.style.marginBottom = '15px';
+            paramHeader.style.color = '#495057';
+            paramHeader.textContent = toTitleCase(param);
+            plotsList.appendChild(paramHeader);
+            
+            const gridContainer = document.createElement('div');
+            gridContainer.className = 'plots-grid';
+            gridContainer.id = `grid_${param.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            gridContainer.style.gridTemplateColumns = `repeat(${numColumns}, 1fr)`;
+            gridContainer.style.width = '100%';
+            
+            // One cell per combo in canonical order so side-by-side figures are same parameter
+            comboOrder.forEach(combo => {
+                const key = `${combo.hp_label}|${combo.flow_config}`;
+                const plot = plotByCombo[key];
+                
+                const plotItem = document.createElement('div');
+                plotItem.className = 'plot-item';
+                plotItem.style.minWidth = '0';
+                
+                const flowPart = combo.flow_config ? ` (${combo.flow_config})` : '';
+                const title = `${combo.unit_label || combo.hp_label}${flowPart}`;
+                const paramTitle = toTitleCase(param);
+                const downloadTitle = `${paramTitle} - ${title}`;
+                
+                const plotSrc = plot ? (plot.image_url || plot.image) : null;
+                if (plot && plotSrc) {
+                    const plotIdx = plot._idx;
+                    const imgId = `plotImage_${plotIdx}`;
+                    const placeholderId = `plotPlaceholder_${plotIdx}`;
+                    plotItem.innerHTML = `
+                        <h5 style="font-size: 0.9rem; margin-bottom: 5px;">${title}</h5>
+                        <p class="text-muted" style="font-size: 0.8rem; margin-bottom: 10px;">${plot.entry_count} entries</p>
+                        <div id="${placeholderId}" style="display: none; padding: 20px; background: #f8f9fa; border: 1px dashed #dee2e6; border-radius: 4px; color: #856404; font-size: 0.9rem;">Image too large or failed to load. Use Download to try saving.</div>
+                        <img src="${plotSrc}" alt="${title.replace(/"/g, '&quot;')}" class="plot-image" 
+                             id="${imgId}" 
+                             data-full-image="${plotSrc}"
+                             data-plot-title="${(title || '').replace(/"/g, '&quot;')}"
+                             onclick="toggleImageSize(${plotIdx})"
+                             style="width: 100%; max-width: 100%; height: auto;"
+                             onerror="document.getElementById('${imgId}').style.display='none'; var ph=document.getElementById('${placeholderId}'); if(ph) ph.style.display='block';">
+                        <div class="plot-actions" style="margin-top: 8px;">
+                            <button class="btn btn-download btn-sm" onclick="downloadPlot(${plotIdx}, '${downloadTitle.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">
+                                <i class="fas fa-download"></i> Download
+                            </button>
+                        </div>
+                    `;
+                } else {
+                    plotItem.innerHTML = `
+                        <h5 style="font-size: 0.9rem; margin-bottom: 5px;">${title}</h5>
+                        <p class="text-muted" style="font-size: 0.8rem; margin-bottom: 10px;">—</p>
+                        <div style="padding: 30px; background: #f8f9fa; border: 1px dashed #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9rem; text-align: center;">No plot generated for this combination.</div>
+                    `;
+                }
+                gridContainer.appendChild(plotItem);
+            });
+            
+            plotsList.appendChild(gridContainer);
+        });
+        
+        // Add bulk download buttons for each configuration
+        const configDownloadSection = document.createElement('div');
+        configDownloadSection.style.marginTop = '30px';
+        configDownloadSection.style.padding = '15px';
+        configDownloadSection.style.backgroundColor = '#f8f9fa';
+        configDownloadSection.style.borderRadius = '4px';
+        configDownloadSection.innerHTML = '<h5 style="margin-bottom: 15px;">Download by Configuration:</h5>';
+        
+        const configButtonsContainer = document.createElement('div');
+        configButtonsContainer.style.display = 'flex';
+        configButtonsContainer.style.flexWrap = 'wrap';
+        configButtonsContainer.style.gap = '10px';
+        
+        Object.keys(plotsByConfig).sort().forEach(configKey => {
+            const config = plotsByConfig[configKey];
+            const configTitle = `${config.unit_label || config.hp_label}${config.flow_config ? ' (' + config.flow_config + ')' : ''}`;
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-outline-primary btn-sm';
+            btn.innerHTML = `<i class="fas fa-download"></i> Download All ${configTitle} (${config.plots.length})`;
+            btn.onclick = () => downloadConfigPlots(configKey, configTitle);
+            configButtonsContainer.appendChild(btn);
+        });
+        
+        configDownloadSection.appendChild(configButtonsContainer);
+        plotsList.appendChild(configDownloadSection);
+        
+        console.log('All plots added to DOM. Showing plots container.');
+        plotsContainer.style.display = 'block';
+        
+        // Scroll to plots section
+        plotsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    
+    function toggleImageSize(index) {
+        const img = document.getElementById(`plotImage_${index}`);
+        if (img) {
+            if (img.classList.contains('full-size')) {
+                img.classList.remove('full-size');
+                img.style.maxWidth = '100%';
+            } else {
+                img.classList.add('full-size');
+                img.style.maxWidth = '1200px';
+            }
+        }
+    }
+    
+    function getDownloadLocation() {
+        // Get browser's default download location info
+        const userAgent = navigator.userAgent.toLowerCase();
+        let locationInfo = 'your browser\'s default download folder';
+        
+        if (userAgent.includes('windows')) {
+            locationInfo = 'your Downloads folder (usually C:\\Users\\[YourName]\\Downloads)';
+        } else if (userAgent.includes('mac')) {
+            locationInfo = 'your Downloads folder (usually ~/Downloads)';
+        } else if (userAgent.includes('linux')) {
+            locationInfo = 'your Downloads folder (usually ~/Downloads)';
+        }
+        
+        return locationInfo;
+    }
+    
+    function showDownloadMessage(message, type = 'info') {
+        const messageDiv = document.getElementById('plotMessage');
+        if (!messageDiv) return;
+        
+        const alertClass = type === 'success' ? 'alert-success' : 
+                          type === 'warning' ? 'alert-warning' : 
+                          type === 'danger' ? 'alert-danger' : 'alert-info';
+        
+        messageDiv.className = `alert ${alertClass} alert-dismissible fade show`;
+        messageDiv.innerHTML = `
+            <strong>${type === 'success' ? 'Success!' : type === 'warning' ? 'Warning:' : type === 'danger' ? 'Error:' : 'Info:'}</strong> ${message}
+            <button type="button" class="close" onclick="document.getElementById('plotMessage').style.display='none'" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+            </button>
+        `;
+        messageDiv.style.display = 'block';
+        
+        // Auto-hide info messages after 8 seconds
+        if (type === 'info' || type === 'success') {
+            setTimeout(() => {
+                if (messageDiv.style.display !== 'none') {
+                    messageDiv.style.display = 'none';
+                }
+            }, 8000);
+        }
+    }
+    
+    function downloadPlot(index, title) {
+        const img = document.getElementById(`plotImage_${index}`);
+        if (!img) return;
+        
+        // Use full-size image for download
+        const imageSrc = img.dataset.fullImage || img.src;
+        const filename = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+        
+        showDownloadMessage(`Downloading "${filename}" to ${getDownloadLocation()}. Check your browser's download bar for progress.`, 'info');
+        
+        const link = document.createElement('a');
+        link.href = imageSrc;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        setTimeout(() => {
+            showDownloadMessage(`Download started: "${filename}"`, 'success');
+        }, 500);
+    }
+    
+    function downloadConfigPlots(configKey, configTitle) {
+        if (!window.plotsByConfig || !window.plotsByConfig[configKey]) {
+            alert('No plots available for this configuration');
+            return;
+        }
+        
+        const config = window.plotsByConfig[configKey];
+        const numPlots = config.plots.length;
+        
+        if (!confirm(`Download all ${numPlots} plots for ${configTitle}? Files will be saved to ${getDownloadLocation()}.`)) {
+            return;
+        }
+        
+        showDownloadMessage(`Starting download of ${numPlots} plots for ${configTitle}...`, 'info');
+        
+        let downloaded = 0;
+        config.plots.forEach((plot, idx) => {
+            setTimeout(() => {
+                const paramTitle = toTitleCase(plot.y_parameter || 'Unknown');
+                const title = `${paramTitle} - HP${plot.hp_label} (${plot.flow_config})`;
+                const filename = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+                
+                const link = document.createElement('a');
+                link.href = plot.image_url || plot.image;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                downloaded++;
+                if (downloaded === numPlots) {
+                    showDownloadMessage(`Successfully downloaded ${numPlots} plots for ${configTitle} to ${getDownloadLocation()}`, 'success');
+                }
+            }, idx * 200); // 200ms delay between downloads
+        });
+    }
+    
+    function downloadAllPlots() {
+        if (!window.allGeneratedPlots || window.allGeneratedPlots.length === 0) {
+            alert('No plots available for download');
+            return;
+        }
+        
+        const numPlots = window.allGeneratedPlots.length;
+        const downloadLocation = getDownloadLocation();
+        
+        if (!confirm(`Download all ${numPlots} plots? Files will be saved to ${downloadLocation}. This may take a moment.`)) {
+            return;
+        }
+        
+        showDownloadMessage(`Starting download of all ${numPlots} plots...`, 'info');
+        
+        let downloaded = 0;
+        window.allGeneratedPlots.forEach((plot, idx) => {
+            setTimeout(() => {
+                const paramTitle = toTitleCase(plot.y_parameter || 'Unknown');
+                const title = `${paramTitle} - HP${plot.hp_label} (${plot.flow_config})`;
+                const filename = `${title.replace(/[^a-z0-9]/gi, '_')}.png`;
+                
+                const link = document.createElement('a');
+                link.href = plot.image_url || plot.image;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                downloaded++;
+                if (downloaded === numPlots) {
+                    showDownloadMessage(`Successfully downloaded all ${numPlots} plots to ${downloadLocation}`, 'success');
+                }
+            }, idx * 200); // 200ms delay between downloads
+        });
+    }
+    
+    function toTitleCase(str) {
+        if (!str) return '';
+        return str.replace(/_/g, ' ').replace(/\w\S*/g, function(txt) {
+            return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
+        });
+    }
+</script>
+{% endblock %}
+

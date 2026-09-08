@@ -1,0 +1,35 @@
+{
+  "air_water": {
+    "display_name": "Air-to-water heat pump",
+    "source_medium": "air",
+    "has_wetbulb": true,
+    "source_circuit_measured": false,
+    "has_gas_input": false,
+    "has_backup_heater": true,
+    "controlled_variable": "supply",
+    "capacity_control": "inverter",
+    "flow_mode": "per_test"
+  },
+  "water_water": {
+    "display_name": "Water-to-water heat pump",
+    "source_medium": "water",
+    "has_wetbulb": false,
+    "source_circuit_measured": true,
+    "has_gas_input": false,
+    "has_backup_heater": true,
+    "controlled_variable": "supply",
+    "capacity_control": "inverter",
+    "flow_mode": "fixed"
+  },
+  "hybrid_air_water": {
+    "display_name": "Hybrid air-to-water heat pump",
+    "source_medium": "air",
+    "has_wetbulb": true,
+    "source_circuit_measured": false,
+    "has_gas_input": true,
+    "has_backup_heater": true,
+    "controlled_variable": "supply",
+    "capacity_control": "inverter",
+    "flow_mode": "per_test"
+  }
+}
