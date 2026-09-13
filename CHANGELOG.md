@@ -7,6 +7,26 @@ Version numbers match `flask_app/VERSION` and the `tool_version` column on summa
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Guideline clocks on Cycle Extract.** For the open file, **Propose guideline clocks** derives sub-periods on existing database entries: **D** (defrost + buffer) or **S** (standby + buffer), **H**, and — on defrost and continuous cycles — **equilibrium** then **evaluation**. Evaluation is the first `eval_min` after the first `eq_min` of H, not the last minutes of the cycle; it is omitted when H is too short. The parent row stays the full cycle
+- **Clock table and period layers** (layers off by default). Edit the power-transition time or D/S end; unlock equilibrium / evaluation to type them. **Save clocks** or **Save all proposed** stores the times on the parent entry
+- **Treat unknown rows as** (defrost / on–off / continuous) fills only rows that have no kind yet. Kind **`continuous`**: no D/S; H is the parent window. Stored `other` stays unknown, not continuous
+- Clock lengths in `flask_app/config/cycle_periods.json` (`buffer_min` 10, `eq_min` 60, `eval_min` 70)
+
+### Changed
+
+- Proposing clocks no longer requires Notes `drop` / `ramp`
+
+### Fixed
+
+- A cycle cut from one defrost (or standby) **end** to the next now gets a **second D / S** span; a cut from start to start stays one span
+- Changing **Treat unknown rows as** updates Kind and the clocks immediately. If a clock button reports that the server did not answer with JSON, restart the app and reload the page
+
+---
+
 ## [0.1.0] — 2026-09-07
 
 First tagged release for HPT T4.2 air-to-water analysis.

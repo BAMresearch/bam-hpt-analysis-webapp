@@ -26,6 +26,13 @@
                   -webkit-user-select: none; user-select: none; }
   .legend-item.legend-off { opacity: 0.4; color: #868e96; }
   .legend-swatch { width: 14px; height: 5px; border-radius: 1px; flex-shrink: 0; }
+  /* Guideline clocks (D/S, H, equilibrium, evaluation) */
+  .layer-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin-right: 3px; }
+  #existingCard tr.clock-row > td { background: #fbfbfd; }
+  .clock-grid { font-size: .8rem; }
+  .clock-grid th { font-weight: 600; color: #495057; }
+  .clock-grid input.form-control, .clock-grid select.form-control { font-size: .78rem; padding: .1rem .3rem; height: auto; }
+  .clock-note { color: #8a6d3b; font-size: .78rem; }
 </style>
 {% endblock %}
 
@@ -160,16 +167,60 @@
   <!-- ─── Existing entries for comparison ─── -->
   <div class="card mb-3" id="existingCard" style="display:none;">
     <div class="card-header py-2">
-      <span class="font-weight-bold">Existing DB entries</span>
-      <span class="small-help ml-2">for the same file — shown as
-        <span style="display:inline-block; width:14px; height:4px; background:rgba(255,193,7,.55); vertical-align:middle;"></span> bands on the plot
-      </span>
+      <div class="d-flex align-items-center justify-content-between flex-wrap">
+        <div>
+          <span class="font-weight-bold">Existing DB entries</span>
+          <span class="small-help ml-2">for the same file — shown as
+            <span style="display:inline-block; width:14px; height:4px; background:rgba(255,193,7,.55); vertical-align:middle;"></span> bands on the plot
+          </span>
+        </div>
+        <div class="d-flex align-items-center">
+          <button id="proposeClocksBtn" class="btn btn-outline-dark btn-sm mr-2" type="button">
+            <i class="fas fa-stopwatch"></i> Propose guideline clocks
+          </button>
+          <label class="mb-0 mr-2 small-help" for="defaultKindSelect"
+                 title="Fills rows whose kind could not be determined. It never overwrites a kind already set on a row.">
+            Treat unknown rows as:
+          </label>
+          <select id="defaultKindSelect" class="form-control form-control-sm mr-2" style="width:auto; display:inline-block;">
+            <option value="">(leave unknown)</option>
+            <option value="defrost">defrost</option>
+            <option value="on_off">on–off</option>
+            <option value="continuous">continuous</option>
+          </select>
+          <button id="saveAllClocksBtn" class="btn btn-success btn-sm mr-3" type="button" disabled
+                  title="Store the current proposals for this whole file — or only the rows ticked under &quot;show&quot;">
+            <i class="fas fa-save"></i> Save all proposed
+          </button>
+          <label class="mb-0 mr-3 small-help" title="Draw the sub-period layers for the rows you ticked below">
+            <input type="checkbox" id="periodLayersToggle"> <b>Period layers</b>
+          </label>
+          <span class="small-help" id="layerToggles" style="opacity:.5;">
+            <label class="mb-0 mr-2"><input type="checkbox" class="layer-check" data-layer="ds" checked disabled>
+              <span class="layer-swatch" style="background:rgba(220,53,69,.45);"></span>D / S</label>
+            <label class="mb-0 mr-2"><input type="checkbox" class="layer-check" data-layer="h" checked disabled>
+              <span class="layer-swatch" style="background:rgba(40,167,69,.40);"></span>H</label>
+            <label class="mb-0 mr-2"><input type="checkbox" class="layer-check" data-layer="eq" checked disabled>
+              <span class="layer-swatch" style="background:rgba(111,66,193,.45);"></span>Equilibrium</label>
+            <label class="mb-0"><input type="checkbox" class="layer-check" data-layer="eval" checked disabled>
+              <span class="layer-swatch" style="background:rgba(23,162,184,.55);"></span>Evaluation</label>
+          </span>
+        </div>
+      </div>
+      <div class="small-help mt-1" id="clockStatus">
+        The parent entry stays the full cycle. <b>Propose guideline clocks</b> reads this file only and suggests
+        D (or S) + H, plus equilibrium / evaluation inside H on defrost and continuous cycles. Proposing stores
+        nothing: use <b>Save all proposed</b> for the file (or tick <b>show</b> on the rows you want), or
+        <b>edit</b> a single row. Rows whose kind stays unknown are skipped and listed. Lengths come from
+        <span class="mono">flask_app/config/cycle_periods.json</span>.
+      </div>
     </div>
     <div class="card-body p-0">
-      <div class="table-responsive" style="max-height:280px; overflow-y:auto;">
+      <div class="table-responsive" style="max-height:420px; overflow-y:auto;">
         <table class="table table-sm table-striped mb-0">
           <thead class="thead-light" style="position:sticky; top:0; z-index:2;">
             <tr>
+              <th style="width:36px;" title="Draw this entry's period bands on the plot">show</th>
               <th class="text-right">rowid</th>
               <th class="text-right">ds</th>
               <th class="text-right">start</th>
@@ -178,6 +229,7 @@
               <th>hp</th>
               <th>test cond</th>
               <th>indicator / notes</th>
+              <th style="width:96px;">clocks</th>
             </tr>
           </thead>
           <tbody id="existingBody"></tbody>
@@ -205,6 +257,15 @@
   var _nextManualId = 1;
   var _pendingSt = null;
 
+  /* ── guideline clocks (Phase 1) ── */
+  var _clockProposals = {};      // rowid -> server proposal (periods + sources + notes)
+  var _clockOverrides = {};      // rowid -> analyst edits, replayed on every recompute
+  var _clockShow = {};           // rowid -> draw this entry's bands
+  var _clockExpanded = {};       // rowid -> detail row open
+  var _clockLayersOn = false;    // master toggle — off by default
+  var _clockLayerVisible = { ds: true, h: true, eq: true, eval: true };
+  var _clockLengths = null;      // { buffer_min, eq_min, eval_min, … } from config
+
   /* ── colour palettes ── */
   var COLORS_AUTO = [
     'rgba(0,123,255,0.18)', 'rgba(111,66,193,0.18)', 'rgba(23,162,184,0.18)',
@@ -219,6 +280,22 @@
   var COLOR_EXISTING = 'rgba(255,193,7,0.18)';
   var COLOR_EXISTING_BORDER = 'rgba(255,193,7,0.65)';
   var COLOR_PENDING_LINE = 'rgba(220,53,69,0.85)';
+
+  /* Period layers. Kept light and 'below' so bands never hide the traces. */
+  var PERIOD_STYLE = {
+    ds:   { fill:'rgba(220,53,69,0.09)',  line:'rgba(220,53,69,0.65)',  dash:'solid', label:'D / S' },
+    h:    { fill:'rgba(40,167,69,0.07)',  line:'rgba(40,167,69,0.55)',  dash:'solid', label:'H' },
+    eq:   { fill:'rgba(111,66,193,0.11)', line:'rgba(111,66,193,0.75)', dash:'dash',  label:'Equilibrium' },
+    eval: { fill:'rgba(23,162,184,0.15)', line:'rgba(23,162,184,0.85)', dash:'dash',  label:'Evaluation' }
+  };
+  /** cycle_periods type → layer. 'off'/'on' are the on-off names for S and H. */
+  function layerOfPeriod(ptype) {
+    if (ptype === 'defrost' || ptype === 'off') return 'ds';
+    if (ptype === 'heating' || ptype === 'on') return 'h';
+    if (ptype === 'equilibrium') return 'eq';
+    if (ptype === 'evaluation') return 'eval';
+    return null;
+  }
 
   function esc(s) {
     return (s||'').toString().replace(/[&<>"']/g, function(c) {
@@ -511,6 +588,21 @@
         fillcolor: COLOR_EXISTING, line:{color: COLOR_EXISTING_BORDER, width:1, dash:'dot'}, layer:'below' });
     });
 
+    if (_clockLayersOn) {
+      _existingEntries.forEach(function(e) {
+        if (!_clockShow[e.rowid]) return;
+        var pr = _clockProposals[e.rowid];
+        if (!pr || !pr.periods) return;
+        pr.periods.forEach(function(p) {
+          var lay = layerOfPeriod(p.period_type);
+          if (!lay || !_clockLayerVisible[lay]) return;
+          var st = PERIOD_STYLE[lay];
+          shapes.push({ type:'rect', xref:'x', yref:'paper', x0:p.start_time, x1:p.end_time, y0:0, y1:1,
+            fillcolor: st.fill, line:{color: st.line, width:1, dash: st.dash}, layer:'below' });
+        });
+      });
+    }
+
     _cycles.forEach(function(c, i) {
       var fill = c.type === 'manual' ? COLOR_MANUAL : COLORS_AUTO[i % COLORS_AUTO.length];
       var border = c.type === 'manual' ? COLOR_MANUAL_BORDER : COLORS_AUTO_BORDER[i % COLORS_AUTO_BORDER.length];
@@ -610,6 +702,8 @@
     document.getElementById('addManualBtn').disabled = false;
     matchProfileForFile(_fileName);
     _cycles = [];
+    _clockProposals = {}; _clockOverrides = {}; _clockShow = {}; _clockExpanded = {};
+    document.getElementById('saveAllClocksBtn').disabled = true;
     renderChart();
     loadExistingEntries();
   }
@@ -622,26 +716,368 @@
     });
     var d = await resp.json();
     _existingEntries = (d.success && d.entries) ? d.entries : [];
+    renderExistingTable();
+    renderChart();
+  }
+
+  function renderExistingTable() {
     var card = document.getElementById('existingCard');
     var body = document.getElementById('existingBody');
-    if (_existingEntries.length === 0) { card.style.display = 'none'; renderChart(); return; }
+    if (_existingEntries.length === 0) { card.style.display = 'none'; return; }
     card.style.display = '';
     body.innerHTML = '';
     _existingEntries.forEach(function(e) {
+      var rid = e.rowid;
       var tr = document.createElement('tr');
+      tr.dataset.rowid = rid;
       var notes = [e.indicator_notes||'', e.notes||''].filter(function(x){return x;}).join(' | ');
+      var pr = _clockProposals[rid];
+      var clockLabel = pr ? (_clockExpanded[rid] ? 'hide' : 'edit') : '—';
       tr.innerHTML =
-        '<td class="text-right mono">'+e.rowid+'</td>'+
+        '<td><input type="checkbox" class="ex-show"'+(_clockShow[rid]?' checked':'')+(pr?'':' disabled')+'></td>'+
+        '<td class="text-right mono">'+rid+'</td>'+
         '<td class="text-right mono">'+fmt(e.data_set,0)+'</td>'+
         '<td class="text-right mono">'+fmt(e.start_time,0)+'</td>'+
         '<td class="text-right mono">'+fmt(e.end_time,0)+'</td>'+
         '<td class="text-right mono">'+dur(e.start_time,e.end_time)+'</td>'+
         '<td class="mono">'+esc(e.hp_id)+'</td>'+
         '<td class="mono">'+esc(e.dev_test_condition)+'</td>'+
-        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(notes)+'">'+esc(notes)+'</td>';
+        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(notes)+'">'+esc(notes)+'</td>'+
+        '<td>'+(pr
+          ? '<button class="btn btn-outline-secondary btn-xs ex-clocks">'+clockLabel+'</button>'
+            + (pr.has_saved ? ' <i class="fas fa-save text-success" title="clocks saved in cycle_periods"></i>' : '')
+          : '<span class="small-help">'+clockLabel+'</span>')+'</td>';
       body.appendChild(tr);
+      if (pr && _clockExpanded[rid]) body.appendChild(buildClockRow(e, pr));
     });
+    wireExistingButtons();
+  }
+
+  /* ── Guideline clocks ── */
+  function periodsOfType(pr, type) {
+    return (pr.periods || []).filter(function(p){ return p.period_type === type; });
+  }
+  function clockSpan(pr, layer, idx) {
+    var types = layer === 'ds' ? ['defrost','off'] : layer === 'h' ? ['heating','on']
+              : layer === 'eq' ? ['equilibrium'] : ['evaluation'];
+    var hits = [];
+    types.forEach(function(t){ hits = hits.concat(periodsOfType(pr, t)); });
+    hits.sort(function(a,b){ return a.start_time - b.start_time; });
+    return hits[idx || 0] || null;
+  }
+  function clockCell(v) { return v == null ? '<span class="small-help">—</span>' : '<span class="mono">'+fmt(v,0)+'</span>'; }
+  function numInput(cls, v, title) {
+    return '<input type="number" step="1" class="form-control form-control-sm mono '+cls+'" '+
+           'value="'+(v==null?'':Math.round(v))+'" title="'+esc(title||'')+'">';
+  }
+
+  function buildClockRow(entry, pr) {
+    var rid = entry.rowid;
+    var ov = _clockOverrides[rid] || {};
+    var eqUnlocked = ov.eq_locked === false;
+    var evalUnlocked = ov.eval_locked === false;
+    var ds = clockSpan(pr, 'ds', 0), h = clockSpan(pr, 'h', 0);
+    var dsTail = clockSpan(pr, 'ds', 1);
+    var eq = clockSpan(pr, 'eq', 0), ev = clockSpan(pr, 'eval', 0);
+    var dsName = pr.kind === 'on_off' ? 'S (standby + buffer)'
+               : pr.kind === 'defrost' ? 'D (defrost + buffer)'
+               : 'D / S (kind not set)';
+    var dsShort = pr.kind === 'on_off' ? 'S' : 'D';
+    // A window that opens in D/S may hold a second D/S span (§2.1.1), so that row
+    // is always offered there: type a start to add or move it, clear it to drop it.
+    var tailEditable = pr.begins_in === 'ds';
+    // continuous: no D, no S, no power transition — the parent window is H.
+    var isContinuous = pr.kind === 'continuous';
+
+    var tr = document.createElement('tr');
+    tr.className = 'clock-row';
+    tr.dataset.rowid = rid;
+
+    var lengthsTxt = _clockLengths
+      ? ('buffer ' + _clockLengths.buffer_min + ' min · equilibrium ' + _clockLengths.eq_min
+         + ' min · evaluation ' + _clockLengths.eval_min + ' min')
+      : '';
+
+    var html =
+      '<td colspan="10">'+
+      '<div class="form-row align-items-end clock-grid mb-2">'+
+        '<div class="col-auto"><label class="mb-0 small-help">Kind</label>'+
+          '<select class="form-control form-control-sm ck-kind">'+
+            '<option value="">(choose)</option>'+
+            '<option value="defrost"'+(pr.kind==='defrost'?' selected':'')+'>defrost</option>'+
+            '<option value="on_off"'+(pr.kind==='on_off'?' selected':'')+'>on–off</option>'+
+            '<option value="continuous"'+(isContinuous?' selected':'')+'>continuous</option>'+
+          '</select></div>'+
+        (isContinuous ? '' :
+        '<div class="col-auto"><label class="mb-0 small-help">Cycle opens in</label>'+
+          '<select class="form-control form-control-sm ck-begins">'+
+            '<option value="ds"'+(pr.begins_in==='ds'?' selected':'')+'>D / S</option>'+
+            '<option value="h"'+(pr.begins_in==='h'?' selected':'')+'>H</option>'+
+          '</select></div>'+
+        '<div class="col-auto"><label class="mb-0 small-help">pelec_transition_time (s)</label>'+
+          numInput('ck-trans', pr.transition_time, 'The interior power drop or rise. Moving it rebuilds D/S, H and any locked eq/eval.')+
+          '</div>'+
+        '<div class="col-auto"><label class="mb-0 small-help">D / S end (s)</label>'+
+          numInput('ck-dsend', ds ? ds.end_time : null, 'Buffer end. Moving it rebuilds H and any locked eq/eval.')+
+          '</div>')+
+        '<div class="col-auto pb-1">'+
+          '<button class="btn btn-outline-secondary btn-sm ck-reset" type="button" title="Drop my edits and re-propose from the stored data">reset</button> '+
+          '<button class="btn btn-success btn-sm ck-save" type="button">Save clocks</button>'+
+        '</div>'+
+      '</div>'+
+      '<table class="table table-sm table-bordered mb-1 clock-grid" style="width:auto;">'+
+        '<thead><tr><th>interval</th><th class="text-right">start (s)</th><th class="text-right">end (s)</th>'+
+        '<th class="text-right">length</th><th></th></tr></thead><tbody>'+
+        (isContinuous ? '' :
+        '<tr><td>'+dsName+'</td><td class="text-right">'+clockCell(ds?ds.start_time:null)+'</td>'+
+            '<td class="text-right">'+clockCell(ds?ds.end_time:null)+'</td>'+
+            '<td class="text-right">'+(ds?dur(ds.start_time,ds.end_time):'—')+'</td><td></td></tr>')+
+        '<tr><td>H'+(isContinuous?' (whole parent window)':'')+'</td>'+
+            '<td class="text-right">'+clockCell(h?h.start_time:null)+'</td>'+
+            '<td class="text-right">'+clockCell(h?h.end_time:null)+'</td>'+
+            '<td class="text-right">'+(h?dur(h.start_time,h.end_time):'—')+'</td><td></td></tr>'+
+        ((!isContinuous && (dsTail || tailEditable)) ? '<tr><td>'+dsShort+' (second span)</td>'+
+            '<td class="text-right">'+(tailEditable
+              ? numInput('ck-ds2s', dsTail?dsTail.start_time:null,
+                         'Start of the second '+dsShort+' span — the next drop. Clear it for a one-span cycle; reset re-detects.')
+              : clockCell(dsTail?dsTail.start_time:null))+'</td>'+
+            '<td class="text-right">'+clockCell(dsTail?dsTail.end_time:null)+'</td>'+
+            '<td class="text-right">'+(dsTail?dur(dsTail.start_time,dsTail.end_time):'—')+'</td><td></td></tr>' : '')+
+        '<tr><td>Equilibrium</td>'+
+            '<td class="text-right">'+(eqUnlocked?numInput('ck-eqs', eq?eq.start_time:null,''):clockCell(eq?eq.start_time:null))+'</td>'+
+            '<td class="text-right">'+(eqUnlocked?numInput('ck-eqe', eq?eq.end_time:null,''):clockCell(eq?eq.end_time:null))+'</td>'+
+            '<td class="text-right">'+(eq?dur(eq.start_time,eq.end_time):'—')+'</td>'+
+            '<td><label class="mb-0 small-help"><input type="checkbox" class="ck-equnlock"'+(eqUnlocked?' checked':'')+'> unlock</label></td></tr>'+
+        '<tr><td>Evaluation</td>'+
+            '<td class="text-right">'+(evalUnlocked?numInput('ck-evs', ev?ev.start_time:null,''):clockCell(ev?ev.start_time:null))+'</td>'+
+            '<td class="text-right">'+(evalUnlocked?numInput('ck-eve', ev?ev.end_time:null,''):clockCell(ev?ev.end_time:null))+'</td>'+
+            '<td class="text-right">'+(ev?dur(ev.start_time,ev.end_time):'—')+'</td>'+
+            '<td><label class="mb-0 small-help"><input type="checkbox" class="ck-evalunlock"'+(evalUnlocked?' checked':'')+'> unlock</label></td></tr>'+
+      '</tbody></table>'+
+      '<div class="small-help">kind from '+esc(pr.kind_source)+
+        (isContinuous ? ' · no D / S, no power transition'
+                      : (' · opens-in from '+esc(pr.begins_in_source)+
+                         ' · transition from '+esc(pr.transition_source)))+
+        (pr.second_drop_source ? (' · second '+dsShort+': '+esc(pr.second_drop_source)) : '')+
+        (lengthsTxt?(' · '+esc(lengthsTxt)):'')+'</div>'+
+      ((pr.notes && pr.notes.length)
+        ? '<div class="clock-note mt-1">'+pr.notes.map(esc).join('<br>')+'</div>' : '')+
+      '</td>';
+    tr.innerHTML = html;
+    return tr;
+  }
+
+  function overrideFor(rid) {
+    if (!_clockOverrides[rid]) _clockOverrides[rid] = {};
+    return _clockOverrides[rid];
+  }
+
+  /** File-level "treat unknown rows as" choice, '' when left unknown. */
+  function defaultKind() {
+    var sel = document.getElementById('defaultKindSelect');
+    return sel ? sel.value : '';
+  }
+  /** Rows ticked under "show", so Save all can be limited to a selection. */
+  function tickedRowids() {
+    return Object.keys(_clockShow)
+      .filter(function(k){ return _clockShow[k] && _clockProposals[k]; })
+      .map(function(k){ return parseInt(k,10); });
+  }
+
+  /** Read an API reply, naming the HTTP status when the body is not JSON. */
+  async function readJson(resp) {
+    try {
+      return await resp.json();
+    } catch (e) {
+      var hint = (resp.status === 404 || resp.status === 405)
+        ? ' — restart the app and reload this page, the running server does not have this endpoint'
+        : '';
+      return { success:false, message:'server did not answer with JSON (HTTP ' + resp.status + ')' + hint };
+    }
+  }
+
+  /** Ask the server to (re-)derive the clocks. All clock rules live server-side. */
+  async function proposeClocks(rowids) {
+    if (!_fileName) { clockStatus('Load a file first.'); return; }
+    clockStatus('Deriving guideline clocks for this file…');
+    var resp = await fetch('/api/cycle_extract/propose_periods', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName, rowids: rowids || null,
+                             overrides: _clockOverrides, default_kind: defaultKind() })
+    });
+    var d = await readJson(resp);
+    if (!d.success) { clockStatus('Clocks: ' + esc(d.message || 'failed')); return; }
+    _clockLengths = d.lengths || _clockLengths;
+    (d.entries || []).forEach(function(p) { _clockProposals[p.rowid] = p; });
+    var withEval = (d.entries||[]).filter(function(p){
+      return (p.periods||[]).some(function(x){ return x.period_type === 'evaluation'; });
+    }).length;
+    var unknown = (d.entries||[]).filter(function(p){ return p.kind === 'unknown'; }).length;
+    var fromDefault = (d.entries||[]).filter(function(p){
+      return p.kind_source === 'file-level default';
+    }).length;
+    var twoSpan = (d.entries||[]).filter(function(p){
+      return (p.periods||[]).filter(function(x){
+        return x.period_type === 'defrost' || x.period_type === 'off';
+      }).length > 1;
+    }).length;
+    clockStatus('Clocks for ' + (d.entries||[]).length + ' entr' + ((d.entries||[]).length===1?'y':'ies')
+      + ': ' + withEval + ' with an evaluation window'
+      + (twoSpan ? (', ' + twoSpan + ' with two D / S spans') : '')
+      + (fromDefault ? (', ' + fromDefault + ' took kind <b>' + esc(defaultKind()) + '</b> from the file-level default') : '')
+      + (unknown ? (', ' + unknown + ' need a kind — set one per row or pick a default above') : '')
+      + '. Tick <b>show</b> and <b>Period layers</b> to draw them.');
+    document.getElementById('saveAllClocksBtn').disabled = !Object.keys(_clockProposals).length;
+    renderExistingTable();
     renderChart();
+  }
+
+  function clockStatus(html) {
+    var el = document.getElementById('clockStatus');
+    if (el) el.innerHTML = html;
+  }
+
+  async function saveClocks(rid) {
+    var pr = _clockProposals[rid];
+    if (!pr) return;
+    if (['defrost','on_off','continuous'].indexOf(pr.kind) < 0) {
+      clockStatus('Pick defrost, on–off or continuous for rowid ' + rid + ' before saving.');
+      return;
+    }
+    if (!pr.periods || !pr.periods.length) {
+      clockStatus('Nothing to save for rowid ' + rid + ' — no periods were derived.');
+      return;
+    }
+    clockStatus('Saving clocks for rowid ' + rid + '…');
+    var resp = await fetch('/api/cycle_extract/save_periods', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        rowid: rid, kind: pr.kind, begins_in: pr.begins_in,
+        transition_time: pr.transition_time, periods: pr.periods
+      })
+    });
+    var d = await readJson(resp);
+    if (!d.success) { clockStatus('Save failed for rowid ' + rid + ': ' + esc(d.message||'')); return; }
+    clockStatus('Saved ' + d.saved + ' period(s) on rowid ' + rid
+      + ' (buffer_s=' + d.buffer_s + ', transition marked manual).');
+    await proposeClocks([rid]);
+  }
+
+  /** Store the proposals for the whole file, or for the ticked rows (§2.2.2). */
+  async function saveAllClocks() {
+    if (!_fileName) { clockStatus('Load a file first.'); return; }
+    // No tick means the whole open file — never "nothing" (§Phase 1.2b).
+    var ticked = tickedRowids();
+    var scope = ticked.length ? (ticked.length + ' ticked row(s)') : 'every row of this file';
+    clockStatus('Saving the proposed clocks for ' + scope + '…');
+    var resp = await fetch('/api/cycle_extract/save_all_periods', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_name: _fileName, rowids: ticked.length ? ticked : null,
+                             overrides: _clockOverrides, default_kind: defaultKind() })
+    });
+    var d = await readJson(resp);
+    if (!d.success) { clockStatus('Save all failed: ' + esc(d.message || '')); return; }
+    var skipped = d.skipped || [];
+    var msg = 'Saved ' + d.saved_entries + ' entr' + (d.saved_entries===1?'y':'ies')
+            + ' (' + d.saved_periods + ' period rows, buffer_s=' + d.buffer_s + ').';
+    if (skipped.length) {
+      msg += ' Skipped ' + skipped.length + ': ' + skipped.slice(0,5).map(function(s){
+        return 'rowid ' + s.rowid + ' — ' + esc(s.reason);
+      }).join('; ') + (skipped.length > 5 ? '; …' : '') + '.';
+    }
+    await proposeClocks(ticked.length ? ticked : null);
+    clockStatus(msg);   // re-propose refreshes the saved markers, this keeps the report
+  }
+
+  function wireExistingButtons() {
+    document.querySelectorAll('#existingBody .ex-show').forEach(function(cb) {
+      cb.addEventListener('change', function() {
+        _clockShow[parseInt(cb.closest('tr').dataset.rowid,10)] = cb.checked;
+        renderChart();
+      });
+    });
+    document.querySelectorAll('#existingBody .ex-clocks').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var rid = parseInt(btn.closest('tr').dataset.rowid,10);
+        _clockExpanded[rid] = !_clockExpanded[rid];
+        renderExistingTable();
+      });
+    });
+
+    // The clock inputs sit in a nested table, so look for the row that carries
+    // the rowid rather than the nearest <tr>.
+    function rid(el) { return parseInt(el.closest('tr[data-rowid]').dataset.rowid,10); }
+    function numOrNull(el) {
+      var v = parseFloat(el.value);
+      return isNaN(v) ? null : v;
+    }
+    function recompute(id) { proposeClocks([id]); }
+
+    document.querySelectorAll('#existingBody .ck-kind').forEach(function(sel) {
+      sel.addEventListener('change', function() {
+        var id = rid(sel); overrideFor(id).kind = sel.value || null; recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-begins').forEach(function(sel) {
+      sel.addEventListener('change', function() {
+        var id = rid(sel); overrideFor(id).begins_in = sel.value; recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-trans').forEach(function(inp) {
+      inp.addEventListener('change', function() {
+        var id = rid(inp); var o = overrideFor(id);
+        o.transition_time = numOrNull(inp);
+        o.ds_end = null;   // the buffer is re-derived from the new transition
+        recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-dsend').forEach(function(inp) {
+      inp.addEventListener('change', function() {
+        var id = rid(inp); overrideFor(id).ds_end = numOrNull(inp); recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-ds2s').forEach(function(inp) {
+      inp.addEventListener('change', function() {
+        var id = rid(inp); var o = overrideFor(id); var v = numOrNull(inp);
+        o.ds2_start = v;
+        o.no_second_ds = (v === null);   // cleared = one span; reset re-detects
+        recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-equnlock').forEach(function(cb) {
+      cb.addEventListener('change', function() {
+        var id = rid(cb); var o = overrideFor(id);
+        // Unlocking starts from the current proposal; re-locking drops the typed
+        // times so equilibrium snaps back to the start of H.
+        o.eq_locked = !cb.checked;
+        o.eq_start = null; o.eq_end = null;
+        recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-evalunlock').forEach(function(cb) {
+      cb.addEventListener('change', function() {
+        var id = rid(cb); var o = overrideFor(id);
+        o.eval_locked = !cb.checked;
+        o.eval_start = null; o.eval_end = null;
+        recompute(id);
+      });
+    });
+    [['ck-eqs','eq_start'], ['ck-eqe','eq_end'], ['ck-evs','eval_start'], ['ck-eve','eval_end']]
+      .forEach(function(pair) {
+        document.querySelectorAll('#existingBody .' + pair[0]).forEach(function(inp) {
+          inp.addEventListener('change', function() {
+            var id = rid(inp); overrideFor(id)[pair[1]] = numOrNull(inp); recompute(id);
+          });
+        });
+      });
+    document.querySelectorAll('#existingBody .ck-reset').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var id = rid(btn); delete _clockOverrides[id]; recompute(id);
+      });
+    });
+    document.querySelectorAll('#existingBody .ck-save').forEach(function(btn) {
+      btn.addEventListener('click', function() { saveClocks(rid(btn)); });
+    });
   }
 
   /* ── Cycle management ── */
@@ -896,6 +1332,27 @@
     document.getElementById('selectAll').addEventListener('change', function() {
       var chk = this.checked;
       document.querySelectorAll('#cycleBody .cyc-check').forEach(function(cb){ cb.checked=chk; });
+    });
+
+    document.getElementById('proposeClocksBtn').addEventListener('click', function(){ proposeClocks(null); });
+    document.getElementById('saveAllClocksBtn').addEventListener('click', function(){ saveAllClocks(); });
+    document.getElementById('defaultKindSelect').addEventListener('change', function() {
+      // Re-derive every row so Kind and the clocks follow the new default at once,
+      // with no extra Propose click. Rows that already have a kind keep it.
+      if (_existingEntries.length) proposeClocks(null);
+    });
+    document.getElementById('periodLayersToggle').addEventListener('change', function() {
+      _clockLayersOn = this.checked;
+      var wrap = document.getElementById('layerToggles');
+      wrap.style.opacity = _clockLayersOn ? '1' : '.5';
+      wrap.querySelectorAll('.layer-check').forEach(function(cb){ cb.disabled = !_clockLayersOn; });
+      renderChart();
+    });
+    document.querySelectorAll('#layerToggles .layer-check').forEach(function(cb) {
+      cb.addEventListener('change', function() {
+        _clockLayerVisible[cb.dataset.layer] = cb.checked;
+        renderChart();
+      });
     });
   });
 

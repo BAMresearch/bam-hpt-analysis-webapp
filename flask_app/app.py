@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session, jsonify, abort
+from werkzeug.exceptions import HTTPException
 import json
 import os
 import re
@@ -69,7 +70,47 @@ def _require_active_database():
             return None
     except Exception:
         pass
+    if request.path.startswith('/api/'):
+        # A fetch() would follow the redirect and read the Datasets *page*, so the
+        # caller would only see "Invalid JSON from server".
+        return jsonify({'success': False,
+                        'message': 'No database is open. Open or create one on the Datasets page.'}), 409
     return redirect(url_for('datasets_page'))
+
+
+def _api_error_response(exc, status):
+    """JSON body for a failed /api/ request, with the cause the caller can act on."""
+    if status in (404, 405):
+        msg = (f'No such API endpoint: {request.method} {request.path} (HTTP {status}). '
+               'If this feature was just added, restart the app and reload the page.')
+    elif isinstance(exc, HTTPException):
+        msg = f'{exc.name} (HTTP {status}).'
+    else:
+        msg = f'{type(exc).__name__}: {exc}'
+    return jsonify({'success': False, 'message': msg, 'status': status}), status
+
+
+@app.errorhandler(HTTPException)
+def _handle_http_exception(exc):
+    """API paths answer JSON even for 404 / 405 / 400; pages keep the HTML page."""
+    if not request.path.startswith('/api/'):
+        return exc.get_response()
+    return _api_error_response(exc, exc.code or 500)
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_exception(exc):
+    """Never let an /api/ route reply with a Flask HTML traceback page.
+
+    The browser reads every API reply with ``resp.json()``, so an uncaught raise
+    used to surface as the undiagnosable "Invalid JSON from server" — including a
+    raise from a helper called *before* a handler's own try block.
+    """
+    import traceback
+    traceback.print_exc()
+    if not request.path.startswith('/api/'):
+        raise exc
+    return _api_error_response(exc, 500)
 
 # Custom template filters
 @app.template_filter('show_time')
@@ -7799,6 +7840,63 @@ ON_OFF_TEST_CONDS = {'C', 'D', 'C70min'}
 
 PELEC_COL = 'Electric Power Input (without correction)'
 
+# --- Guideline clock lengths (D/S buffer, equilibrium, evaluation) ----------
+# Lengths come from config/cycle_periods.json so that 10 / 60 / 70 min never
+# end up hardcoded in logic or column names. Draft values; they will change.
+CYCLE_PERIODS_CONFIG_DEFAULTS = {
+    'buffer_min': 10.0,
+    'eq_min': 60.0,
+    'eval_min': 70.0,
+    'defrost_indicator_columns': [],
+}
+_cycle_periods_cfg_cache = None
+_cycle_periods_cfg_mtime = -1.0
+
+
+def load_cycle_periods_config() -> dict:
+    """Guideline clock lengths from config/cycle_periods.json (re-read on change)."""
+    global _cycle_periods_cfg_cache, _cycle_periods_cfg_mtime
+    path = os.path.join(unit_config.config_dir(), 'cycle_periods.json')
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if _cycle_periods_cfg_cache is not None and mtime == _cycle_periods_cfg_mtime:
+        return _cycle_periods_cfg_cache
+
+    cfg = dict(CYCLE_PERIODS_CONFIG_DEFAULTS)
+    if mtime is not None:
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                raw = json.load(fh) or {}
+            cfg.update({k: v for k, v in raw.items() if k in CYCLE_PERIODS_CONFIG_DEFAULTS})
+        except Exception as exc:
+            print(f"[cycle_periods] cannot read {path}: {exc}")
+    for key in ('buffer_min', 'eq_min', 'eval_min'):
+        try:
+            cfg[key] = max(0.0, float(cfg[key]))
+        except (TypeError, ValueError):
+            cfg[key] = float(CYCLE_PERIODS_CONFIG_DEFAULTS[key])
+    if not isinstance(cfg.get('defrost_indicator_columns'), list):
+        cfg['defrost_indicator_columns'] = []
+
+    _cycle_periods_cfg_cache = cfg
+    _cycle_periods_cfg_mtime = mtime
+    return cfg
+
+
+def _guideline_lengths() -> dict:
+    """Config lengths in both minutes (for the UI) and seconds (for the clocks)."""
+    cfg = load_cycle_periods_config()
+    return {
+        'buffer_min': cfg['buffer_min'],
+        'eq_min': cfg['eq_min'],
+        'eval_min': cfg['eval_min'],
+        'buffer_s': cfg['buffer_min'] * 60.0,
+        'eq_s': cfg['eq_min'] * 60.0,
+        'eval_s': cfg['eval_min'] * 60.0,
+    }
+
 
 def _median_time_step_seconds(t_arr: np.ndarray) -> float:
     """Median positive Δt from ``time_elapsed`` samples (robust grid period)."""
@@ -8670,6 +8768,303 @@ def _generate_periods_for_entry(entry_rowid, cycle_start_marker,
     return periods
 
 
+# ---------------------------------------------------------------------------
+# Guideline clocks (Phase 1): D or S + H, plus equilibrium / evaluation inside H
+# ---------------------------------------------------------------------------
+
+GUIDELINE_DETECTION_METHOD = 'guideline'
+
+# A detected drop this close to the first D/S end or to the parent end is not a
+# second span: a window cut defrost start → next defrost start ends *at* the next
+# drop, and that defrost belongs to the next parent row (§2.1.1).
+GUIDELINE_MIN_SPAN_S = 60.0
+
+# The only guideline kinds (§2.2.1). 'other' is never one of them: the old
+# pipeline's cycle_type='other' means "could not classify", i.e. unknown.
+GUIDELINE_KINDS = ('defrost', 'on_off', 'continuous')
+
+# Stored cycle_type → kind. 'other' is deliberately absent.
+GUIDELINE_KIND_FROM_CYCLE_TYPE = {'defrost_cycle': 'defrost', 'on_off_cycle': 'on_off'}
+
+# Kinds whose H carries the equilibrium / evaluation clocks.
+GUIDELINE_EQ_EVAL_KINDS = ('defrost', 'continuous')
+
+
+def _normalise_guideline_kind(value):
+    """One of ``GUIDELINE_KINDS`` for an analyst/UI value, else None.
+
+    Never returns a kind for 'other' or for a test-condition letter — kind is not
+    taken from E/A/B/C/D or from the dataset name (§2.2.1).
+    """
+    v = str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+    if v in ('on_off', 'onoff'):
+        return 'on_off'
+    if v == 'defrost':
+        return 'defrost'
+    if v == 'continuous':
+        return 'continuous'
+    return None
+
+
+def _resolve_guideline_kind(row_kind, stored_cycle_type, indicator_flag, indicator_col,
+                            saved_types, default_kind):
+    """(kind, source) in the fill order of §2.2.1.
+
+    Analyst choice on the row, stored ``cycle_type``, defrost-indicator column,
+    clocks already saved for the entry, then the **file-level default** — which
+    therefore never overwrites a kind already set on a row. Anything left over is
+    ``unknown``: in particular ``cycle_type='other'`` means "could not classify",
+    not ``continuous``. Kind is never taken from a test-condition letter or from
+    the dataset name.
+    """
+    kind = _normalise_guideline_kind(row_kind)
+    if kind:
+        return kind, 'analyst'
+    kind = GUIDELINE_KIND_FROM_CYCLE_TYPE.get(stored_cycle_type)
+    if kind:
+        return kind, 'stored cycle_type'
+    if indicator_flag is True:
+        return 'defrost', f'indicator column "{indicator_col}"'
+    if indicator_flag is False:
+        return 'on_off', f'indicator column "{indicator_col}"'
+    saved_types = set(saved_types or ())
+    if 'defrost' in saved_types:
+        return 'defrost', 'saved periods'
+    if saved_types & {'off', 'on'}:
+        return 'on_off', 'saved periods'
+    if 'heating' in saved_types:
+        return 'continuous', 'saved periods'
+    default_kind = _normalise_guideline_kind(default_kind)
+    if default_kind:
+        return default_kind, 'file-level default'
+    if stored_cycle_type == 'other':
+        return 'unknown', "stored cycle_type 'other' — unclassified, choose one"
+    return 'unknown', 'not determined — choose one'
+
+
+def _guideline_period_labels(kind: str):
+    """(pre, main) cycle_periods types for a kind, reusing the existing names."""
+    if kind == 'on_off':
+        return 'off', 'on'
+    if kind == 'continuous':
+        return None, 'heating'   # no D, no S — the parent window is H
+    return 'defrost', 'heating'
+
+
+def _guideline_buffer_s() -> int:
+    return int(round(_guideline_lengths()['buffer_s']))
+
+
+def _cycle_opens_low(pelec_values) -> bool:
+    """True when the parent window opens near idle power (cycle begins in D or S).
+
+    Notes-independent stand-in for the drop/ramp keyword: compare the power level
+    at the very start of the window with the idle and on levels of that same
+    window. Returns None when the trace is too short or too flat to judge.
+    """
+    if pelec_values is None or len(pelec_values) < 10:
+        return None
+    p = np.asarray(pelec_values, dtype=float)
+    p = p[np.isfinite(p)]
+    if p.size < 10:
+        return None
+    base = float(np.nanpercentile(p, 5))
+    peak = float(np.nanpercentile(p, 90))
+    span = peak - base
+    if not np.isfinite(span) or span <= 0:
+        return None
+    head_n = max(3, min(int(p.size // 20), 30))
+    head = float(np.nanmedian(p[:head_n]))
+    return bool(head < base + 0.4 * span)
+
+
+def _defrost_indicator_state(df_slice, column_names):
+    """(is_defrost, column) from a defrost-indicator column, if the sheet has one."""
+    if df_slice is None or df_slice.empty or not column_names:
+        return None, None
+    lower = {str(c).strip().lower(): c for c in df_slice.columns}
+    for want in column_names:
+        col = lower.get(str(want).strip().lower())
+        if col is None:
+            continue
+        vals = pd.to_numeric(df_slice[col], errors='coerce').dropna()
+        if vals.empty:
+            continue
+        return bool((vals > 0).any()), str(col)
+    return None, None
+
+
+def _begins_in_from_marker(marker: str):
+    """'ds' if the parent window opens inside D/S, 'h' if it opens inside H."""
+    if marker in ('defrost_start', 'off_start'):
+        return 'ds'
+    if marker in ('defrost_end', 'on_start'):
+        return 'h'
+    return None
+
+
+def _marker_from_begins_in(begins_in: str, kind: str) -> str:
+    """cycle_start_marker equivalent, kept so stored markers stay readable."""
+    if kind == 'on_off':
+        return 'off_start' if begins_in == 'ds' else 'on_start'
+    return 'defrost_start' if begins_in == 'ds' else 'defrost_end'
+
+
+def _guideline_second_ds_start(override, next_drop, ds_end, cycle_end):
+    """Start of the second D/S span (§2.1.1), or None when the cycle has one.
+
+    The analyst comes first: ``ds2_start`` moves or adds the span, ``no_second_ds``
+    removes it. Otherwise the detected drop counts only when it leaves both a
+    usable H before it and a usable span after it.
+    """
+    if override.get('no_second_ds'):
+        return None
+    forced = override.get('ds2_start') is not None
+    cand = override.get('ds2_start') if forced else next_drop
+    if cand is None:
+        return None
+    try:
+        cand = float(cand)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(cand):
+        return None
+    cand = max(ds_end, min(cycle_end, cand))
+    if forced:
+        return cand if ds_end < cand < cycle_end else None
+    if cand <= ds_end + GUIDELINE_MIN_SPAN_S or cand >= cycle_end - GUIDELINE_MIN_SPAN_S:
+        return None
+    return cand
+
+
+def _build_guideline_clocks(cycle_start, cycle_end, kind, begins_in, trans,
+                            lengths, override=None, next_drop=None):
+    """Guideline intervals for one parent cycle: D or S, H, equilibrium, evaluation.
+
+    ``begins_in`` is 'ds' (window opens inside defrost/standby, the transition is
+    the power rise) or 'h' (window opens inside heating, the transition is the
+    drop that ends it). ``next_drop`` is a further drop detected inside the same
+    window; on a window that opens in D/S it turns D into two spans (§2.1.1).
+    Both are ignored for ``continuous``, which has no D/S and needs no transition:
+    the parent window is H and eq/eval run from its start.
+
+    D/S and H follow the same buffer rule as ``_generate_periods_for_entry``,
+    with the two additions the spec asks for: the buffer also applies to standby
+    on on-off cycles, and the analyst may move the D/S end directly. Equilibrium
+    and evaluation are clocks *inside* H, on defrost and continuous cycles only:
+    the first ``eq_min`` of H, then the next ``eval_min`` — never the last N
+    minutes of the cycle.
+
+    Returns ``{'periods': [...], 'h_start', 'h_end', 'notes': [...]}``.
+    """
+    override = override or {}
+    cycle_start = float(cycle_start)
+    cycle_end = float(cycle_end)
+    buffer_s = float(lengths['buffer_s'])
+    eq_s = float(lengths['eq_s'])
+    eval_s = float(lengths['eval_s'])
+    pre_type, main_type = _guideline_period_labels(kind)
+
+    notes = []
+    spans = []
+    h_start = h_end = None
+
+    def _clamp(v):
+        return max(cycle_start, min(cycle_end, float(v)))
+
+    ds_end_override = override.get('ds_end')
+    if kind == 'continuous':
+        # No defrost, no standby: the parent window *is* H, so no power
+        # transition is required and eq/eval start at the parent start (§2.2.1).
+        h_start, h_end = cycle_start, cycle_end
+        spans.append((main_type, h_start, h_end))
+    elif trans is None and ds_end_override is None:
+        notes.append('No interior power transition available — D/S and H cannot be proposed.')
+        return {'periods': [], 'h_start': None, 'h_end': None, 'notes': notes}
+    elif begins_in == 'ds':
+        # Cycle opens inside D/S; the transition is the power rise (t_buf).
+        ds_end = _clamp(ds_end_override if ds_end_override is not None else float(trans) + buffer_s)
+        spans.append((pre_type, cycle_start, ds_end))
+        if ds_end >= cycle_end:
+            notes.append('Buffer end reaches the cycle end — no H interval left.')
+        else:
+            # A drop after that first span means the window was cut defrost end →
+            # next defrost end, so D has a second span and H is only the gap
+            # between them (§2.1.1). Without such a drop this stays one span.
+            drop2 = _guideline_second_ds_start(override, next_drop, ds_end, cycle_end)
+            h_start, h_end = ds_end, (drop2 if drop2 is not None else cycle_end)
+            spans.append((main_type, h_start, h_end))
+            if drop2 is not None:
+                spans.append((pre_type, drop2, cycle_end))
+                notes.append(
+                    f'Drop at {drop2:.0f} s inside the window — '
+                    f'{"D" if pre_type == "defrost" else "S"} is two spans, H is the gap between them.'
+                )
+    else:
+        # Cycle opens inside H; the transition is the drop that ends it. The
+        # first buffer_min still belongs to the previous D/S.
+        ds1_end = _clamp(ds_end_override if ds_end_override is not None else cycle_start + buffer_s)
+        drop = _clamp(trans) if trans is not None else cycle_end
+        if ds1_end >= drop:
+            spans.append((pre_type, cycle_start, cycle_end))
+            notes.append('Buffer end is at or after the power drop — the whole cycle is D/S.')
+        else:
+            spans.append((pre_type, cycle_start, ds1_end))
+            h_start, h_end = ds1_end, drop
+            spans.append((main_type, h_start, h_end))
+            if drop < cycle_end:
+                spans.append((pre_type, drop, cycle_end))
+
+    eq_win = None
+    eval_win = None
+    eq_locked = bool(override.get('eq_locked', True))
+    eval_locked = bool(override.get('eval_locked', True))
+
+    if kind not in GUIDELINE_EQ_EVAL_KINDS:
+        if kind == 'on_off' and h_start is not None:
+            notes.append('Equilibrium / evaluation do not apply to on–off cycles.')
+    elif h_start is not None:
+        h_len = h_end - h_start
+        if (not eq_locked) and override.get('eq_start') is not None and override.get('eq_end') is not None:
+            eq_win = (_clamp(override['eq_start']), _clamp(override['eq_end']))
+        elif eq_s <= 0:
+            notes.append('eq_min is 0 — no equilibrium window.')
+        elif h_len + 1e-6 >= eq_s:
+            eq_win = (h_start, h_start + eq_s)
+        else:
+            notes.append(
+                f'H is {h_len / 60.0:.0f} min, shorter than eq_min '
+                f'({eq_s / 60.0:.0f} min) — no equilibrium, no evaluation.'
+            )
+
+        if (not eval_locked) and override.get('eval_start') is not None and override.get('eval_end') is not None:
+            eval_win = (_clamp(override['eval_start']), _clamp(override['eval_end']))
+        elif eq_win is None:
+            pass  # reason already reported above
+        elif eval_s <= 0:
+            notes.append('eval_min is 0 — no evaluation window.')
+        elif eq_win[1] + eval_s <= h_end + 1e-6:
+            eval_win = (eq_win[1], eq_win[1] + eval_s)
+        else:
+            notes.append(
+                f'H is {h_len / 60.0:.0f} min, shorter than eq_min + eval_min '
+                f'({(eq_s + eval_s) / 60.0:.0f} min) — evaluation omitted (interrupted / transient).'
+            )
+
+    # Order matters: D/S and H first, so readers that look for a defrost→heating
+    # boundary in start-time order still find it.
+    if eq_win:
+        spans.append(('equilibrium', eq_win[0], eq_win[1]))
+    if eval_win:
+        spans.append(('evaluation', eval_win[0], eval_win[1]))
+
+    periods = [
+        {'period_type': t, 'start_time': float(s), 'end_time': float(e)}
+        for (t, s, e) in spans if float(e) > float(s)
+    ]
+    return {'periods': periods, 'h_start': h_start, 'h_end': h_end, 'notes': notes}
+
+
 @app.route('/api/cycle_periods/auto_classify', methods=['POST'])
 def api_cycle_periods_auto_classify():
     """Classify entries and detect Pelec transitions, then generate cycle_periods."""
@@ -9249,27 +9644,438 @@ def api_cycle_extract_existing_entries():
         if not file_name:
             return jsonify({'success': True, 'entries': []})
 
+        cols = (
+            "SELECT rowid, file_name, data_set, start_time, end_time, "
+            "HP_ID AS hp_id, dev_test_condition, indicator AS indicator_notes, notes, "
+            "cycle_type, cycle_start_marker, pelec_transition_time, pelec_transition_source "
+            "FROM results "
+        )
         conn = get_db_connection()
         try:
             if data_set is not None:
                 rows = conn.execute(
-                    "SELECT rowid, file_name, data_set, start_time, end_time, "
-                    "HP_ID AS hp_id, dev_test_condition, indicator AS indicator_notes, notes "
-                    "FROM results WHERE file_name=? AND data_set=? "
-                    "ORDER BY start_time ASC",
+                    cols + "WHERE file_name=? AND data_set=? ORDER BY start_time ASC",
                     (file_name, data_set)
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT rowid, file_name, data_set, start_time, end_time, "
-                    "HP_ID AS hp_id, dev_test_condition, indicator AS indicator_notes, notes "
-                    "FROM results WHERE file_name=? "
-                    "ORDER BY data_set ASC, start_time ASC",
+                    cols + "WHERE file_name=? ORDER BY data_set ASC, start_time ASC",
                     (file_name,)
                 ).fetchall()
         finally:
             conn.close()
         return jsonify({'success': True, 'entries': [dict(r) for r in rows]})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+def _guideline_pelec_for_window(df_full, stf, etf):
+    """(slice, power, time) for one parent window, or (slice, None, None)."""
+    if df_full is None or 'time_elapsed' not in df_full.columns:
+        return None, None, None
+    t_all = pd.to_numeric(df_full['time_elapsed'], errors='coerce')
+    df_slice = df_full[(t_all >= stf) & (t_all <= etf)]
+    if df_slice.empty:
+        return None, None, None
+    pcol = _find_uncorrected_pelec_column(df_slice)
+    if pcol is None:
+        return df_slice, None, None
+    pelec = pd.to_numeric(df_slice[pcol], errors='coerce').dropna()
+    if len(pelec) < 10:
+        return df_slice, None, None
+    return df_slice, pelec, pd.to_numeric(df_slice.loc[pelec.index, 'time_elapsed'], errors='coerce')
+
+
+def _detect_next_drop_after(pelec, p_time, after_t):
+    """Power drop later in the same parent window — start of a second D/S span.
+
+    Only the trace after the first D/S end is searched, so the rise that opened
+    the window cannot be mistaken for the next defrost.
+    """
+    if pelec is None or p_time is None or after_t is None:
+        return None
+    tail = p_time > float(after_t)
+    if int(tail.sum()) < 10:
+        return None
+    return _detect_pelec_drop(pelec[tail], p_time[tail])
+
+
+def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, default_kind=None):
+    """Derive the guideline clocks for the DB entries of one file.
+
+    Shared by ``propose_periods`` (read-only) and ``save_all_periods``, so both
+    see exactly the same clocks. ``overrides[rowid]`` replays the analyst's edits
+    and ``default_kind`` is the file-level "treat unknown rows as" choice, which
+    fills only rows whose kind is still unknown (§2.2.1).
+
+    Returns ``{'entries': [...], 'lengths': {...}, 'buffer_s': int}``. Only this
+    file's entries are read — no full-database walk.
+    """
+    overrides = overrides if isinstance(overrides, dict) else {}
+    default_kind = _normalise_guideline_kind(default_kind)
+
+    cfg = load_cycle_periods_config()
+    lengths = _guideline_lengths()
+    buffer_s = _guideline_buffer_s()
+
+    conn = get_db_connection()
+    try:
+        entries = [dict(r) for r in conn.execute(
+            "SELECT rowid, data_set, start_time, end_time, cycle_type, cycle_start_marker, "
+            "pelec_transition_time, pelec_transition_source "
+            "FROM results WHERE file_name=? ORDER BY data_set ASC, start_time ASC",
+            (file_name,)
+        ).fetchall()]
+        if isinstance(want_rowids, list) and want_rowids:
+            keep = {int(x) for x in want_rowids}
+            entries = [e for e in entries if int(e['rowid']) in keep]
+        saved_map = {}
+        if entries:
+            ph = ",".join(["?"] * len(entries))
+            rows = conn.execute(
+                f"SELECT entry_rowid, period_type, start_time, end_time FROM cycle_periods "
+                f"WHERE entry_rowid IN ({ph}) AND buffer_s=? AND detection_method=? "
+                f"ORDER BY start_time",
+                [int(e['rowid']) for e in entries] + [buffer_s, GUIDELINE_DETECTION_METHOD]
+            ).fetchall()
+            for p in rows:
+                saved_map.setdefault(int(p['entry_rowid']), []).append(dict(p))
+    finally:
+        conn.close()
+
+    sheets = {}   # one Excel read per data_set (sheet), LRU-cached underneath
+    out = []
+    for e in entries:
+        rid = int(e['rowid'])
+        if e.get('start_time') is None or e.get('end_time') is None:
+            continue
+        stf, etf = float(e['start_time']), float(e['end_time'])
+        # NaN would be written to the reply as the literal `NaN`, which no browser
+        # can parse — such a row has no usable window anyway.
+        if not (np.isfinite(stf) and np.isfinite(etf)):
+            continue
+        ov = overrides.get(str(rid)) or overrides.get(rid) or {}
+        saved = saved_map.get(rid, [])
+
+        ds_key = e.get('data_set')
+        if ds_key not in sheets:
+            sheets[ds_key] = _read_excel_sheet(file_name, ds_key)
+        df_slice, pelec, p_time = _guideline_pelec_for_window(sheets[ds_key], stf, etf)
+
+        # --- kind (§2.2.1): analyst, stored cycle_type, indicator column,
+        # already-saved clocks, then the file-level default. ---
+        flag, ind_col = (None, None)
+        if _normalise_guideline_kind(ov.get('kind')) is None \
+                and e.get('cycle_type') not in GUIDELINE_KIND_FROM_CYCLE_TYPE:
+            flag, ind_col = _defrost_indicator_state(df_slice, cfg.get('defrost_indicator_columns'))
+        kind, kind_source = _resolve_guideline_kind(
+            ov.get('kind'), e.get('cycle_type'), flag, ind_col,
+            {p['period_type'] for p in saved}, default_kind,
+        )
+
+        # --- where the window opens: D/S or H (continuous has neither) ---
+        begins_override = str(ov.get('begins_in') or '').strip().lower()
+        if kind == 'continuous':
+            begins_in, begins_source = None, 'not used — the parent window is H'
+        elif begins_override in ('ds', 'h'):
+            begins_in, begins_source = begins_override, 'analyst'
+        elif _begins_in_from_marker(e.get('cycle_start_marker')):
+            begins_in = _begins_in_from_marker(e.get('cycle_start_marker'))
+            begins_source = 'stored cycle_start_marker'
+        else:
+            opens_low = _cycle_opens_low(pelec.values) if pelec is not None else None
+            if opens_low is None:
+                begins_in, begins_source = 'ds', 'default (power level unreadable)'
+            else:
+                begins_in = 'ds' if opens_low else 'h'
+                begins_source = 'power level at cycle start'
+
+        # --- interior power event (drop or rise). Not a kind classifier. ---
+        try:
+            trans_override = float(ov['transition_time'])
+        except (KeyError, TypeError, ValueError):
+            trans_override = None
+        if kind == 'continuous':
+            trans, trans_source = None, 'not required — no D/S on a continuous cycle'
+        elif trans_override is not None:
+            trans, trans_source = trans_override, 'analyst'
+        elif e.get('pelec_transition_time') is not None:
+            trans = float(e['pelec_transition_time'])
+            trans_source = e.get('pelec_transition_source') or 'auto'
+        elif pelec is not None:
+            detector = _detect_pelec_rampup if begins_in == 'ds' else _detect_pelec_drop
+            trans = detector(pelec, p_time)
+            trans_source = 'detected now' if trans is not None else 'detection failed'
+        else:
+            trans, trans_source = None, 'no power data for this window'
+        if trans is not None and not np.isfinite(trans):
+            trans, trans_source = None, 'transition time is not a finite number'
+
+        def _num(key, _ov=ov):
+            try:
+                return float(_ov[key])
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        # --- second D/S span: a further drop inside the same window (§2.1.1) ---
+        next_drop, next_drop_source = None, None
+        if kind != 'continuous' and begins_in == 'ds':
+            if _num('ds2_start') is not None:
+                next_drop_source = 'analyst'
+            elif ov.get('no_second_ds'):
+                next_drop_source = 'removed by the analyst'
+            else:
+                ds_end_guess = _num('ds_end')
+                if ds_end_guess is None and trans is not None:
+                    ds_end_guess = float(trans) + lengths['buffer_s']
+                if ds_end_guess is not None and pelec is not None:
+                    next_drop = _detect_next_drop_after(pelec, p_time, min(ds_end_guess, etf))
+                next_drop_source = 'detected now' if next_drop is not None else 'no later drop found'
+
+        clocks = _build_guideline_clocks(
+            stf, etf, kind, begins_in, trans, lengths,
+            override={
+                'ds_end': _num('ds_end'),
+                'ds2_start': _num('ds2_start'),
+                'no_second_ds': bool(ov.get('no_second_ds')),
+                'eq_locked': ov.get('eq_locked', True),
+                'eval_locked': ov.get('eval_locked', True),
+                'eq_start': _num('eq_start'),
+                'eq_end': _num('eq_end'),
+                'eval_start': _num('eval_start'),
+                'eval_end': _num('eval_end'),
+            },
+            next_drop=next_drop,
+        )
+        notes = list(clocks['notes'])
+        if kind == 'unknown':
+            notes.append('Kind unknown — pick defrost, on–off or continuous, '
+                         'or set the file-level default, before saving.')
+
+        out.append({
+            'rowid': rid,
+            'data_set': e.get('data_set'),
+            'start_time': stf,
+            'end_time': etf,
+            'kind': kind,
+            'kind_source': kind_source,
+            'begins_in': begins_in,
+            'begins_in_source': begins_source,
+            'transition_time': trans,
+            'transition_source': trans_source,
+            'second_drop': next_drop,
+            'second_drop_source': next_drop_source,
+            'periods': clocks['periods'],
+            'h_start': clocks['h_start'],
+            'h_end': clocks['h_end'],
+            'notes': notes,
+            'saved_periods': saved,
+            'has_saved': bool(saved),
+        })
+
+    return {'entries': out, 'lengths': lengths, 'buffer_s': buffer_s}
+
+
+@app.route('/api/cycle_extract/propose_periods', methods=['POST'])
+def api_cycle_extract_propose_periods():
+    """Guideline clocks for the existing DB entries of the currently open file.
+
+    Read-only proposal. ``overrides[rowid]`` lets the analyst move the
+    transition, the D/S end, the kind, or (once unlocked) the eq/eval times and
+    re-derive the rest with the same server-side rule, so the clock logic lives
+    in one place. ``default_kind`` is the file-level "treat unknown rows as"
+    choice. Nothing is written here — clocks are stored only on save (§2.2.2).
+    """
+    try:
+        ensure_cycle_periods_table()
+        payload = request.get_json() or {}
+        file_name = (payload.get('file_name') or '').strip()
+        if not file_name:
+            return jsonify({'success': False, 'message': 'file_name required'})
+        result = _guideline_proposals_for_file(
+            file_name,
+            want_rowids=payload.get('rowids'),
+            overrides=payload.get('overrides'),
+            default_kind=payload.get('default_kind'),
+        )
+        return jsonify({
+            'success': True,
+            'entries': result['entries'],
+            'lengths': result['lengths'],
+            'buffer_s': result['buffer_s'],
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+GUIDELINE_PERIOD_TYPES = ('defrost', 'heating', 'off', 'on', 'equilibrium', 'evaluation')
+
+
+def _clean_guideline_periods(periods_in, cycle_start=None, cycle_end=None):
+    """Keep the known period types with a positive length, clamped to the parent."""
+    out = []
+    for p in periods_in or []:
+        ptype = str(p.get('period_type') or '').strip()
+        if ptype not in GUIDELINE_PERIOD_TYPES:
+            continue
+        try:
+            s, en = float(p['start_time']), float(p['end_time'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if cycle_start is not None and cycle_end is not None:
+            s = max(cycle_start, min(cycle_end, s))
+            en = max(cycle_start, min(cycle_end, en))
+        if en > s:
+            out.append({'period_type': ptype, 'start_time': s, 'end_time': en})
+    return out
+
+
+def _persist_guideline_clocks(conn, rid, kind, begins_in, trans, periods, buffer_s, df_full):
+    """Write one entry's clocks. No second results row — the parent stays whole.
+
+    Marks ``pelec_transition_source='manual'`` (the analyst confirmed this split,
+    and 'manual' is what keeps Rebuild all from overwriting it) and replaces the
+    entry's ``cycle_periods`` rows for the configured buffer. A ``continuous``
+    cycle has no interior transition and no D/S, so it stores neither a
+    transition time nor a start marker.
+    """
+    if kind == 'continuous':
+        trans, marker = None, None
+    else:
+        marker = _marker_from_begins_in(begins_in, kind)
+    conn.execute(
+        "UPDATE results SET pelec_transition_time=?, pelec_transition_source='manual', "
+        "pelec_detect_failed=0, cycle_start_marker=COALESCE(cycle_start_marker, ?) WHERE rowid=?",
+        (trans, marker, rid)
+    )
+    # Replace only this buffer's rows, so the other buffer_s variants and
+    # the Period Statistics pivot keep exactly one D/S and one H row.
+    conn.execute(
+        "DELETE FROM cycle_periods WHERE entry_rowid=? AND buffer_s=? "
+        "AND detection_method IN ('auto_pelec', 'manual', ?)",
+        (rid, buffer_s, GUIDELINE_DETECTION_METHOD)
+    )
+    for p in periods:
+        _insert_cycle_period_row(conn, rid, p, df_full, GUIDELINE_DETECTION_METHOD, buffer_s)
+    return len(periods)
+
+
+@app.route('/api/cycle_extract/save_periods', methods=['POST'])
+def api_cycle_extract_save_periods():
+    """Persist the guideline clocks of one entry (Edit + Save on a single row)."""
+    try:
+        ensure_cycle_periods_table()
+        init_deviation_columns()
+        payload = request.get_json() or {}
+        rid = int(payload['rowid'])
+        kind = _normalise_guideline_kind(payload.get('kind'))
+        if kind is None:
+            return jsonify({'success': False,
+                            'message': 'Choose defrost, on–off or continuous before saving.'})
+        begins_in = str(payload.get('begins_in') or 'ds').strip().lower()
+        if begins_in not in ('ds', 'h'):
+            begins_in = 'ds'
+        trans = payload.get('transition_time')
+        trans = float(trans) if trans is not None and str(trans).strip() != '' else None
+
+        if not _clean_guideline_periods(payload.get('periods')):
+            return jsonify({'success': False, 'message': 'Nothing to save — no usable periods.'})
+
+        buffer_s = _guideline_buffer_s()
+        conn = get_db_connection()
+        try:
+            entry = conn.execute(
+                "SELECT file_name, data_set, start_time, end_time FROM results WHERE rowid=?",
+                (rid,)
+            ).fetchone()
+            if not entry:
+                return jsonify({'success': False, 'message': f'Entry rowid {rid} not found'})
+            periods = _clean_guideline_periods(
+                payload.get('periods'), float(entry['start_time']), float(entry['end_time'])
+            )
+            df_full = _read_excel_sheet(entry['file_name'], entry['data_set'])
+            n = _persist_guideline_clocks(conn, rid, kind, begins_in, trans, periods, buffer_s, df_full)
+            conn.commit()
+        finally:
+            conn.close()
+
+        return jsonify({'success': True, 'saved': n, 'buffer_s': buffer_s})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/cycle_extract/save_all_periods', methods=['POST'])
+def api_cycle_extract_save_all_periods():
+    """Save the current proposals for a whole file, or for the ticked rows (§2.2.2).
+
+    The proposals are re-derived here with the same helper the read-only propose
+    call uses, so "Save all" stores exactly what the analyst is looking at while
+    the clock rules stay in one place. A row whose kind is still unknown (and for
+    which no file-level default is set) is skipped and reported; the rest of the
+    batch still saves. Per-row Edit + Save stays for corrections.
+
+    ``rowids`` limits the batch to the rows the analyst ticked. Null or empty
+    means the **whole open file**, not "nothing" (§Phase 1.2b). The reply is
+    always JSON, so a failure never reaches the browser as an HTML error page.
+    """
+    try:
+        ensure_cycle_periods_table()
+        init_deviation_columns()
+        payload = request.get_json() or {}
+        file_name = (payload.get('file_name') or '').strip()
+        if not file_name:
+            return jsonify({'success': False, 'message': 'file_name required'})
+        result = _guideline_proposals_for_file(
+            file_name,
+            want_rowids=payload.get('rowids'),
+            overrides=payload.get('overrides'),
+            default_kind=payload.get('default_kind'),
+        )
+        buffer_s = result['buffer_s']
+
+        saved_rowids, skipped, total_periods = [], [], 0
+        conn = get_db_connection()
+        try:
+            sheets = {}
+            for pr in result['entries']:
+                rid = int(pr['rowid'])
+                if pr['kind'] not in GUIDELINE_KINDS:
+                    skipped.append({'rowid': rid, 'reason': 'kind still unknown — '
+                                                            'set it on the row or pick a file-level default'})
+                    continue
+                periods = _clean_guideline_periods(
+                    pr['periods'], float(pr['start_time']), float(pr['end_time'])
+                )
+                if not periods:
+                    skipped.append({'rowid': rid,
+                                    'reason': (pr['notes'][0] if pr['notes'] else 'no usable periods')})
+                    continue
+                ds_key = pr.get('data_set')
+                if ds_key not in sheets:
+                    sheets[ds_key] = _read_excel_sheet(file_name, ds_key)
+                total_periods += _persist_guideline_clocks(
+                    conn, rid, pr['kind'], pr['begins_in'], pr['transition_time'],
+                    periods, buffer_s, sheets[ds_key]
+                )
+                saved_rowids.append(rid)
+            conn.commit()
+        finally:
+            conn.close()
+
+        return jsonify({
+            'success': True,
+            'saved_rowids': saved_rowids,
+            'saved_entries': len(saved_rowids),
+            'saved_periods': total_periods,
+            'skipped': skipped,
+            'buffer_s': buffer_s,
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -12226,7 +13032,8 @@ def api_cycle_periods_pelec_plot():
             gridspec_kw={'height_ratios': [1.0, 1.0]}
         )
 
-        period_colors = {'defrost': '#ffcccc', 'heating': '#ccffcc', 'off': '#cce5ff', 'on': '#fff3cc'}
+        period_colors = {'defrost': '#ffcccc', 'heating': '#ccffcc', 'off': '#cce5ff', 'on': '#fff3cc',
+                         'equilibrium': '#e2d9f3', 'evaluation': '#d3f0ee'}
         for p in periods:
             color = period_colors.get(p['period_type'], '#f0f0f0')
             ax1.axvspan(p['start_time'], p['end_time'], alpha=0.35, color=color, label=p['period_type'])

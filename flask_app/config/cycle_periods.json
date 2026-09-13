@@ -1,0 +1,8 @@
+{
+  "_comment": "Guideline clock lengths for Cycle Extract sub-periods. Draft values - not the official HPT guideline.",
+  "buffer_min": 10,
+  "eq_min": 60,
+  "eval_min": 70,
+  "_defrost_indicator_columns": "Optional list of column names in the Plotdaten sheet that flag an active defrost. Leave empty when the export has none; kind then comes from the stored cycle_type or the analyst dropdown.",
+  "defrost_indicator_columns": []
+}

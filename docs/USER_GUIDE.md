@@ -232,6 +232,35 @@ An empty **climate / application** on an entry means the Average / MT **default*
 4. **Set `ds` per cycle.** `ds` is the dataset number stored in the database for that cycle. It defaults to 1, 2, 3, … down the table and is editable per row. **Set it before pressing Apply** — it is per cycle, not one value for the file.
 5. Apply. Entries appear on the main results page. The review modal shows the auto-filled Test cond, Test label, Lab ID, HP ID, Indicator and Notes so you can correct anything before Confirm. Use `drop` or `ramp` in Notes when the window starts at a compressor power drop or ramp-up (defrost A/B/E/F or on/off C/D); otherwise the row is not split into sub-periods. HP ID is filled from the profile when it was empty.
 
+### 6.3a Guideline clocks on existing entries
+
+Also on `/cycle_extract`, for the file you have loaded. The database entry **stays the complete cycle**. These clocks are sub-periods on that row, not a replacement.
+
+Press **Propose guideline clocks**. For each existing entry the tool derives:
+
+| Interval | Definition |
+|----------|------------|
+| **D** | Defrost plus the buffer after heating resumes |
+| **S** | Standby plus the buffer after the compressor restarts |
+| **H** | Heating between the D (or S) pieces. On a *continuous* cycle this is the whole parent window |
+| **Equilibrium** | First `eq_min` of H (defrost and continuous) |
+| **Evaluation** | The `eval_min` immediately after equilibrium (defrost and continuous) |
+
+Evaluation is **not** the last minutes of the cycle. If H is too short, that window is omitted. Lengths are `flask_app/config/cycle_periods.json` (defaults: buffer 10 min, equilibrium 60 min, evaluation 70 min).
+
+Kinds: **defrost** (D + H), **on–off** (S + H, no equilibrium or evaluation), **continuous** (H only), or **unknown**. A proposal does not need Notes `drop` / `ramp`. Confirm before you save. Stored `other` means unknown, not continuous.
+
+**Treat unknown rows as** fills only rows that still have no kind. Changing it rebuilds those clocks at once. **Save all proposed** stores the open file; tick **show** first to limit the batch. Unknown rows with no default are skipped.
+
+To correct one row, press **edit**:
+
+- Move **pelec_transition_time** or the **D / S end** to rebuild H (and locked equilibrium / evaluation). Continuous rows have neither field.
+- A cycle cut from one defrost **end** to the next can show a **second D** (same idea for S). Type a start, clear it for one span, or **reset** to re-detect. A cut from defrost **start** to start keeps one D.
+- **Unlock** equilibrium or evaluation to type their times.
+- **Save clocks** writes the times on the parent entry. **Rebuild all** will not overwrite that split.
+
+Period layers are **off by default**. Turn them on, then tick **show** per row.
+
 ### 6.4 Reading the import fallback notices
 
 After Apply, the Means page (and the review modal) may show fallback notices. These are the WebApp telling you it filled a gap the importer refused to invent. They are informational, not errors — but they change how the numbers should be read.

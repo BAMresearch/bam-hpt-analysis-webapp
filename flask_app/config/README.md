@@ -7,6 +7,7 @@ JSON under this folder is the source of truth for guideline setpoints and unit p
 | `condition_sets.json` | Yes | Outdoor DB + supply setpoints per condition letter |
 | `unit_types.json` | Yes | Capability flags per unit class |
 | `checks.json` | Yes | Which checks apply for which capabilities |
+| `cycle_periods.json` | Yes | Guideline clock lengths: `buffer_min`, `eq_min`, `eval_min` |
 | `profiles/examples/` | Yes | Fictitious schema examples |
 | `profiles/shared/` | Yes | Public HPT placeholders (no private BAM data) |
 | `profiles/local/` | **No** (gitignored) | Real BAM / lab unit profiles |
