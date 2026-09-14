@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block title %}Guideline Windows{% endblock %}
+
+{% block extra_css %}
+<style>
+  .gw-actions { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 12px 15px; margin: 20px; }
+  .gw-help { font-size: 12px; color: #6c757d; }
+  .gw-status { font-size: 12px; color: #495057; margin-top: 8px; }
+  .gw-table-wrap { margin: 0 20px 30px 20px; overflow-x: auto; }
+  #gwTable { font-size: 11px; white-space: nowrap; }
+  #gwTable thead tr.gw-groups th { background: #eef1f4; text-align: center; font-weight: 600; }
+  #gwTable td.gw-num { text-align: right; font-variant-numeric: tabular-nums; }
+  #gwTable td.gw-note { white-space: normal; min-width: 220px; color: #6c757d; }
+  .gw-kind { font-weight: 600; }
+  .gw-kind-unknown { color: #adb5bd; font-weight: 400; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 style="margin: 20px;">Guideline Windows</h1>
+
+<div class="gw-actions">
+  <p class="gw-help mb-2">
+    Read-only check of the guideline clocks <strong>saved</strong> on Cycle Extract: the stored D / S, H,
+    equilibrium and evaluation times beside the entry's stored Tsup, Q, P and COP and the same four on the
+    evaluation window. Unsaved proposals do not appear here — save them on Cycle Extract first.
+    Nothing is read until you click one of the buttons below.
+  </p>
+  <button type="button" class="btn btn-sm btn-primary" id="gwLoadSelectedBtn" onclick="gwLoadSelected()"
+          {% if not preselected_rowids %}style="display:none;"{% endif %}>
+    <i class="fas fa-check-square"></i> Load the {{ preselected_rowids|length }} selected row(s)
+  </button>
+  <button type="button" class="btn btn-sm btn-outline-primary" id="gwLoadAllBtn" onclick="gwLoadAll()">
+    <i class="fas fa-database"></i> Load all entries in the open database
+  </button>
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="gwExportBtn" onclick="gwExport()" disabled>
+    <i class="fas fa-file-csv"></i> Download CSV
+  </button>
+  <div class="gw-status" id="gwStatus">
+    {% if preselected_rowids %}
+      {{ preselected_rowids|length }} row(s) came from Mean Values. Loading…
+    {% else %}
+      Nothing loaded. Tick rows on Mean Values and use <em>Guideline windows</em>, or load the whole database.
+    {% endif %}
+  </div>
+</div>
+
+<div class="gw-table-wrap">
+  <table class="table table-sm table-bordered table-hover" id="gwTable" style="display:none;">
+    <thead>
+      <tr class="gw-groups">
+        <th colspan="9">Entry</th>
+        <th colspan="8">D / S spans</th>
+        <th colspan="6">H, equilibrium, evaluation</th>
+        <th colspan="4">Entry means</th>
+        <th colspan="4">Evaluation window means</th>
+        <th rowspan="2">Note</th>
+      </tr>
+      <tr>
+        <th>rowid</th><th>File</th><th>Data set</th><th>Test</th><th>Profile</th><th>HP</th>
+        <th>Start s</th><th>End s</th><th>Kind</th>
+        <th>D1 start</th><th>D1 end</th><th>D2 start</th><th>D2 end</th>
+        <th>S1 start</th><th>S1 end</th><th>S2 start</th><th>S2 end</th>
+        <th>H start</th><th>H end</th><th>eq start</th><th>eq end</th><th>eval start</th><th>eval end</th>
+        <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
+        <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
+      </tr>
+    </thead>
+    <tbody id="gwBody"></tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script type="application/json" id="gwPreselected">{{ (preselected_rowids or []) | tojson }}</script>
+<script>
+  var _gwPreselected = JSON.parse(document.getElementById('gwPreselected').textContent || '[]');
+  var _gwSelector = null;        // the rowids of the table on screen (null = whole database)
+  var _gwLoaded = false;
+
+  function gwStatus(text) { document.getElementById('gwStatus').textContent = text; }
+
+  /** Name the HTTP status when a reply will not parse, instead of "Invalid JSON from server". */
+  async function gwReadJson(resp) {
+    try {
+      return await resp.json();
+    } catch (e) {
+      var hint = (resp.status === 404 || resp.status === 405)
+        ? ' — restart the app and reload this page, the running server does not have this endpoint'
+        : '';
+      return { success: false, rows: [], message: 'server did not answer with JSON (HTTP ' + resp.status + ')' + hint };
+    }
+  }
+
+  function gwSeconds(v) { return (v === null || v === undefined) ? '' : Math.round(v); }
+
+  function gwValue(v, digits) {
+    // Empty, never 0: a missing evaluation window has no number at all.
+    return (v === null || v === undefined) ? '' : Number(v).toFixed(digits);
+  }
+
+  function gwCell(text, cls) {
+    var td = document.createElement('td');
+    if (cls) { td.className = cls; }
+    td.textContent = text;
+    return td;
+  }
+
+  function gwRenderRows(rows) {
+    var body = document.getElementById('gwBody');
+    body.innerHTML = '';
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.appendChild(gwCell(r.rowid, 'gw-num'));
+      tr.appendChild(gwCell(r.file_name || ''));
+      tr.appendChild(gwCell(r.data_set === null || r.data_set === undefined ? '' : r.data_set, 'gw-num'));
+      tr.appendChild(gwCell(r.test_cond || ''));
+      tr.appendChild(gwCell(r.profile_id || ''));
+      tr.appendChild(gwCell(r.hp_id === null || r.hp_id === undefined ? '' : r.hp_id));
+      tr.appendChild(gwCell(gwSeconds(r.start_time), 'gw-num'));
+      tr.appendChild(gwCell(gwSeconds(r.end_time), 'gw-num'));
+      tr.appendChild(gwCell(r.kind === 'on_off' ? 'on–off' : r.kind,
+                            r.kind === 'unknown' ? 'gw-kind gw-kind-unknown' : 'gw-kind'));
+      ['d1_start', 'd1_end', 'd2_start', 'd2_end', 's1_start', 's1_end', 's2_start', 's2_end',
+       'h_start', 'h_end', 'eq_start', 'eq_end', 'eval_start', 'eval_end'].forEach(function (k) {
+        tr.appendChild(gwCell(gwSeconds(r[k]), 'gw-num'));
+      });
+      tr.appendChild(gwCell(gwValue(r.parent_tsup, 2), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.parent_q, 3), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.parent_p, 3), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.parent_cop, 3), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.eval_tsup, 2), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.eval_q, 3), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.eval_p, 3), 'gw-num'));
+      tr.appendChild(gwCell(gwValue(r.eval_cop, 3), 'gw-num'));
+      tr.appendChild(gwCell(r.note || '', 'gw-note'));
+      body.appendChild(tr);
+    });
+    document.getElementById('gwTable').style.display = rows.length ? '' : 'none';
+  }
+
+  async function gwLoad(rowids, what) {
+    gwStatus('Reading the saved clocks for ' + what + '…');
+    document.getElementById('gwExportBtn').disabled = true;
+    var resp = await fetch('/api/guideline_windows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rowids: rowids })
+    });
+    var d = await gwReadJson(resp);
+    if (!d.success) {
+      gwStatus('Could not load: ' + (d.message || 'unknown error'));
+      return;
+    }
+    _gwSelector = rowids;
+    _gwLoaded = true;
+    gwRenderRows(d.rows || []);
+    document.getElementById('gwExportBtn').disabled = (d.rows || []).length === 0;
+    gwStatus(d.message || ((d.rows || []).length + ' entries.'));
+  }
+
+  function gwLoadSelected() {
+    if (!_gwPreselected.length) { gwStatus('No rows came from Mean Values.'); return; }
+    gwLoad(_gwPreselected, 'the ' + _gwPreselected.length + ' selected row(s)');
+  }
+
+  function gwLoadAll() {
+    gwLoad(null, 'every entry in the open database');
+  }
+
+  /** CSV of the table on screen: a form post, so the browser handles the download. */
+  function gwExport() {
+    if (!_gwLoaded) { return; }
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/api/guideline_windows/export';
+    var input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'rowids';
+    input.value = _gwSelector === null ? '' : JSON.stringify(_gwSelector);
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+    document.body.removeChild(form);
+  }
+
+  // Arriving from the Mean Values toolbar is itself the analyst's request, so load those rows.
+  if (_gwPreselected.length) { gwLoadSelected(); }
+</script>
+{% endblock %}

@@ -586,6 +586,12 @@
                 </button>
             </div>
             <div class="toolbar-row">
+                <span class="toolbar-label">Guideline</span>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="openGuidelineWindows()" id="guidelineWindowsBtn" disabled>
+                    <i class="fas fa-stopwatch"></i> Guideline windows (<span class="selectedCount">0</span>)
+                </button>
+            </div>
+            <div class="toolbar-row">
                 <span class="toolbar-label">Sets</span>
                 <button type="button" class="btn btn-sm btn-success" onclick="toggleDataset('COP_Dataset', 'add')" id="addCOPBtn" disabled>
                     <i class="fas fa-plus"></i> Add to COP Dataset (<span class="selectedCount">0</span>)
@@ -1316,6 +1322,7 @@
                 const importBtn = document.getElementById('importSelectedBtn');
                 const notebookPlotBtn = document.getElementById('notebookPlotBtn');
                 const recalculateBtn = document.getElementById('recalculateSelectedBtn');
+                const guidelineBtn = document.getElementById('guidelineWindowsBtn');
                 const countSpans = document.querySelectorAll('.selectedCount');
                 countSpans.forEach(span => span.textContent = checkboxes.length);
                 deleteBtn.disabled = checkboxes.length === 0;
@@ -1323,6 +1330,7 @@
                 importBtn.disabled = checkboxes.length === 0;
                 notebookPlotBtn.disabled = checkboxes.length === 0;
                 recalculateBtn.disabled = checkboxes.length === 0;
+                if (guidelineBtn) guidelineBtn.disabled = checkboxes.length === 0;
                 
                 // Enable/disable dataset management buttons
                 const addCOPBtn = document.getElementById('addCOPBtn');
@@ -1371,6 +1379,37 @@
                 form.submit();
             }
             
+            /** Open the read-only Guideline Windows page for the ticked rows (same selection pattern as Plot). */
+            function openGuidelineWindows() {
+                const checkboxes = document.querySelectorAll('.row-checkbox:checked');
+                if (checkboxes.length === 0) {
+                    alert('Please select at least one row first.');
+                    return;
+                }
+
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '{{ url_for("guideline_windows_from_selection") }}';
+
+                checkboxes.forEach(checkbox => {
+                    const fileInput = document.createElement('input');
+                    fileInput.type = 'hidden';
+                    fileInput.name = 'file_names';
+                    fileInput.value = checkbox.dataset.file;
+                    form.appendChild(fileInput);
+
+                    const datasetInput = document.createElement('input');
+                    datasetInput.type = 'hidden';
+                    datasetInput.name = 'data_sets';
+                    datasetInput.value = checkbox.dataset.dataset;
+                    form.appendChild(datasetInput);
+                });
+                appendRowIdsForSelectedRows(form);
+
+                document.body.appendChild(form);
+                form.submit();
+            }
+
         function importSelected() {
             const checkboxes = document.querySelectorAll('.row-checkbox:checked');
             if (checkboxes.length === 0) {

@@ -1,25 +1,23 @@
-"""Checks for the Cycle Extract guideline clocks in flask_app/app.py.
+"""Checks for Cycle Extract guideline clocks and the Guideline Windows page.
 
 Run from the repository root:  python scripts/test_guideline_clocks.py
 
-Synthetic numbers only — no lab data, no database. Covers the locked rules from
-docs/CYCLE_PERIODS_AND_GUIDELINE_WINDOWS.md: D/S is the transition plus the
-buffer, H is the remainder, equilibrium is the *first* eq_min of H and
-evaluation the eval_min after it (never the last minutes of the cycle),
-evaluation is dropped when H is too short, and eq/eval exist for defrost only.
-A window cut defrost end → next defrost end carries two D spans with H in the
-middle (§2.1.1); one cut defrost start → next defrost start keeps one.
+Synthetic numbers only — no lab data, no analyst database. D/S is the
+transition plus the buffer, H is the remainder, equilibrium is the first eq_min
+of H and evaluation the eval_min after it (never the last minutes of the
+cycle). Evaluation is omitted when H is too short. Eq/eval apply to defrost and
+continuous, not on–off. A window cut defrost-end to next defrost-end carries
+two D spans with H in the middle; defrost-start to next defrost-start keeps
+one. Kind ``continuous``: no D/S, H is the parent window. Stored cycle type
+``other`` is unknown, never continuous.
 
-Phase 1.2 adds the ``continuous`` kind (no D/S, H is the parent window, eq/eval
-from its start) and the kind fill order of §2.2.1, including the file-level
-"treat unknown rows as" default and the rule that ``cycle_type='other'`` is
-unknown, never continuous.
+API checks: the file-level kind default reaches the clocks; Save all with no
+ticks means the whole file; every ``/api/`` reply is JSON even on failure
+(throwaway SQLite + stubbed sheet).
 
-Phase 1.2b adds API-level checks (``test_api_*``): the file-level default really
-reaches the proposal, Save all takes the whole file when nothing is ticked, and
-every ``/api/`` reply is JSON even when the request fails. Those run against a
-throwaway SQLite file and a stubbed sheet — never the analyst's database, never
-a lab workbook.
+Guideline Windows: evaluation Tsup, Q, P and COP on a sheet that has only
+uncorrected Q and P (the BAM case) use the same analysis-time path as the
+stored entry.
 """
 import contextlib
 import io
@@ -491,6 +489,522 @@ def test_api_replies_are_json_even_when_the_request_fails():
               page.content_type.startswith('text/html'), page.content_type)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2: the Guideline windows page reads back what Save stored — stored
+# clocks, stored parent means, evaluation-window means. Throwaway SQLite and a
+# stubbed sheet; never the analyst's database, never a lab workbook.
+# ---------------------------------------------------------------------------
+
+WINDOWS_FILE = 'synthetic_not_a_lab_file.xlsx'
+
+
+def _ramp_sheet(file_name, data_set=None, usecols=None):
+    """Monotonic ramps, so a mean identifies the window it was taken over."""
+    t = np.arange(0.0, 24001.0, 10.0)
+    return pd.DataFrame({
+        'time_elapsed': t,
+        'Ts Buh': 30.0 + t / 1000.0,
+        'QCorrwBUH': 5.0 + t / 10000.0,
+        'PCorrwBUH': 2.0 + t / 40000.0,
+        'COPCorrwBUH': 3.0 + t / 20000.0,
+    })
+
+
+def sheet_mean(column, start, end):
+    """Mean of a stubbed column over a window, sliced exactly as the app slices."""
+    df = _ramp_sheet(WINDOWS_FILE)
+    sel = df[(df['time_elapsed'] >= start) & (df['time_elapsed'] <= end)]
+    return float(sel[column].mean())
+
+
+def _uncorr_sheet(file_name=None, data_set=None, usecols=None, lab_corrected=False):
+    """A BAM-shaped sheet: uncorrected Q and P plus what the pump correction needs.
+
+    No QCorrwBUH / PCorrwBUH timeseries and no BUH column — the case where the
+    evaluation Q/P/COP used to stay empty. The columns nothing reads are filled
+    from the configured average columns so the sheet stays valid if that list
+    grows. Ramps, so a mean identifies the window it was taken over.
+    """
+    t = np.arange(0.0, 24001.0, 10.0)
+    df = pd.DataFrame({'time_elapsed': t})
+    for col in webapp.config['average_columns']:
+        if col not in webapp.ANALYSIS_SUPPLIED_COLUMNS:
+            df[col] = 1.0 + t / 100000.0
+    df['T_supply'] = 30.0 + t / 1000.0
+    df['T_return_emu'] = 25.0 + t / 1000.0
+    df['volume flow'] = 1.0 + t / 100000.0
+    df['mass flow'] = 997.0 * df['volume flow'] / 3600.0
+    df['Pressure difference'] = 0.5 + t / 200000.0
+    df['Heating Capacity (without corr)'] = 5.0 + t / 10000.0
+    df['Electric Power Input (without correction)'] = 2.0 + t / 40000.0
+    if lab_corrected:
+        df['Heating Capacity (corrected)'] = 4.5 + t / 12000.0
+        df['Electric Power Input (corrected)'] = 1.8 + t / 50000.0
+    return df
+
+
+def _lab_corr_sheet(file_name=None, data_set=None, usecols=None):
+    """The same sheet, but the lab did deliver corrected Q and P."""
+    return _uncorr_sheet(file_name, data_set, usecols, lab_corrected=True)
+
+
+def _unreadable_sheet(file_name=None, data_set=None, usecols=None):
+    return None
+
+
+def sheet_mean_of(sheet, column, start, end):
+    """Mean of a column of that sheet over a window, sliced as the app slices."""
+    df = sheet(WINDOWS_FILE)
+    sel = df[(df['time_elapsed'] >= start) & (df['time_elapsed'] <= end)]
+    return float(sel[column].mean())
+
+
+def analysis_four(sheet, start, end):
+    """The four evaluation means the extracted no-write helper produces."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        df, lab_corr_missing, reason = webapp._prepare_sheet_for_analysis(
+            sheet(WINDOWS_FILE), WINDOWS_FILE)
+        means = webapp._analysis_means_for_window(df, WINDOWS_FILE, start, end, lab_corr_missing)
+    assert not reason, reason
+    return (webapp.get_mean_supply_for_deviations(means), webapp.get_mean_q_for_deviations(means),
+            webapp.get_mean_p_for_deviations(means), webapp.get_mean_cop_for_deviations(means))
+
+
+class WindowsHarness:
+    """Test client on a temp database holding parent rows and saved clocks."""
+
+    def __init__(self, sheet=None):
+        self.sheet = sheet or _ramp_sheet
+
+    def __enter__(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='guideline_windows_')
+        self.db = os.path.join(self.tmpdir, 'test.db')
+        self.sheet_reads = []
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "CREATE TABLE results (file_name TEXT, data_set REAL, start_time REAL, end_time REAL, "
+            "display_order INTEGER, test_cond TEXT, dev_test_condition TEXT, profile_id TEXT, HP_ID TEXT, "
+            "cycle_type TEXT, cycle_start_marker TEXT, pelec_transition_time REAL, "
+            "pelec_transition_source TEXT, pelec_detect_failed INTEGER, avg_ts_buh REAL, "
+            "avg_heating_capacity_corr_wbuh REAL, PCorrwBUH REAL, COPCorrwBUH REAL)")
+        conn.commit()
+        conn.close()
+
+        self._saved = {k: getattr(webapp, k) for k in
+                       ('get_db_connection', 'get_database_path', '_read_excel_sheet')}
+        webapp.get_db_connection = self._connect
+        webapp.get_database_path = lambda: self.db
+        webapp._read_excel_sheet = self._read_sheet
+        webapp.app.config['TESTING'] = False
+        webapp.app.config['PROPAGATE_EXCEPTIONS'] = False
+        self.client = webapp.app.test_client()
+        with contextlib.redirect_stdout(io.StringIO()):
+            webapp.ensure_cycle_periods_table()
+        self.buffer_s = webapp._guideline_buffer_s()
+        return self
+
+    def __exit__(self, *exc_info):
+        for k, v in self._saved.items():
+            setattr(webapp, k, v)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        return False
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _read_sheet(self, file_name, data_set=None, usecols=None):
+        self.sheet_reads.append((file_name, data_set))
+        return self.sheet(file_name, data_set, usecols)
+
+    def add_entry(self, rowid, start, end, order=None, tsup=None, q=None, p=None, cop=None):
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO results (rowid, file_name, data_set, start_time, end_time, display_order, "
+                "test_cond, profile_id, HP_ID, avg_ts_buh, avg_heating_capacity_corr_wbuh, PCorrwBUH, "
+                "COPCorrwBUH) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rowid, WINDOWS_FILE, 1, start, end, order if order is not None else rowid,
+                 'E', 'HPT_RRT1', '1', tsup, q, p, cop))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_period(self, rowid, period_type, start, end, cache=None, method=None, buffer_s=None):
+        """One stored sub-period, as Save writes it (caches optional)."""
+        cache = cache or {}
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO cycle_periods (entry_rowid, period_type, start_time, end_time, "
+                "detection_method, buffer_s, avg_ts_buh, avg_q_corr_wbuh, avg_p_corr_wbuh, "
+                "avg_cop_corr_wbuh) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (rowid, period_type, start, end,
+                 method or webapp.GUIDELINE_DETECTION_METHOD,
+                 self.buffer_s if buffer_s is None else buffer_s,
+                 cache.get('tsup'), cache.get('q'), cache.get('p'), cache.get('cop')))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load(self, rowids):
+        with contextlib.redirect_stdout(io.StringIO()):
+            resp = self.client.post('/api/guideline_windows', json={'rowids': rowids})
+            try:
+                body = resp.get_json()
+            except Exception:
+                body = None
+        return resp, (body or {})
+
+    def one_row(self, rowid):
+        _, d = self.load([rowid])
+        rows = d.get('rows') or []
+        return rows[0] if rows else {}
+
+
+def _defrost_entry(h):
+    """Parent 0…12000 s cut at a defrost start: D 0…1200, H 1200…12000."""
+    h.add_entry(1, 0.0, 12000.0, tsup=40.0, q=6.0, p=2.5, cop=2.4)
+    h.add_period(1, 'defrost', 0.0, 1200.0)
+    h.add_period(1, 'heating', 1200.0, 12000.0)
+    h.add_period(1, 'equilibrium', 1200.0, 4800.0)
+    h.add_period(1, 'evaluation', 4800.0, 9000.0)
+
+
+def test_windows_only_the_requested_rows_are_read():
+    with WindowsHarness() as h:
+        for rid in (1, 2, 3):
+            h.add_entry(rid, 0.0, 12000.0, tsup=40.0 + rid)
+            h.add_period(rid, 'heating', 0.0, 12000.0)
+        _, d = h.load([1, 3])
+        got = [r['rowid'] for r in d.get('rows', [])]
+        check('only the selected rowids come back', got == [1, 3], str(got))
+        check('the sibling row is absent', 2 not in got, str(got))
+
+
+def test_windows_defrost_evaluation_is_the_stored_window():
+    with WindowsHarness() as h:
+        _defrost_entry(h)
+        row = h.one_row(1)
+        check('kind comes from the stored period types', row.get('kind') == 'defrost', str(row.get('kind')))
+        check('the parent four are the stored means, not recomputed',
+              (row.get('parent_tsup'), row.get('parent_q'), row.get('parent_p'), row.get('parent_cop'))
+              == (40.0, 6.0, 2.5, 2.4),
+              str([row.get('parent_tsup'), row.get('parent_q'), row.get('parent_p'), row.get('parent_cop')]))
+        check('the stored evaluation clock is shown',
+              (row.get('eval_start'), row.get('eval_end')) == (4800.0, 9000.0),
+              str([row.get('eval_start'), row.get('eval_end')]))
+        expect = sheet_mean('Ts Buh', 4800.0, 9000.0)
+        check('eval Tsup is the mean over that window',
+              abs(row.get('eval_tsup') - expect) < 1e-9, f"{row.get('eval_tsup')} vs {expect}")
+        tail = sheet_mean('Ts Buh', 12000.0 - 4200.0, 12000.0)
+        check('eval is not the last eval_min of H',
+              abs(row.get('eval_tsup') - tail) > 1.0, f"{row.get('eval_tsup')} vs tail {tail}")
+        check('eval Q, P and COP come from the same window',
+              abs(row.get('eval_q') - sheet_mean('QCorrwBUH', 4800.0, 9000.0)) < 1e-9
+              and abs(row.get('eval_p') - sheet_mean('PCorrwBUH', 4800.0, 9000.0)) < 1e-9
+              and abs(row.get('eval_cop') - sheet_mean('COPCorrwBUH', 4800.0, 9000.0)) < 1e-9,
+              str([row.get('eval_q'), row.get('eval_p'), row.get('eval_cop')]))
+        check('the parent means are never overwritten by the evaluation ones',
+              row.get('parent_tsup') != row.get('eval_tsup'),
+              f"{row.get('parent_tsup')} / {row.get('eval_tsup')}")
+
+
+def test_windows_on_off_has_empty_evaluation_cells():
+    with WindowsHarness() as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=38.0, q=5.0, p=2.0, cop=2.5)
+        h.add_period(1, 'off', 0.0, 1200.0)
+        h.add_period(1, 'on', 1200.0, 12000.0)
+        row = h.one_row(1)
+        check('kind is on_off', row.get('kind') == 'on_off', str(row.get('kind')))
+        check('the standby span is in the S columns',
+              (row.get('s1_start'), row.get('s1_end')) == (0.0, 1200.0),
+              str([row.get('s1_start'), row.get('s1_end')]))
+        check('the D columns stay empty', row.get('d1_start') is None and row.get('d1_end') is None,
+              str([row.get('d1_start'), row.get('d1_end')]))
+        check('the eval four are empty, not 0',
+              all(row.get(k) is None for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop')),
+              str([row.get('eval_tsup'), row.get('eval_q'), row.get('eval_p'), row.get('eval_cop')]))
+        check('the note gives the rule', 'on–off' in (row.get('note') or '').lower(), str(row.get('note')))
+
+
+def test_windows_short_h_has_empty_evaluation_cells():
+    with WindowsHarness() as h:
+        # H = 1200…6000 s = 80 min, below eq_min + eval_min, so Save stored no evaluation.
+        h.add_entry(1, 0.0, 6000.0, tsup=41.0, q=6.5, p=2.6, cop=2.5)
+        h.add_period(1, 'defrost', 0.0, 1200.0)
+        h.add_period(1, 'heating', 1200.0, 6000.0)
+        h.add_period(1, 'equilibrium', 1200.0, 4800.0)
+        row = h.one_row(1)
+        check('the row is still a defrost cycle', row.get('kind') == 'defrost', str(row.get('kind')))
+        check('no evaluation clock', row.get('eval_start') is None and row.get('eval_end') is None,
+              str([row.get('eval_start'), row.get('eval_end')]))
+        check('the eval four are empty, not 0',
+              all(row.get(k) is None for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop')),
+              str([row.get('eval_tsup'), row.get('eval_q'), row.get('eval_p'), row.get('eval_cop')]))
+        check('the note says H was too short', 'shorter' in (row.get('note') or ''), str(row.get('note')))
+        check('the parent four are still there', row.get('parent_cop') == 2.5, str(row.get('parent_cop')))
+
+
+def test_windows_continuous_shows_its_saved_evaluation():
+    with WindowsHarness() as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=39.0, q=5.5, p=2.2, cop=2.5)
+        h.add_period(1, 'heating', 0.0, 12000.0)
+        h.add_period(1, 'equilibrium', 0.0, 3600.0)
+        h.add_period(1, 'evaluation', 3600.0, 7800.0,
+                     cache={'tsup': 35.5, 'q': 5.9, 'p': 2.3, 'cop': 2.57})
+        row = h.one_row(1)
+        check('heating without D or S is continuous', row.get('kind') == 'continuous', str(row.get('kind')))
+        check('no D or S clocks',
+              all(row.get(k) is None for k in ('d1_start', 'd2_start', 's1_start', 's2_start')),
+              str([row.get('d1_start'), row.get('s1_start')]))
+        check('H is the parent window', (row.get('h_start'), row.get('h_end')) == (0.0, 12000.0),
+              str([row.get('h_start'), row.get('h_end')]))
+        # Phase 2.1: the cache Save wrote is no longer allowed to answer for the
+        # window while the sheet can be read — it holds Tsup but no Q/P/COP on a
+        # BAM row, and a partial cache used to pass as complete.
+        check('the eval four are the stored window, not the cache',
+              abs(row.get('eval_tsup') - sheet_mean('Ts Buh', 3600.0, 7800.0)) < 1e-9
+              and abs(row.get('eval_q') - sheet_mean('QCorrwBUH', 3600.0, 7800.0)) < 1e-9
+              and abs(row.get('eval_p') - sheet_mean('PCorrwBUH', 3600.0, 7800.0)) < 1e-9,
+              str([row.get('eval_tsup'), row.get('eval_q'), row.get('eval_p')]))
+        check('the stale cache does not win',
+              (row.get('eval_tsup'), row.get('eval_q')) != (35.5, 5.9),
+              str([row.get('eval_tsup'), row.get('eval_q')]))
+
+
+def test_windows_two_span_defrost_shows_both():
+    with WindowsHarness() as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=40.0)
+        h.add_period(1, 'defrost', 0.0, 1200.0)
+        h.add_period(1, 'heating', 1200.0, 10000.0)
+        h.add_period(1, 'defrost', 10000.0, 12000.0)
+        h.add_period(1, 'equilibrium', 1200.0, 4800.0)
+        h.add_period(1, 'evaluation', 4800.0, 9000.0, cache={'tsup': 34.0})
+        row = h.one_row(1)
+        check('D1 is the leftover buffer', (row.get('d1_start'), row.get('d1_end')) == (0.0, 1200.0),
+              str([row.get('d1_start'), row.get('d1_end')]))
+        check('D2 is the next defrost', (row.get('d2_start'), row.get('d2_end')) == (10000.0, 12000.0),
+              str([row.get('d2_start'), row.get('d2_end')]))
+        check('H is the gap between them', (row.get('h_start'), row.get('h_end')) == (1200.0, 10000.0),
+              str([row.get('h_start'), row.get('h_end')]))
+        check('eq and eval sit inside that H',
+              row.get('eq_start') >= row.get('h_start') and row.get('eval_end') <= row.get('h_end'),
+              str([row.get('eq_start'), row.get('eval_end')]))
+
+
+def test_windows_row_without_clocks_still_shows_the_parent():
+    with WindowsHarness() as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=40.0, q=6.0, p=2.5, cop=2.4)
+        # A legacy Period Statistics row must not be read as a guideline clock.
+        h.add_period(1, 'defrost', 0.0, 900.0, method='auto_pelec')
+        row = h.one_row(1)
+        check('kind is unknown, never other', row.get('kind') == 'unknown', str(row.get('kind')))
+        check('the clock cells are empty',
+              all(row.get(k) is None for k in
+                  ('d1_start', 'd2_start', 's1_start', 'h_start', 'eq_start', 'eval_start')),
+              str([row.get('d1_start'), row.get('h_start'), row.get('eval_start')]))
+        check('the parent four are still shown',
+              (row.get('parent_tsup'), row.get('parent_cop')) == (40.0, 2.4),
+              str([row.get('parent_tsup'), row.get('parent_cop')]))
+        check('the note says where to save them', 'Cycle Extract' in (row.get('note') or ''),
+              str(row.get('note')))
+
+
+def test_windows_nothing_is_read_until_the_analyst_asks():
+    with WindowsHarness() as h:
+        _defrost_entry(h)
+        with contextlib.redirect_stdout(io.StringIO()):
+            page = h.client.get('/guideline_windows')
+        check('the shell renders', page.status_code == 200, str(page.status_code))
+        check('the shell reads no sheet', h.sheet_reads == [], str(h.sheet_reads))
+
+        resp, d = h.load([])
+        check('an empty selection answers JSON', resp.content_type.startswith('application/json'),
+              resp.content_type)
+        check('an empty selection computes nothing', d.get('success') is True and d.get('rows') == [],
+              str(d))
+        check('and still reads no sheet', h.sheet_reads == [], str(h.sheet_reads))
+
+
+def test_windows_toolbar_selection_opens_the_page_with_those_rowids():
+    with WindowsHarness() as h:
+        _defrost_entry(h)
+        h.add_entry(2, 0.0, 12000.0, tsup=41.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            page = h.client.post('/guideline_windows',
+                                 data={'file_names': WINDOWS_FILE, 'data_sets': '1', 'row_ids': '1'})
+        body = page.get_data(as_text=True)
+        check('the toolbar post opens the page', page.status_code == 200, str(page.status_code))
+        check('the page carries the selected rowid', '[1]' in body, body[-400:])
+        check('rendering the page reads no sheet', h.sheet_reads == [], str(h.sheet_reads))
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            empty = h.client.post('/guideline_windows', data={})
+        check('an empty selection goes back to Mean Values instead of an empty page',
+              empty.status_code == 302, str(empty.status_code))
+
+
+def test_windows_null_rowids_loads_every_parent():
+    with WindowsHarness() as h:
+        # display_order, not rowid, is the Mean Values order.
+        h.add_entry(1, 0.0, 12000.0, order=2, tsup=40.0)
+        h.add_entry(2, 0.0, 12000.0, order=1, tsup=41.0)
+        h.add_period(2, 'heating', 0.0, 12000.0)
+        _, d = h.load(None)
+        got = [r['rowid'] for r in d.get('rows', [])]
+        check('every parent in the open database is listed', sorted(got) == [1, 2], str(got))
+        check('rows follow the Mean Values order', got == [2, 1], str(got))
+        check('every kind is listed, not frost only',
+              sorted(r['kind'] for r in d['rows']) == ['continuous', 'unknown'],
+              str([r['kind'] for r in d['rows']]))
+
+
+def test_windows_api_errors_are_json():
+    with WindowsHarness() as h:
+        _defrost_entry(h)
+        real = webapp.ensure_cycle_periods_table
+        webapp.ensure_cycle_periods_table = lambda: (_ for _ in ()).throw(RuntimeError('forced failure'))
+        try:
+            resp, d = h.load(None)
+        finally:
+            webapp.ensure_cycle_periods_table = real
+        check('a forced failure still answers JSON, not an HTML traceback',
+              resp.content_type.startswith('application/json'), resp.content_type)
+        check('the failure is reported',
+              d.get('success') is False and 'forced failure' in (d.get('message') or ''), str(d))
+        check('and the table comes back empty rather than missing', d.get('rows') == [], str(d.get('rows')))
+
+
+def test_windows_csv_export_is_the_loaded_table():
+    with WindowsHarness() as h:
+        _defrost_entry(h)
+        with contextlib.redirect_stdout(io.StringIO()):
+            resp = h.client.post('/api/guideline_windows/export', json={'rowids': [1]})
+        body = resp.data.decode('utf-8-sig')
+        header, first = body.splitlines()[0], body.splitlines()[1]
+        check('a CSV comes back', resp.headers.get('Content-Disposition', '').startswith('attachment'),
+              resp.headers.get('Content-Disposition', ''))
+        check('the evaluation columns are not named after 70 min',
+              'COP_eval_70' not in header, header)
+        check('parent and evaluation means are separate columns',
+              'parent_COP' in header and 'eval_COP' in header, header)
+        check('the loaded row is in the file', first.startswith('1,'), first)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.1: the evaluation four are the same analysis-time quantities as the
+# entry, computed on the evaluation window. A BAM sheet carries neither
+# QCorrwBUH nor lab-corrected Q/P, so reading the raw series left them empty.
+# ---------------------------------------------------------------------------
+
+
+def test_eval_means_on_an_uncorrected_sheet():
+    with WindowsHarness(sheet=_uncorr_sheet) as h:
+        _defrost_entry(h)          # eval window 4800…9000 s inside H 1200…12000 s
+        row = h.one_row(1)
+        four = (row.get('eval_tsup'), row.get('eval_q'), row.get('eval_p'), row.get('eval_cop'))
+        check('a sheet with only uncorrected Q and P still fills the eval four',
+              all(v is not None for v in four), str(four))
+        expect = analysis_four(_uncorr_sheet, 4800.0, 9000.0)
+        check('they are what the no-write analysis helper produces',
+              all(abs(a - b) < 1e-9 for a, b in zip(four, expect)), f'{four} vs {expect}')
+
+        q_uncorr = sheet_mean_of(_uncorr_sheet, 'Heating Capacity (without corr)', 4800.0, 9000.0)
+        p_uncorr = sheet_mean_of(_uncorr_sheet, 'Electric Power Input (without correction)', 4800.0, 9000.0)
+        check('the BAM pump correction was applied, so Q and P are not the uncorrected means',
+              row['eval_q'] < q_uncorr and row['eval_p'] < p_uncorr,
+              f"{row['eval_q']} / {q_uncorr}, {row['eval_p']} / {p_uncorr}")
+        check('but stay within a pump correction of them',
+              q_uncorr - row['eval_q'] < 0.1 * q_uncorr and p_uncorr - row['eval_p'] < 0.1 * p_uncorr,
+              f"{row['eval_q']} / {q_uncorr}, {row['eval_p']} / {p_uncorr}")
+        check('COP is the ratio of the two means, not the mean of a ratio',
+              abs(row['eval_cop'] - row['eval_q'] / row['eval_p']) < 1e-12,
+              f"{row['eval_cop']} vs {row['eval_q'] / row['eval_p']}")
+        check('eval Tsup is the supply mean of that window (no BUH on this sheet)',
+              abs(row['eval_tsup'] - sheet_mean_of(_uncorr_sheet, 'T_supply', 4800.0, 9000.0)) < 1e-9,
+              str(row['eval_tsup']))
+
+        tail = analysis_four(_uncorr_sheet, 12000.0 - 4200.0, 12000.0)
+        check('they are not the last eval_min of H',
+              all(abs(a - b) > 1e-6 for a, b in zip(four, tail)), f'{four} vs tail {tail}')
+        check('the parent four still come from results, not from the eval slice',
+              (row.get('parent_tsup'), row.get('parent_q'), row.get('parent_p'), row.get('parent_cop'))
+              == (40.0, 6.0, 2.5, 2.4),
+              str([row.get('parent_tsup'), row.get('parent_q'), row.get('parent_p'), row.get('parent_cop')]))
+
+
+def test_eval_means_prefer_lab_corrected_series():
+    with WindowsHarness(sheet=_lab_corr_sheet) as h:
+        _defrost_entry(h)
+        row = h.one_row(1)
+        q_lab = sheet_mean_of(_lab_corr_sheet, 'Heating Capacity (corrected)', 4800.0, 9000.0)
+        p_lab = sheet_mean_of(_lab_corr_sheet, 'Electric Power Input (corrected)', 4800.0, 9000.0)
+        check('eval Q follows the lab-corrected series (plus BUH, which is zero here)',
+              abs(row.get('eval_q') - q_lab) < 1e-9, f"{row.get('eval_q')} vs {q_lab}")
+        check('eval P follows the lab-corrected series',
+              abs(row.get('eval_p') - p_lab) < 1e-9, f"{row.get('eval_p')} vs {p_lab}")
+        bam_q = analysis_four(_uncorr_sheet, 4800.0, 9000.0)[1]
+        check('the BAM correction is not used when the lab delivered corrected Q and P',
+              abs(row.get('eval_q') - bam_q) > 1e-6, f"{row.get('eval_q')} vs BAM {bam_q}")
+
+
+def test_eval_means_ignore_a_tsup_only_cache():
+    with WindowsHarness(sheet=_uncorr_sheet) as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=40.0, q=6.0, p=2.5, cop=2.4)
+        h.add_period(1, 'defrost', 0.0, 1200.0)
+        h.add_period(1, 'heating', 1200.0, 12000.0)
+        h.add_period(1, 'equilibrium', 1200.0, 4800.0)
+        # What Save writes for a BAM defrost row: Tsup cached, Q/P/COP empty.
+        h.add_period(1, 'evaluation', 4800.0, 9000.0, cache={'tsup': 99.0})
+        row = h.one_row(1)
+        check('a Tsup-only cache no longer counts as done',
+              all(row.get(k) is not None for k in ('eval_q', 'eval_p', 'eval_cop')),
+              str([row.get('eval_q'), row.get('eval_p'), row.get('eval_cop')]))
+        check('and Tsup is recomputed with the entry\'s own quantities',
+              abs(row.get('eval_tsup') - sheet_mean_of(_uncorr_sheet, 'T_supply', 4800.0, 9000.0)) < 1e-9,
+              str(row.get('eval_tsup')))
+
+
+def test_eval_means_when_the_sheet_cannot_be_read():
+    with WindowsHarness(sheet=_unreadable_sheet) as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=40.0, q=6.0, p=2.5, cop=2.4)
+        h.add_period(1, 'defrost', 0.0, 1200.0)
+        h.add_period(1, 'heating', 1200.0, 12000.0)
+        h.add_period(1, 'evaluation', 4800.0, 9000.0, cache={'tsup': 34.5})
+        row = h.one_row(1)
+        check('the cached Tsup is still shown', row.get('eval_tsup') == 34.5, str(row.get('eval_tsup')))
+        check('Q, P and COP stay empty rather than 0',
+              all(row.get(k) is None for k in ('eval_q', 'eval_p', 'eval_cop')),
+              str([row.get('eval_q'), row.get('eval_p'), row.get('eval_cop')]))
+        check('the note says the sheet could not be read',
+              'could not be read' in (row.get('note') or ''), str(row.get('note')))
+        check('the table still lists the row with its parent means',
+              row.get('parent_cop') == 2.4, str(row.get('parent_cop')))
+
+
+def test_eval_means_stay_empty_without_an_evaluation_window():
+    with WindowsHarness(sheet=_uncorr_sheet) as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=38.0, q=5.0, p=2.0, cop=2.5)
+        h.add_period(1, 'off', 0.0, 1200.0)
+        h.add_period(1, 'on', 1200.0, 12000.0)
+        # H = 1200…6000 s, below eq_min + eval_min, so Save stored no evaluation.
+        h.add_entry(2, 0.0, 6000.0, tsup=41.0, q=6.5, p=2.6, cop=2.5)
+        h.add_period(2, 'defrost', 0.0, 1200.0)
+        h.add_period(2, 'heating', 1200.0, 6000.0)
+        h.add_period(2, 'equilibrium', 1200.0, 4800.0)
+        _, d = h.load([1, 2])
+        rows = {r['rowid']: r for r in d.get('rows', [])}
+        for rid, why in ((1, 'on–off'), (2, 'short H')):
+            check(f'the eval four are empty on {why}, never 0',
+                  all(rows[rid].get(k) is None
+                      for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop')),
+                  str([rows[rid].get(k) for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop')]))
+        check('no sheet is read when there is no evaluation window', h.sheet_reads == [],
+              str(h.sheet_reads))
+
+
 def main():
     test_defrost_opens_in_d()
     test_defrost_opens_in_d_without_later_drop()
@@ -516,6 +1030,23 @@ def main():
     test_api_file_default_makes_unknown_rows_continuous()
     test_api_save_all_without_ticks_saves_the_whole_file()
     test_api_replies_are_json_even_when_the_request_fails()
+    test_windows_only_the_requested_rows_are_read()
+    test_windows_defrost_evaluation_is_the_stored_window()
+    test_windows_on_off_has_empty_evaluation_cells()
+    test_windows_short_h_has_empty_evaluation_cells()
+    test_windows_continuous_shows_its_saved_evaluation()
+    test_windows_two_span_defrost_shows_both()
+    test_windows_row_without_clocks_still_shows_the_parent()
+    test_windows_nothing_is_read_until_the_analyst_asks()
+    test_windows_toolbar_selection_opens_the_page_with_those_rowids()
+    test_windows_null_rowids_loads_every_parent()
+    test_windows_api_errors_are_json()
+    test_windows_csv_export_is_the_loaded_table()
+    test_eval_means_on_an_uncorrected_sheet()
+    test_eval_means_prefer_lab_corrected_series()
+    test_eval_means_ignore_a_tsup_only_cache()
+    test_eval_means_when_the_sheet_cannot_be_read()
+    test_eval_means_stay_empty_without_an_evaluation_window()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: {', '.join(FAILURES)}")

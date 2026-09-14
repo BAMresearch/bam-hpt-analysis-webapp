@@ -15,6 +15,7 @@ Version numbers match `flask_app/VERSION` and the `tool_version` column on summa
 - **Clock table and period layers** (layers off by default). Edit the power-transition time or D/S end; unlock equilibrium / evaluation to type them. **Save clocks** or **Save all proposed** stores the times on the parent entry
 - **Treat unknown rows as** (defrost / on–off / continuous) fills only rows that have no kind yet. Kind **`continuous`**: no D/S; H is the parent window. Stored `other` stays unknown, not continuous
 - Clock lengths in `flask_app/config/cycle_periods.json` (`buffer_min` 10, `eq_min` 60, `eval_min` 70)
+- **Guideline Windows** (`/guideline_windows`) — check **saved** clocks across many entries: D / S, H, equilibrium and evaluation times, plus the entry's Tsup, Q, P and COP beside the same four on the evaluation window. Open from **Selected rows** on Mean Values, or load the open database. Evaluation Q/P/COP use the same analysis-time quantities as the entry (including files that only have uncorrected Q and P). Evaluation cells stay **empty** (never `0`) when there is no evaluation window. CSV of the table; the summary export is unchanged
 
 ### Changed
 

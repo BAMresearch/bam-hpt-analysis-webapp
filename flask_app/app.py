@@ -779,6 +779,9 @@ def resolve_selected_rows(conn, file_names, data_sets, row_ids=None):
     start/end times. Lookup by (file_name, data_set) alone is ambiguous
     (SQLite returns an arbitrary match). When the form posts row_ids from the
     table row's SQLite rowid, use that first.
+
+    ``rowid`` is selected explicitly so callers that identify an entry by it
+    (Guideline windows) get it back even for a row matched by file/data_set.
     """
     if row_ids is None:
         row_ids = []
@@ -791,12 +794,12 @@ def resolve_selected_rows(conn, file_names, data_sets, row_ids=None):
         if i < len(row_ids) and row_ids[i] not in (None, '', 'undefined'):
             try:
                 rid = int(row_ids[i])
-                rec = conn.execute('SELECT * FROM results WHERE rowid = ?', (rid,)).fetchone()
+                rec = conn.execute('SELECT rowid, * FROM results WHERE rowid = ?', (rid,)).fetchone()
             except (ValueError, TypeError):
                 rec = None
         if rec is None:
             rec = conn.execute(
-                'SELECT * FROM results WHERE file_name = ? AND data_set = ?',
+                'SELECT rowid, * FROM results WHERE file_name = ? AND data_set = ?',
                 (file_name, data_set)
             ).fetchone()
         if rec:
@@ -2063,6 +2066,223 @@ def write_optional_means(cursor, df_window, rowid):
         cursor.execute(sql, values)
 
 
+ANALYSIS_LAB_CORR_COLUMNS = ('Heating Capacity (corrected)', 'Electric Power Input (corrected)')
+
+# Sheet columns the analysis-time block can do without: the lab-corrected pair is
+# filled from the BAM pump correction, and a file with no BUH gets a zero column.
+ANALYSIS_SUPPLIED_COLUMNS = ANALYSIS_LAB_CORR_COLUMNS + ('Electrical power input BUH',)
+
+# Plain period averages: sheet column → results column.
+ANALYSIS_AVERAGE_DB_COLUMNS = {
+    'T_outdoor (DB)': 'avg_t_db',
+    'T_outdoor (WB)': 'avg_t_wb',
+    'T_supply': 'avg_t_supply',
+    'T_return_emu': 'avg_t_return_emu',
+    'volume flow': 'avg_volume_flow',
+    'mass flow': 'avg_mass_flow',
+    'Heating Capacity (without corr)': 'avg_heating_capacity_uncorr',
+    'Electric Power Input (without correction)': 'avg_power_input_uncorr',
+    'Heating Capacity (corrected)': 'avg_heating_capacity_corr',
+    'Electric Power Input (corrected)': 'avg_power_input_corr',
+    'Pressure difference': 'avg_dp',
+    'T_return_calc': 'avg_t_return_calc',
+    'T_B_calc': 'avg_t_b_calc',
+    'T_H_calc': 'avg_t_h_calc',
+    'Q_HB': 'avg_q_hb',
+    'Q_BA': 'avg_q_ba',
+}
+
+# The values config['insert_query'] expects between (file_name, data_set) and
+# (start_time, end_time).
+ANALYSIS_MEAN_INSERT_KEYS = (
+    'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu',
+    'avg_volume_flow', 'avg_mass_flow',
+    'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
+    'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
+    'avg_dp', 'avg_adj_dp', 'avg_P_hyd',
+    'avg_t_return_calc', 'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_ba',
+    'avg_eff_pump', 'avg_qcorr_bam', 'avg_pcorr_bam',
+    'avg_power_buh', 'avg_power_buh_from_ts', 'avg_t_sup_buh',
+    'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
+)
+
+
+def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=None) -> dict:
+    """Analysis-time means of one time window, keyed by results column name.
+
+    This is the block Apply runs on a cycle before it stores it: the period
+    averages, the BAM pump correction, BUH power and supply temperature after
+    BUH, and the "corrected" averages — the lab-corrected series when the sheet
+    carries them, the BAM-corrected ones when it does not.
+
+    Nothing is written here. `calculate_and_insert` stores the result for a
+    parent cycle; Guideline Windows asks for the same quantities on an
+    evaluation window, so both read one formula. `df_window` gains the
+    intermediate series (P_hyd, power_BUH, ...) as it always has inside Apply.
+    A required column that the sheet does not carry raises KeyError.
+    """
+    if lab_corr_missing is None:
+        lab_corr_missing = any(c not in df_window.columns for c in ANALYSIS_LAB_CORR_COLUMNS)
+
+    # Averages for columns that exist; lab-corrected may be filled from BAM below
+    avg_values = {}
+    for col in config['average_columns']:
+        if col in df_window.columns:
+            avg_values[col] = df_window[col].mean()
+        elif col in ANALYSIS_LAB_CORR_COLUMNS:
+            avg_values[col] = None  # placeholder until BAM fallback
+        else:
+            raise KeyError(col)
+
+    # Uncorrected COP (always from without-corr)
+    cop_uncorr = (
+        avg_values['Heating Capacity (without corr)']
+        / avg_values['Electric Power Input (without correction)']
+    )
+
+    # Calculate pressure difference
+    ignore_percentage = 0.01
+    ignore_rows = int(len(df_window) * ignore_percentage)
+    check_data = df_window.iloc[ignore_rows:-ignore_rows]['Pressure difference'].dropna()
+    if len(check_data) > 0 and np.any(np.diff(np.sign(check_data))):
+        df_window['adjusted_pressure_difference'] = df_window['Pressure difference'].apply(lambda x: abs(x) if x < 0 else -x)
+        print(f"The value of pressure difference for the integrated circulator is assumed to be negative by default.")
+    else:
+        df_window['adjusted_pressure_difference'] = df_window['Pressure difference'].abs()
+    avg_adj_dp = df_window['adjusted_pressure_difference'].mean()
+
+    # Calculate hydraulic power
+    df_window['P_hyd'] = ((df_window['volume flow'] / 3600) * df_window['adjusted_pressure_difference'] * 100000).abs()
+    avg_P_hyd = df_window['P_hyd'].mean()
+
+    # Handle BUH power calculations
+    if 'has_buh' in df_window.columns and not df_window['has_buh'].iloc[0]:
+        # If the column does not exist at all, handle as before
+        df_window['power_BUH'] = 0
+        df_window['power_BUH_from_Ts'] = 0
+        df_window['T_supply_afterBUH'] = df_window['T_supply']
+        print("Column 'Electrical power input BUH' does not exist in the DataFrame. Assuming value as 0.")
+    else:
+        # Calculate power_BUH_from_Ts as before
+        df_window['power_BUH_from_Ts_uncapped'] = (df_window['mass flow']) * 4.183 * (df_window['T_supply_set']-df_window['T_supply'])
+        cap_value = determine_cap(file_name)
+        df_window['power_BUH_from_Ts'] = df_window['power_BUH_from_Ts_uncapped'].apply(lambda x: max(min(x, cap_value), 0))
+
+        # Fill missing values in 'Electrical power input BUH' with calculated values
+        num_missing = df_window['Electrical power input BUH'].isna().sum()
+        df_window['power_BUH'] = df_window['Electrical power input BUH'].copy()
+        df_window.loc[df_window['power_BUH'].isna(), 'power_BUH'] = df_window['power_BUH_from_Ts']
+        if num_missing > 0:
+            print(f"Filled {num_missing} missing values in 'Electrical power input BUH' with calculated 'power_BUH_from_Ts'.")
+
+        # Set T_supply_afterBUH accordingly
+        df_window['T_supply_afterBUH'] = df_window['T_supply'] + df_window['power_BUH']/(df_window['mass flow'] * 4.183)
+
+    # Calculate pump efficiency and BAM corrections
+    df_window['efficiency'] = ((df_window['P_hyd']*0.35844) / ((1.7*df_window['P_hyd']) + (17*(1 - np.exp(-0.3*df_window['P_hyd']))))) * (0.49 / 0.23)
+    df_window['powercorrection_BAM'] = (df_window['P_hyd']/df_window['efficiency'])/1000
+    df_window['heatingcorrection_BAM'] = (df_window['P_hyd']*(1-df_window['efficiency'])/df_window['efficiency'])/1000
+
+    # Calculate BAM corrected values
+    df_window['Heating Capacity (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
+        df_window['Heating Capacity (without corr)'] - df_window['heatingcorrection_BAM'],
+        df_window['Heating Capacity (without corr)'] + df_window['heatingcorrection_BAM'])
+    df_window['Electric Power Input (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
+        df_window['Electric Power Input (without correction)'] - df_window['powercorrection_BAM'],
+        df_window['Electric Power Input (without correction)'] + df_window['powercorrection_BAM'])
+
+    # Add the new calculated values to averages
+    avg_eff_pump = df_window['efficiency'].mean()
+    avg_qcorr_bam = df_window['heatingcorrection_BAM'].mean()
+    avg_pcorr_bam = df_window['powercorrection_BAM'].mean()
+    avg_power_buh = df_window['power_BUH'].mean()
+    avg_power_buh_from_ts = df_window['power_BUH_from_Ts'].mean()
+    avg_t_sup_buh = df_window['T_supply_afterBUH'].mean()
+    avg_t_mean_log, t_mean_from_avgs, avg_dt_ln = compute_t_mean_period_stats(
+        df_window, avg_t_sup_buh=avg_t_sup_buh, avg_values=avg_values
+    )
+    avg_heating_capacity_bam_corr = df_window['Heating Capacity (BAM corrected)'].mean()
+    avg_power_input_bam_corr = df_window['Electric Power Input (BAM corrected)'].mean()
+
+    # Calculate BAM corrected COP
+    cop_bam_corr = avg_heating_capacity_bam_corr / avg_power_input_bam_corr
+
+    # If lab-corrected Q/P missing: use BAM-corrected for the DB "corr" fields
+    if lab_corr_missing:
+        avg_values['Heating Capacity (corrected)'] = avg_heating_capacity_bam_corr
+        avg_values['Electric Power Input (corrected)'] = avg_power_input_bam_corr
+        cop_corr = cop_bam_corr
+        note = (
+            f"{file_name}: lab-corrected Q/P missing — stored 'corrected' averages "
+            f"from BAM pump correction (Q={avg_heating_capacity_bam_corr:.4g} kW, "
+            f"P={avg_power_input_bam_corr:.4g} kW)."
+        )
+        if notices is not None:
+            notices.append(note)
+        print(note)
+    else:
+        cop_corr = (
+            avg_values['Heating Capacity (corrected)']
+            / avg_values['Electric Power Input (corrected)']
+        )
+
+    means = {db_col: avg_values[sheet_col]
+             for sheet_col, db_col in ANALYSIS_AVERAGE_DB_COLUMNS.items()}
+    means.update({
+        'cop_uncorr': cop_uncorr,
+        'cop_corr': cop_corr,
+        'avg_adj_dp': avg_adj_dp,
+        'avg_P_hyd': avg_P_hyd,
+        'avg_eff_pump': avg_eff_pump,
+        'avg_qcorr_bam': avg_qcorr_bam,
+        'avg_pcorr_bam': avg_pcorr_bam,
+        'avg_power_buh': avg_power_buh,
+        'avg_power_buh_from_ts': avg_power_buh_from_ts,
+        'avg_t_sup_buh': avg_t_sup_buh,
+        'avg_heating_capacity_bam_corr': avg_heating_capacity_bam_corr,
+        'avg_power_input_bam_corr': avg_power_input_bam_corr,
+        'cop_bam_corr': cop_bam_corr,
+        'avg_t_mean_log': avg_t_mean_log,
+        't_mean_from_avgs': t_mean_from_avgs,
+        'avg_dt_ln': avg_dt_ln,
+    })
+    return means
+
+
+def analysis_wbuh_fields(means: dict) -> dict:
+    """The BUH-corrected derived fields of column_metadata.json, from a means dict.
+
+    `calculate_derived_columns_for_entry` evaluates these formulas against a
+    stored results row; a window that is never stored needs the same numbers
+    without a row, and the deviation getters prefer exactly these keys.
+    COP is the ratio of the two means, never the mean of a ratio.
+    """
+    def num(key):
+        try:
+            val = float(means.get(key))
+        except (TypeError, ValueError):
+            return None
+        return val if np.isfinite(val) else None
+
+    out = {k: None for k in ('powerbuh', 'QCorrwBUH', 'PCorrwBUH', 'COPCorrwBUH', 'Ts_buh')}
+    buh, buh_from_ts = num('avg_power_buh'), num('avg_power_buh_from_ts')
+    powerbuh = buh if (buh is not None and buh > 0) else buh_from_ts
+    out['powerbuh'] = powerbuh
+    q_corr, p_corr = num('avg_heating_capacity_corr'), num('avg_power_input_corr')
+    if powerbuh is not None:
+        if q_corr is not None:
+            out['QCorrwBUH'] = powerbuh + q_corr
+        if p_corr is not None:
+            out['PCorrwBUH'] = powerbuh + p_corr
+    if out['QCorrwBUH'] is not None and out['PCorrwBUH']:
+        out['COPCorrwBUH'] = out['QCorrwBUH'] / out['PCorrwBUH']
+    t_sup_buh, t_supply = num('avg_t_sup_buh'), num('avg_t_supply')
+    candidates = [t for t in (t_sup_buh, t_supply) if t is not None]
+    if candidates:
+        out['Ts_buh'] = max(candidates)
+    return out
+
+
 def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None):
 
     try:
@@ -2081,134 +2301,19 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
             if note not in notices:
                 notices.append(note)
 
-        # Averages for columns that exist; lab-corrected may be filled from BAM below
-        avg_values = {}
-        for col in config['average_columns']:
-            if col in df_filtered.columns:
-                avg_values[col] = df_filtered[col].mean()
-            elif col in (
-                'Heating Capacity (corrected)',
-                'Electric Power Input (corrected)',
-            ):
-                avg_values[col] = None  # placeholder until BAM fallback
-            else:
-                raise KeyError(col)
-
-        # Uncorrected COP (always from without-corr)
-        cop_uncorr = (
-            avg_values['Heating Capacity (without corr)']
-            / avg_values['Electric Power Input (without correction)']
+        means = analysis_window_means(
+            df_filtered, file_name, lab_corr_missing=lab_corr_missing, notices=notices
         )
-        # # Calculate pressure difference
-        # ignore_percentage = 0.01
-        # ignore_rows = int(len(df_filtered) * ignore_percentage)
-        # if np.any(np.diff(np.sign(df_filtered.iloc[ignore_rows:-ignore_rows]['Pressure difference']))):
-        #     df_filtered['adjusted_pressure_difference'] = df_filtered['Pressure difference'].apply(lambda x: abs(x) if x < 0 else -x)
-        # else:
-        #     df_filtered['adjusted_pressure_difference'] = df_filtered['Pressure difference'].abs()
-        # avg_adj_dp = df_filtered['adjusted_pressure_difference'].mean()
-        
-        # Calculate pressure difference
-        ignore_percentage = 0.01
-        ignore_rows = int(len(df_filtered) * ignore_percentage)
-        check_data = df_filtered.iloc[ignore_rows:-ignore_rows]['Pressure difference'].dropna()
-        if len(check_data) > 0 and np.any(np.diff(np.sign(check_data))):
-            df_filtered['adjusted_pressure_difference'] = df_filtered['Pressure difference'].apply(lambda x: abs(x) if x < 0 else -x)
-            print(f"The value of pressure difference for the integrated circulator is assumed to be negative by default.")
-        else:
-            df_filtered['adjusted_pressure_difference'] = df_filtered['Pressure difference'].abs()
-        avg_adj_dp = df_filtered['adjusted_pressure_difference'].mean()
-
-
-        # Calculate hydraulic power
-        df_filtered['P_hyd'] = ((df_filtered['volume flow'] / 3600) * df_filtered['adjusted_pressure_difference'] * 100000).abs()
-        avg_P_hyd = df_filtered['P_hyd'].mean()
-
-        # Handle BUH power calculations
-        if 'has_buh' in df_filtered.columns and not df_filtered['has_buh'].iloc[0]:
-            # If the column does not exist at all, handle as before
-            df_filtered['power_BUH'] = 0
-            df_filtered['power_BUH_from_Ts'] = 0
-            df_filtered['T_supply_afterBUH'] = df_filtered['T_supply']
-            print("Column 'Electrical power input BUH' does not exist in the DataFrame. Assuming value as 0.")
-        else:
-            # Calculate power_BUH_from_Ts as before
-            df_filtered['power_BUH_from_Ts_uncapped'] = (df_filtered['mass flow']) * 4.183 * (df_filtered['T_supply_set']-df_filtered['T_supply'])
-            cap_value = determine_cap(file_name)
-            df_filtered['power_BUH_from_Ts'] = df_filtered['power_BUH_from_Ts_uncapped'].apply(lambda x: max(min(x, cap_value), 0))
-
-            # Fill missing values in 'Electrical power input BUH' with calculated values
-            num_missing = df_filtered['Electrical power input BUH'].isna().sum()
-            df_filtered['power_BUH'] = df_filtered['Electrical power input BUH'].copy()
-            df_filtered.loc[df_filtered['power_BUH'].isna(), 'power_BUH'] = df_filtered['power_BUH_from_Ts']
-            if num_missing > 0:
-                print(f"Filled {num_missing} missing values in 'Electrical power input BUH' with calculated 'power_BUH_from_Ts'.")
-
-            # Set T_supply_afterBUH accordingly
-            df_filtered['T_supply_afterBUH'] = df_filtered['T_supply'] + df_filtered['power_BUH']/(df_filtered['mass flow'] * 4.183)
-
-        # Calculate pump efficiency and BAM corrections
-        df_filtered['efficiency'] = ((df_filtered['P_hyd']*0.35844) / ((1.7*df_filtered['P_hyd']) + (17*(1 - np.exp(-0.3*df_filtered['P_hyd']))))) * (0.49 / 0.23)
-        df_filtered['powercorrection_BAM'] = (df_filtered['P_hyd']/df_filtered['efficiency'])/1000
-        df_filtered['heatingcorrection_BAM'] = (df_filtered['P_hyd']*(1-df_filtered['efficiency'])/df_filtered['efficiency'])/1000
-
-        # Calculate BAM corrected values
-        df_filtered['Heating Capacity (BAM corrected)'] = np.where(df_filtered['adjusted_pressure_difference'] > 0, 
-            df_filtered['Heating Capacity (without corr)'] - df_filtered['heatingcorrection_BAM'],
-            df_filtered['Heating Capacity (without corr)'] + df_filtered['heatingcorrection_BAM'])
-        df_filtered['Electric Power Input (BAM corrected)'] = np.where(df_filtered['adjusted_pressure_difference'] > 0,
-            df_filtered['Electric Power Input (without correction)'] - df_filtered['powercorrection_BAM'],
-            df_filtered['Electric Power Input (without correction)'] + df_filtered['powercorrection_BAM'])
-
-        # Add the new calculated values to averages
-        avg_eff_pump = df_filtered['efficiency'].mean()
-        avg_qcorr_bam = df_filtered['heatingcorrection_BAM'].mean()
-        avg_pcorr_bam = df_filtered['powercorrection_BAM'].mean()
-        avg_power_buh = df_filtered['power_BUH'].mean()
-        avg_power_buh_from_ts = df_filtered['power_BUH_from_Ts'].mean()
-        avg_t_sup_buh = df_filtered['T_supply_afterBUH'].mean()
-        avg_t_mean_log, t_mean_from_avgs, avg_dt_ln = compute_t_mean_period_stats(
-            df_filtered, avg_t_sup_buh=avg_t_sup_buh, avg_values=avg_values
-        )
-        avg_heating_capacity_bam_corr = df_filtered['Heating Capacity (BAM corrected)'].mean()
-        avg_power_input_bam_corr = df_filtered['Electric Power Input (BAM corrected)'].mean()
-
-        # Calculate BAM corrected COP
-        cop_bam_corr = avg_heating_capacity_bam_corr / avg_power_input_bam_corr
-
-        # If lab-corrected Q/P missing: use BAM-corrected for the DB "corr" fields
-        if lab_corr_missing:
-            avg_values['Heating Capacity (corrected)'] = avg_heating_capacity_bam_corr
-            avg_values['Electric Power Input (corrected)'] = avg_power_input_bam_corr
-            cop_corr = cop_bam_corr
-            note = (
-                f"{file_name}: lab-corrected Q/P missing — stored 'corrected' averages "
-                f"from BAM pump correction (Q={avg_heating_capacity_bam_corr:.4g} kW, "
-                f"P={avg_power_input_bam_corr:.4g} kW)."
-            )
-            notices.append(note)
-            print(note)
-        else:
-            cop_corr = (
-                avg_values['Heating Capacity (corrected)']
-                / avg_values['Electric Power Input (corrected)']
-            )
+        avg_t_mean_log = means['avg_t_mean_log']
+        t_mean_from_avgs = means['t_mean_from_avgs']
+        avg_dt_ln = means['avg_dt_ln']
 
         # Create insert values in the correct order matching the table schema
-        insert_values = [
-            file_name, data_set,
-            avg_values['T_outdoor (DB)'], avg_values['T_outdoor (WB)'],
-            avg_values['T_supply'], avg_values['T_return_emu'],
-            avg_values['volume flow'], avg_values['mass flow'],
-            avg_values['Heating Capacity (without corr)'], avg_values['Electric Power Input (without correction)'], cop_uncorr,
-            avg_values['Heating Capacity (corrected)'], avg_values['Electric Power Input (corrected)'], cop_corr,
-            avg_values['Pressure difference'], avg_adj_dp, avg_P_hyd,
-            avg_values['T_return_calc'], avg_values['T_B_calc'], avg_values['T_H_calc'], avg_values['Q_HB'], avg_values['Q_BA'],
-            avg_eff_pump, avg_qcorr_bam, avg_pcorr_bam, 
-            avg_power_buh, avg_power_buh_from_ts, avg_t_sup_buh,
-            avg_heating_capacity_bam_corr, avg_power_input_bam_corr, cop_bam_corr,
-            start_time, end_time
-        ]
+        insert_values = (
+            [file_name, data_set]
+            + [means[key] for key in ANALYSIS_MEAN_INSERT_KEYS]
+            + [start_time, end_time]
+        )
 
         if update_existing:
             # Use UPDATE instead of INSERT to avoid duplicates
@@ -10076,6 +10181,376 @@ def api_cycle_extract_save_all_periods():
             'skipped': skipped,
             'buffer_s': buffer_s,
         })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Guideline windows page (Phase 2): read the saved clocks back, never re-propose
+# ---------------------------------------------------------------------------
+
+GUIDELINE_WINDOW_CSV_COLUMNS = [
+    ('rowid', 'rowid'), ('file_name', 'file'), ('data_set', 'data_set'),
+    ('test_cond', 'test_cond'), ('profile_id', 'profile'), ('hp_id', 'hp_id'),
+    ('start_time', 'parent_start_s'), ('end_time', 'parent_end_s'), ('kind', 'kind'),
+    ('d1_start', 'D1_start_s'), ('d1_end', 'D1_end_s'),
+    ('d2_start', 'D2_start_s'), ('d2_end', 'D2_end_s'),
+    ('s1_start', 'S1_start_s'), ('s1_end', 'S1_end_s'),
+    ('s2_start', 'S2_start_s'), ('s2_end', 'S2_end_s'),
+    ('h_start', 'H_start_s'), ('h_end', 'H_end_s'),
+    ('eq_start', 'eq_start_s'), ('eq_end', 'eq_end_s'),
+    ('eval_start', 'eval_start_s'), ('eval_end', 'eval_end_s'),
+    ('parent_tsup', 'parent_Tsup_C'), ('parent_q', 'parent_Q_kW'),
+    ('parent_p', 'parent_P_kW'), ('parent_cop', 'parent_COP'),
+    ('eval_tsup', 'eval_Tsup_C'), ('eval_q', 'eval_Q_kW'),
+    ('eval_p', 'eval_P_kW'), ('eval_cop', 'eval_COP'),
+    ('note', 'note'),
+]
+
+
+def _guideline_num(value):
+    """A float the browser can parse, or None. NaN is missing, never 0."""
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    return val if np.isfinite(val) else None
+
+
+def _guideline_kind_from_stored(period_types) -> str:
+    """Kind of a parent row, inferred from the guideline periods stored on it.
+
+    Save writes no kind column, so the stored period types are the record. Never
+    ``other``, and never read from the test-condition letter or the dataset name.
+    A row with no guideline periods is ``unknown``, not ``continuous``.
+    """
+    types = set(period_types or ())
+    if 'defrost' in types:
+        return 'defrost'
+    if types & {'off', 'on'}:
+        return 'on_off'
+    if 'heating' in types:
+        return 'continuous'
+    return 'unknown'
+
+
+def _prepare_sheet_for_analysis(df_full, file_name):
+    """(prepared sheet, lab-corr flag, reason) for the analysis-time means path.
+
+    ``process_file``'s preparation — derived mass flow, the BUH flag, the
+    ``T_supply_set`` of the filename letter — applied once to a sheet that is
+    already in memory, so several windows of one file share it. The frame is
+    copied because the Excel cache hands out a shared dataframe.
+
+    The sheet is returned only when it carries everything the analysis-time
+    block needs; otherwise it comes back as ``None`` with a reason that names
+    the missing columns, and the caller falls back instead of failing the table.
+    """
+    if df_full is None or 'time_elapsed' not in getattr(df_full, 'columns', []):
+        return None, False, 'sheet could not be read'
+
+    df = df_full.copy()
+    df, _mass_flow_notices = derive_mass_flow_if_needed(df)
+    lab_corr_missing = any(c not in df.columns for c in ANALYSIS_LAB_CORR_COLUMNS)
+
+    if 'Electrical power input BUH' not in df.columns:
+        df['Electrical power input BUH'] = 0
+        df['has_buh'] = False
+    else:
+        buh = pd.to_numeric(df['Electrical power input BUH'], errors='coerce')
+        df['has_buh'] = not (buh.notna().all() and len(buh) > 0 and (buh == 0).all())
+    df['T_supply_set'] = config['t_supply_set_mapping'].get(extract_letter(file_name), None)
+
+    missing = [c for c in config['average_columns']
+               if c not in df.columns and c not in ANALYSIS_SUPPLIED_COLUMNS]
+    if missing:
+        return None, lab_corr_missing, f"sheet has no {', '.join(missing)}"
+    return df, lab_corr_missing, ''
+
+
+def _analysis_means_for_window(df_sheet, file_name, stf: float, etf: float, lab_corr_missing: bool):
+    """The parent's analysis-time means, computed on one window. None if not possible.
+
+    The evaluation means must be the same quantities as the entry's, so the
+    window goes through ``analysis_window_means`` (the block Apply runs) plus the
+    BUH-corrected derived fields — not through the raw sheet columns, which BAM
+    Plotdaten does not carry for Q and P.
+    """
+    window = df_sheet[(df_sheet['time_elapsed'] >= stf) & (df_sheet['time_elapsed'] <= etf)].copy()
+    if window.empty:
+        return None
+    # A window can be all-zero BUH even when the file is not, as process_file checks.
+    if 'Electrical power input BUH' in window.columns:
+        buh = pd.to_numeric(window['Electrical power input BUH'], errors='coerce')
+        if buh.notna().all() and len(buh) > 0 and (buh == 0).all():
+            window['has_buh'] = False
+    try:
+        means = analysis_window_means(window, file_name, lab_corr_missing=lab_corr_missing)
+    except Exception as e:
+        print(f"[guideline windows] {file_name} {stf}–{etf} s: analysis means failed: {e}")
+        return None
+    means.update(analysis_wbuh_fields(means))
+    return means
+
+
+def _guideline_window_rows(rowids=None) -> dict:
+    """One row per parent entry: stored clocks, parent means, evaluation means.
+
+    Read-only. Only **saved** guideline periods are read (``detection_method``
+    ``guideline`` at the configured buffer) — nothing is proposed here, so clocks
+    the analyst has not saved on Cycle Extract stay invisible and the row still
+    appears with its identity and parent means.
+
+    ``rowids`` None means every parent row in the open database. That is an
+    explicit request from the analyst, so the list is not capped.
+    """
+    lengths = _guideline_lengths()
+    buffer_s = _guideline_buffer_s()
+
+    want = None
+    if rowids is not None:
+        seen = []
+        for raw in rowids:
+            try:
+                seen.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        want = sorted(set(seen))
+
+    conn = get_db_connection()
+    try:
+        result_cols = {r[1] for r in conn.execute('PRAGMA table_info(results)').fetchall()}
+        # Mean Values order, so the analyst reads the same sequence on both pages.
+        order_by = 'display_order ASC, rowid ASC' if 'display_order' in result_cols else 'rowid ASC'
+        if want is None:
+            entries = [dict(r) for r in conn.execute(
+                f'SELECT rowid, * FROM results ORDER BY {order_by}').fetchall()]
+        elif want:
+            ph = ','.join(['?'] * len(want))
+            entries = [dict(r) for r in conn.execute(
+                f'SELECT rowid, * FROM results WHERE rowid IN ({ph}) ORDER BY {order_by}',
+                want).fetchall()]
+        else:
+            entries = []
+
+        stored = {}
+        if entries:
+            ids = [int(e['rowid']) for e in entries]
+            ph = ','.join(['?'] * len(ids))
+            for p in conn.execute(
+                f'SELECT * FROM cycle_periods WHERE entry_rowid IN ({ph}) '
+                f'AND detection_method=? AND buffer_s=? ORDER BY start_time ASC, id ASC',
+                ids + [GUIDELINE_DETECTION_METHOD, buffer_s]
+            ).fetchall():
+                stored.setdefault(int(p['entry_rowid']), []).append(dict(p))
+    finally:
+        conn.close()
+
+    rows, need_sheet = [], []
+    for entry in entries:
+        rid = int(entry['rowid'])
+        periods = stored.get(rid, [])
+        kind = _guideline_kind_from_stored(p['period_type'] for p in periods)
+
+        ds_type = {'defrost': 'defrost', 'on_off': 'off'}.get(kind)
+        ds_spans = [p for p in periods if p['period_type'] == ds_type] if ds_type else []
+        h_type = 'on' if kind == 'on_off' else 'heating'
+        h = next((p for p in periods if p['period_type'] == h_type), None)
+        eq = next((p for p in periods if p['period_type'] == 'equilibrium'), None)
+        # Periods come back ordered by start_time, so this is the earliest evaluation.
+        ev = next((p for p in periods if p['period_type'] == 'evaluation'), None)
+
+        row = {
+            'rowid': rid,
+            'file_name': entry.get('file_name'),
+            'data_set': entry.get('data_set'),
+            'test_cond': (entry.get('dev_test_condition') or entry.get('test_cond') or ''),
+            'profile_id': entry.get('profile_id') or '',
+            'hp_id': entry.get('HP_ID') if entry.get('HP_ID') is not None else entry.get('hp_id'),
+            'start_time': _guideline_num(entry.get('start_time')),
+            'end_time': _guideline_num(entry.get('end_time')),
+            'kind': kind,
+            'h_start': _guideline_num(h['start_time']) if h else None,
+            'h_end': _guideline_num(h['end_time']) if h else None,
+            'eq_start': _guideline_num(eq['start_time']) if eq else None,
+            'eq_end': _guideline_num(eq['end_time']) if eq else None,
+            'eval_start': _guideline_num(ev['start_time']) if ev else None,
+            'eval_end': _guideline_num(ev['end_time']) if ev else None,
+            'parent_tsup': _guideline_num(get_mean_supply_for_deviations(entry)),
+            'parent_q': _guideline_num(get_mean_q_for_deviations(entry)),
+            'parent_p': _guideline_num(get_mean_p_for_deviations(entry)),
+            'parent_cop': _guideline_num(get_mean_cop_for_deviations(entry)),
+            'eval_tsup': None, 'eval_q': None, 'eval_p': None, 'eval_cop': None,
+            'note': '',
+        }
+        # D1/D2 for a defrost cycle, S1/S2 for an on-off one; the other pair stays empty.
+        prefix = 'd' if kind == 'defrost' else ('s' if kind == 'on_off' else None)
+        for slot in (1, 2):
+            for edge in ('start', 'end'):
+                row[f'd{slot}_{edge}'] = None
+                row[f's{slot}_{edge}'] = None
+        if prefix:
+            for i, span in enumerate(ds_spans[:2], start=1):
+                row[f'{prefix}{i}_start'] = _guideline_num(span['start_time'])
+                row[f'{prefix}{i}_end'] = _guideline_num(span['end_time'])
+
+        if kind == 'unknown':
+            row['note'] = 'No guideline clocks saved — save them on Cycle Extract first.'
+        elif kind == 'on_off':
+            row['note'] = 'On–off cycle — no equilibrium/evaluation window by rule.'
+        elif ev is None:
+            h_len = None
+            if row['h_start'] is not None and row['h_end'] is not None:
+                h_len = row['h_end'] - row['h_start']
+            if h_len is not None and h_len < lengths['eq_s'] + lengths['eval_s']:
+                row['note'] = (f"H is shorter than eq {lengths['eq_min']:g} min + "
+                               f"eval {lengths['eval_min']:g} min — no evaluation window stored.")
+            else:
+                row['note'] = 'No evaluation window stored for this entry.'
+        else:
+            need_sheet.append((row, ev))
+
+        rows.append(row)
+
+    # The evaluation means are recomputed from the sheet whenever it can be read:
+    # the cache Save wrote holds Tsup for a BAM defrost row but no Q/P/COP, and a
+    # partial cache must not pass as done. Requested rows only, one read per
+    # sheet. A missing sheet leaves the cells empty with a reason and the cached
+    # Tsup if there is one; it never fails the table.
+    by_sheet = {}
+    for row, ev in need_sheet:
+        by_sheet.setdefault((row['file_name'], row['data_set']), []).append((row, ev))
+    for (file_name, data_set), items in by_sheet.items():
+        df_full = _read_excel_sheet(file_name, data_set)
+        if df_full is None:
+            for row, ev in items:
+                row['eval_tsup'] = _guideline_num(ev.get('avg_ts_buh'))
+                row['note'] = 'Evaluation window stored, but its sheet could not be read.'
+            continue
+        df_sheet, lab_corr_missing, prep_reason = _prepare_sheet_for_analysis(df_full, file_name)
+        for row, ev in items:
+            stf, etf = float(ev['start_time']), float(ev['end_time'])
+            means = None
+            if df_sheet is not None:
+                means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing)
+            if means is not None:
+                row['eval_tsup'] = _guideline_num(get_mean_supply_for_deviations(means))
+                row['eval_q'] = _guideline_num(get_mean_q_for_deviations(means))
+                row['eval_p'] = _guideline_num(get_mean_p_for_deviations(means))
+                row['eval_cop'] = _guideline_num(get_mean_cop_for_deviations(means))
+            else:
+                # Last resort: the stored series themselves. A sheet that already
+                # carries QCorrwBUH / lab-corrected Q and P still answers here.
+                stats = _period_stats_from_df(df_full, stf, etf)
+                row['eval_tsup'] = _guideline_num(stats.get('avg_ts_buh'))
+                row['eval_q'] = _guideline_num(stats.get('avg_q_corr_wbuh'))
+                row['eval_p'] = _guideline_num(stats.get('avg_p_corr_wbuh'))
+                row['eval_cop'] = _guideline_num(stats.get('avg_cop_corr_wbuh'))
+                if prep_reason and any(row[k] is None for k in ('eval_q', 'eval_p', 'eval_cop')):
+                    row['note'] = ("Evaluation Q/P/COP need the entry's own quantities: "
+                                   f'{prep_reason}.')
+            if all(row[k] is None for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop')):
+                row['eval_tsup'] = _guideline_num(ev.get('avg_ts_buh'))
+                row['note'] = 'Evaluation window stored, but the sheet holds no values in it.'
+
+    with_clocks = sum(1 for r in rows if r['kind'] != 'unknown')
+    with_eval = sum(1 for r in rows if r['eval_start'] is not None)
+    message = (f'{len(rows)} entries — {with_clocks} with saved guideline clocks, '
+               f'{with_eval} with an evaluation window (buffer {buffer_s} s).')
+    return {'rows': rows, 'buffer_s': buffer_s, 'lengths': lengths, 'message': message}
+
+
+def _guideline_windows_selector(payload) -> list | None:
+    """``rowids`` from a request body: a list of ints, or None meaning all parents."""
+    rowids = payload.get('rowids', None) if isinstance(payload, dict) else None
+    if rowids is None:
+        return None
+    if not isinstance(rowids, list):
+        raise ValueError('rowids must be a list of integers or null')
+    return rowids
+
+
+@app.route('/guideline_windows', methods=['GET'])
+def guideline_windows():
+    """Empty shell. Nothing is read until the analyst asks for rows (§2.5)."""
+    return render_template('guideline_windows.html', preselected_rowids=[])
+
+
+@app.route('/guideline_windows', methods=['POST'])
+def guideline_windows_from_selection():
+    """Open the page for the rows ticked on Mean Values (same pattern as Plot)."""
+    conn = get_db_connection()
+    try:
+        records = resolve_selected_rows(
+            conn,
+            request.form.getlist('file_names'),
+            request.form.getlist('data_sets'),
+            request.form.getlist('row_ids'),
+        )
+    finally:
+        conn.close()
+    rowids = [int(r['rowid']) for r in records if r.get('rowid') is not None]
+    if not rowids:
+        flash('Select at least one row before opening Guideline windows.', 'warning')
+        return redirect(url_for('index'))
+    return render_template('guideline_windows.html', preselected_rowids=rowids)
+
+
+@app.route('/api/guideline_windows', methods=['POST'])
+def api_guideline_windows():
+    """Table rows for the selected entries, or for the whole open database.
+
+    ``{"rowids": [1, 2]}`` limits the table to those parents; ``{"rowids": null}``
+    is the explicit "load all entries in the open database". The reply is always
+    JSON, so a failure never reaches the browser as an HTML page (§Phase 1.2b).
+    """
+    try:
+        ensure_cycle_periods_table()
+        payload = request.get_json(silent=True) or {}
+        result = _guideline_window_rows(_guideline_windows_selector(payload))
+        return jsonify({
+            'success': True,
+            'rows': result['rows'],
+            'message': result['message'],
+            'buffer_s': result['buffer_s'],
+            'lengths': result['lengths'],
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'rows': [], 'message': str(e)})
+
+
+@app.route('/api/guideline_windows/export', methods=['POST'])
+def api_guideline_windows_export():
+    """CSV of the same table. Nothing is added to the t42_summary_v1 export."""
+    try:
+        ensure_cycle_periods_table()
+        payload = request.get_json(silent=True)
+        if payload is None:
+            raw = (request.form.get('rowids') or '').strip()
+            payload = {'rowids': json.loads(raw) if raw else None}
+        result = _guideline_window_rows(_guideline_windows_selector(payload))
+
+        import csv
+        from io import StringIO
+        buf = StringIO()
+        writer = csv.writer(buf, lineterminator='\n')
+        writer.writerow([header for _key, header in GUIDELINE_WINDOW_CSV_COLUMNS])
+        for row in result['rows']:
+            writer.writerow(['' if row.get(key) is None else row.get(key)
+                             for key, _header in GUIDELINE_WINDOW_CSV_COLUMNS])
+        payload_bytes = buf.getvalue().encode('utf-8-sig')
+        return send_file(
+            BytesIO(payload_bytes),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f"guideline_windows_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()

@@ -300,6 +300,7 @@ Three properties are worth remembering:
 | **Data** (`/`) | The results table; add, edit, recalculate, plot entries. Identity, energy (including `QCorrwBUH` / `Ts_buh`) and state columns are visible by default; monitoring extras are off until **Show monitoring columns** |
 | **Deviations** (`/deviations`) | Permissible deviation analysis, per entry. Also holds the **Configure Deviation Bands** panel — the only place the tolerance bands are edited |
 | **Period Statistics** (`/period_statistics`) | Sub-period statistics within an entry. Windows are split only when **Notes** contains `drop` or `ramp` and **Test cond** is a defrost (A/B/E/F) or on/off (C/D) letter; otherwise the row stays `other` and has no sub-periods. Check or correct the split time here (or on dTreturn Insights), not on Means. |
+| **Guideline Windows** (`/guideline_windows`) | Check the guideline clocks you saved on Cycle Extract across many entries: stored times plus the entry means beside the evaluation-window means (§6.5a). Read-only |
 | **dTreturn Insights** (`/dtreturn_insights`) | Controllability / return-temperature behaviour. Filter **Units** by profile (or by HP ID for legacy rows) |
 | **Scatter** (`/scatter`) | Scatter plots across entries. Combinations are unit + flow, not a generic `HP (fixed)`. Climate / application is labelled (Average / MT default) and can be filtered when several slices exist |
 
@@ -309,6 +310,27 @@ Two operational notes:
 
 - A new entry has **empty** deviation statistics until it is calculated. That is not a fault; use the whole-table calculate or a per-column Update on the Deviations page.
 - **N/A** and **0** mean different things. `0` = measured, no violations. `N/A` = calculated, but the quantity had no valid points in the window, or the check does not apply to that unit type / flow mode. `-` = not yet calculated.
+
+### 6.5a Guideline Windows — checking the saved clocks
+
+`/guideline_windows`. This is where you look at the clocks of §6.3a after saving them, one row per entry instead of one file at a time. It only reads; Cycle Extract stays the editor.
+
+Two ways in:
+
+- Tick rows on **Data** and press **Guideline windows** in the *Selected rows* toolbar. The page opens with exactly those rows.
+- Open the page from the navbar and press **Load all entries in the open database**. Every entry, every kind — not only frost cycles.
+
+Opening the page reads nothing. Work starts when you pick one of the two.
+
+Each row shows the entry (rowid, file, data set, test condition, profile, HP, start and end), the inferred **kind**, the stored **D1 / D2** (or **S1 / S2**), **H**, **equilibrium** and **evaluation** times in `time_elapsed` seconds, then Tsup, Q, P and COP **stored on the entry** beside the same four on the **evaluation window**.
+
+The kind comes from the stored periods, never from the test letter: a `defrost` period means defrost, `off` / `on` means on–off, heating alone means continuous, and no saved periods at all means unknown.
+
+The evaluation Tsup, Q, P and COP are the **same analysis-time quantities as the entry**, taken over the evaluation window alone: the BAM pump correction fills the corrected Q and P when the lab did not deliver them, and BUH power is added the same way. They are therefore comparable with the entry columns beside them, and a sheet that carries only uncorrected Q and P still fills them. COP is mean Q divided by mean P, never the mean of the ratio.
+
+The evaluation cells are **empty, never `0`**, when the rule gives no window — an on–off cycle, an H shorter than equilibrium + evaluation, clocks that were never saved, or a Plotdaten sheet that cannot be read. The **Note** column says which of those it was. Unsaved proposals never appear here; save them on Cycle Extract first.
+
+**Download CSV** writes the table you are looking at. The summary export (§6.7) is untouched by this page.
 
 ### 6.6 Manage Columns and Diagnose Database
 

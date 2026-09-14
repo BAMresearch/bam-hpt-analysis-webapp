@@ -107,6 +107,11 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint in ['guideline_windows', 'guideline_windows_from_selection'] %}active{% endif %}" href="/guideline_windows">
+                            <i class="fas fa-stopwatch"></i> Guideline Windows
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {% if request.endpoint in ['dtreturn_insights', 'api_dtreturn_insights'] %}active{% endif %}" href="/dtreturn_insights">
                             <i class="fas fa-thermometer-half"></i> dTreturn Insights
                         </a>
