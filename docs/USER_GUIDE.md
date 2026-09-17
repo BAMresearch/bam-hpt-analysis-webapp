@@ -234,32 +234,23 @@ An empty **climate / application** on an entry means the Average / MT **default*
 
 ### 6.3a Guideline clocks on existing entries
 
-Also on `/cycle_extract`, for the file you have loaded. The database entry **stays the complete cycle**. These clocks are sub-periods on that row, not a replacement.
+Also on `/cycle_extract`, for the file you have loaded. The database entry **stays the complete cycle**. These clocks are sub-periods on that row, not a replacement. Interval definitions and bands are in the [Analysis Guide](ANALYSIS_GUIDE.md) §1 and §5.1.
 
-Press **Propose guideline clocks**. For each existing entry the tool derives:
+**Propose guideline clocks** derives D or S, H, and — on defrost and continuous — equilibrium then evaluation. Evaluation is **not** the last minutes of the cycle; it is omitted when H is too short. Lengths: `flask_app/config/cycle_periods.json` (defaults: buffer 10 min, equilibrium 60 min, evaluation 70 min).
 
-| Interval | Definition |
-|----------|------------|
-| **D** | Defrost plus the buffer after heating resumes |
-| **S** | Standby plus the buffer after the compressor restarts |
-| **H** | Heating between the D (or S) pieces. On a *continuous* cycle this is the whole parent window |
-| **Equilibrium** | First `eq_min` of H (defrost and continuous) |
-| **Evaluation** | The `eval_min` immediately after equilibrium (defrost and continuous) |
+Kinds: **defrost**, **on–off** (no equilibrium or evaluation), **continuous**, or **unknown**. Notes `drop` / `ramp` are not required. Stored `other` is unknown, not continuous. Confirm before you save.
 
-Evaluation is **not** the last minutes of the cycle. If H is too short, that window is omitted. Lengths are `flask_app/config/cycle_periods.json` (defaults: buffer 10 min, equilibrium 60 min, evaluation 70 min).
+**Treat unknown rows as** fills only rows that still have no kind. **Save all proposed** stores the open file (tick **show** to limit the batch). Unknown rows with no default are skipped.
 
-Kinds: **defrost** (D + H), **on–off** (S + H, no equilibrium or evaluation), **continuous** (H only), or **unknown**. A proposal does not need Notes `drop` / `ramp`. Confirm before you save. Stored `other` means unknown, not continuous.
+**Edit** one row: move the power-transition time or D/S end to rebuild H (and locked equilibrium / evaluation). A cycle cut from one defrost **end** to the next can show a **second D** (same for S); type a start, clear it, or **reset**. **Unlock** equilibrium or evaluation to type their times. **Save clocks** writes on the parent entry.
 
-**Treat unknown rows as** fills only rows that still have no kind. Changing it rebuilds those clocks at once. **Save all proposed** stores the open file; tick **show** first to limit the batch. Unknown rows with no default are skipped.
+Period layers are **off by default**. Tick **show** to draw saved clocks — or the proposal while you are editing — on the existing chart. A row marked *≠ saved* has a proposal that does not match storage; nothing is written until Save. A second D/S start you typed is kept on the next Propose after Save.
 
-To correct one row, press **edit**:
+**Save clocks for the open database** fills parent rows that still have no clocks (asks first, one file at a time). It never overwrites saved clocks. To change clocks you can see, open the file, Propose, and Save all. It does not send edits that are open on the loaded file.
 
-- Move **pelec_transition_time** or the **D / S end** to rebuild H (and locked equilibrium / evaluation). Continuous rows have neither field.
-- A cycle cut from one defrost **end** to the next can show a **second D** (same idea for S). Type a start, clear it for one span, or **reset** to re-detect. A cut from defrost **start** to start keeps one D.
-- **Unlock** equilibrium or evaluation to type their times.
-- **Save clocks** writes the times on the parent entry. **Rebuild all** will not overwrite that split.
+**Clear saved guideline clocks** removes those times and their stored scores so you can fill again. It does not delete parent cycles or Period Statistics splits. Duplicate the database on **Datasets** first if you may want that pass back.
 
-Period layers are **off by default**. Turn them on, then tick **show** per row.
+Guideline Windows and the Deviations Plot use **saved** clocks only. There is no Tsup sample-band on Cycle Extract.
 
 ### 6.4 Reading the import fallback notices
 
@@ -298,9 +289,9 @@ Three properties are worth remembering:
 | Page | Use |
 |------|-----|
 | **Data** (`/`) | The results table; add, edit, recalculate, plot entries. Identity, energy (including `QCorrwBUH` / `Ts_buh`) and state columns are visible by default; monitoring extras are off until **Show monitoring columns** |
-| **Deviations** (`/deviations`) | Permissible deviation analysis, per entry. Also holds the **Configure Deviation Bands** panel — the only place the tolerance bands are edited |
+| **Deviations** (`/deviations`) | Permissible deviation analysis on the **whole cycle**. **Configure Deviation Bands** is the only place those parent tolerances are edited. **Plot** draws DB/WB, Tsup, dTreturn and flow in one modal |
 | **Period Statistics** (`/period_statistics`) | Sub-period statistics within an entry. Windows are split only when **Notes** contains `drop` or `ramp` and **Test cond** is a defrost (A/B/E/F) or on/off (C/D) letter; otherwise the row stays `other` and has no sub-periods. Check or correct the split time here (or on dTreturn Insights), not on Means. |
-| **Guideline Windows** (`/guideline_windows`) | Check the guideline clocks you saved on Cycle Extract across many entries: stored times plus the entry means beside the evaluation-window means (§6.5a). Read-only |
+| **Guideline Windows** (`/guideline_windows`) | Read-only check of **saved** guideline clocks across many entries: times, parent vs evaluation means, interval % / means, eval ΔCOP (§6.5a) |
 | **dTreturn Insights** (`/dtreturn_insights`) | Controllability / return-temperature behaviour. Filter **Units** by profile (or by HP ID for legacy rows) |
 | **Scatter** (`/scatter`) | Scatter plots across entries. Combinations are unit + flow, not a generic `HP (fixed)`. Climate / application is labelled (Average / MT default) and can be filtered when several slices exist |
 
@@ -311,26 +302,28 @@ Two operational notes:
 - A new entry has **empty** deviation statistics until it is calculated. That is not a fault; use the whole-table calculate or a per-column Update on the Deviations page.
 - **N/A** and **0** mean different things. `0` = measured, no violations. `N/A` = calculated, but the quantity had no valid points in the window, or the check does not apply to that unit type / flow mode. `-` = not yet calculated.
 
+**Plot** on Deviations opens one figure per quantity in one modal: outdoor DB/WB (air-source), Tsup, dTreturn, and flow on fixed-flow tests. If guideline clocks are **saved**, the filled band **steps** at those clocks; dashed lines are the parent / full-cycle limits the table scores. Tsup does not step (mean check only). Interval percentages and ΔCOP are on Guideline Windows (§6.5a). Band widths: [Analysis Guide](ANALYSIS_GUIDE.md) §5.1.
+
 ### 6.5a Guideline Windows — checking the saved clocks
 
-`/guideline_windows`. This is where you look at the clocks of §6.3a after saving them, one row per entry instead of one file at a time. It only reads; Cycle Extract stays the editor.
+`/guideline_windows`. Read-only check of clocks saved in §6.3a, one row per parent. Cycle Extract stays the editor. What the columns mean (bands, ΔCOP, n/a) is in the [Analysis Guide](ANALYSIS_GUIDE.md) §5.1.
 
 Two ways in:
 
-- Tick rows on **Data** and press **Guideline windows** in the *Selected rows* toolbar. The page opens with exactly those rows.
-- Open the page from the navbar and press **Load all entries in the open database**. Every entry, every kind — not only frost cycles.
+- Tick rows on **Data** → **Guideline windows** in the Selected rows toolbar.
+- Open the page from the navbar: it loads every entry in the open database. There is no *Load all* button.
 
-Opening the page reads nothing. Work starts when you pick one of the two.
+Opening the page does **not** read Plotdaten. Scores are stored when you **save** clocks; they are read back here. You do not need Calculate on Deviations first.
 
-Each row shows the entry (rowid, file, data set, test condition, profile, HP, start and end), the inferred **kind**, the stored **D1 / D2** (or **S1 / S2**), **H**, **equilibrium** and **evaluation** times in `time_elapsed` seconds, then Tsup, Q, P and COP **stored on the entry** beside the same four on the **evaluation window**.
+Each row: identity (**#** is the same number as on Data and Deviations, not the internal id; **COP dataset** is `YES` / `NO` / blank), kind, clock times, parent Tsup/Q/P/COP beside the same four on the **evaluation** window (means in °C / kW), then interval individual %, D/S %, eval ΔCOP, and H/D/S mean deviations. Kind comes from the stored periods, never from the test letter. The table scrolls sideways in its own box.
 
-The kind comes from the stored periods, never from the test letter: a `defrost` period means defrost, `off` / `on` means on–off, heating alone means continuous, and no saved periods at all means unknown.
+Filters (Kind, COP dataset, Clocks) run in the browser on rows already loaded. **Clear filters** resets them. Status is **Showing X of Y rows**.
 
-The evaluation Tsup, Q, P and COP are the **same analysis-time quantities as the entry**, taken over the evaluation window alone: the BAM pump correction fills the corrected Q and P when the lab did not deliver them, and BUH power is added the same way. They are therefore comparable with the entry columns beside them, and a sheet that carries only uncorrected Q and P still fills them. COP is mean Q divided by mean P, never the mean of the ratio.
+Empty score cells are **n/a, never `0`**: no such window (on–off, short H, unknown, unsaved clocks), or scores not stored yet. Unsaved proposals do not appear. Hover an n/a cell for the stored reason.
 
-The evaluation cells are **empty, never `0`**, when the rule gives no window — an on–off cycle, an H shorter than equilibrium + evaluation, clocks that were never saved, or a Plotdaten sheet that cannot be read. The **Note** column says which of those it was. Unsaved proposals never appear here; save them on Cycle Extract first.
+**Compute missing scores** fills rows whose clocks are saved but whose interval numbers are not (typical on an older database, or after clocks or bands changed). It asks first, then reads Plotdaten **one file at a time**. It does not propose clocks and does not change parent Deviations. A sheet that cannot be read is reported; the rest continue. Opening the page and using the filters never starts this.
 
-**Download CSV** writes the table you are looking at. The summary export (§6.7) is untouched by this page.
+**Download CSV** writes the **filtered** table. The summary export (§6.7) is unchanged.
 
 ### 6.6 Manage Columns and Diagnose Database
 
@@ -357,8 +350,10 @@ There are currently **no formal pass/fail flags** in the export — the pass/fai
 4. WebApp /profiles       confirm unit profile + condition set
 5. WebApp /cycle_extract  define cycles → set ds per cycle → Apply
 6. WebApp /                read the collapsed fallback notices (also inside the review modal)
-7. WebApp /deviations      calculate → review
-8. WebApp /export          summary out
+7. WebApp /cycle_extract  Propose guideline clocks → Save (optional; needed for Guideline Windows)
+8. WebApp /deviations      calculate → review (Plot if you want the trace)
+9. WebApp /guideline_windows  check saved clocks; Compute missing scores if cells are n/a
+10. WebApp /export         summary out
 ```
 
 ---
@@ -374,6 +369,7 @@ There are currently **no formal pass/fail flags** in the export — the pass/fai
 | `UnicodeDecodeError` on start | Started `app.py` directly without `PYTHONUTF8=1`; use `run_app.ps1` (§2) |
 | Deviations all empty | Entry not calculated yet (§6.5) |
 | Deviations implausibly large | Wrong unit profile or condition set (§6.2); or a fixed-flow check applied to a variable-flow test (§9 note 1) |
+| Guideline Windows scores all n/a with clocks present | Scores were not stored with those clocks — **Compute missing scores** (§6.5a) |
 | Scatter: only a generic `HP (fixed)` series, or files merged | Entries have no profile and no HP ID; assign a unit profile (§6.2) |
 | Profiles page stale after editing a profile JSON | Reload the page |
 | Numbers changed after re-import | Check which dataset is open (§6.1) |
@@ -397,7 +393,9 @@ There are currently **no formal pass/fail flags** in the export — the pass/fai
 | Setting | File | Edit via |
 |---------|------|----------|
 | Import column mapping | `import_tools/maps/hpt_*.json` | Text editor; bump `version` |
-| Deviation bands and colour thresholds | `flask_app/permissible_deviations.json` | **Deviations page** → Configure Deviation Bands |
+| Deviation bands and colour thresholds (parent) | `flask_app/permissible_deviations.json` | **Deviations page** → Configure Deviation Bands |
+| Guideline clock lengths | `flask_app/config/cycle_periods.json` | Text editor |
+| Interval individual / mean bands and ΔCOP | `flask_app/config/interval_deviations.json` | Text editor (not the Configure Deviation Bands panel) |
 | Test-condition setpoints | `flask_app/config/condition_sets.json` | Profiles page / text editor |
 | Unit parameters | `flask_app/config/profiles/` (`local/` is not versioned) | Profiles page |
 | Which checks apply per unit type | `flask_app/config/checks.json`, `flask_app/config/unit_types.json` | Text editor |
@@ -408,4 +406,4 @@ There are currently **no formal pass/fail flags** in the export — the pass/fai
 
 ---
 
-*Document history: v0.1 — 2026-09-03, first version circulated within T4.2.*
+*Document history: v0.1 — 2026-09-03, first version circulated within T4.2. 2026-09-17 — guideline clocks and Guideline Windows described as operation; methods moved to the Analysis Guide.*

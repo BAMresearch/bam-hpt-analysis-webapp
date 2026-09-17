@@ -7,13 +7,42 @@
   .gw-actions { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 12px 15px; margin: 20px; }
   .gw-help { font-size: 12px; color: #6c757d; }
   .gw-status { font-size: 12px; color: #495057; margin-top: 8px; }
-  .gw-table-wrap { margin: 0 20px 30px 20px; overflow-x: auto; }
-  #gwTable { font-size: 11px; white-space: nowrap; }
+  /* Filter bar: three dropdowns on the loaded rows, never a per-column filter row. */
+  .gw-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 10px; }
+  .gw-filter { display: flex; flex-direction: column; }
+  .gw-filter label { font-size: 11px; color: #6c757d; margin: 0 0 2px 0; }
+  .gw-filter select { font-size: 12px; padding: 2px 6px; border: 1px solid #ced4da; border-radius: 3px;
+                      background: #fff; min-width: 150px; }
+  /* The table is far wider than the window. The box is capped to the content
+     area so the *table* scrolls sideways inside it and the page does not: a
+     plain overflow-x on a box that grows with the table gives no bar at all.
+     Same idea as `.table-scroll-container` on Mean Values, without its sticky
+     columns or its fixed bottom bar. */
+  .gw-table-scroll {
+    margin: 0 20px 30px 20px;
+    width: auto;
+    max-width: calc(100vw - 40px);
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: calc(100vh - 260px);
+    scrollbar-width: auto;
+    scrollbar-color: #888 #f1f1f1;
+  }
+  .gw-table-scroll::-webkit-scrollbar { height: 14px; width: 14px; }
+  .gw-table-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 7px; }
+  .gw-table-scroll::-webkit-scrollbar-thumb { background: #888; border-radius: 7px; }
+  .gw-table-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
+  #gwTable { font-size: 11px; white-space: nowrap; width: auto; max-width: none; margin-bottom: 0; }
   #gwTable thead tr.gw-groups th { background: #eef1f4; text-align: center; font-weight: 600; }
   #gwTable td.gw-num { text-align: right; font-variant-numeric: tabular-nums; }
   #gwTable td.gw-note { white-space: normal; min-width: 220px; color: #6c757d; }
   .gw-kind { font-weight: 600; }
   .gw-kind-unknown { color: #adb5bd; font-weight: 400; }
+  /* Reading aid on the dTreturn / ΔCOP cells, not a pass/fail. */
+  .gw-red { color: #c92a2a; font-weight: 600; }
+  .gw-amber { color: #e8590c; }
+  .gw-green { color: #2b8a3e; }
+  .gw-na { color: #adb5bd; cursor: help; }
 </style>
 {% endblock %}
 
@@ -24,51 +53,156 @@
   <p class="gw-help mb-2">
     Read-only check of the guideline clocks <strong>saved</strong> on Cycle Extract: the stored D / S, H,
     equilibrium and evaluation times beside the entry's stored Tsup, Q, P and COP and the same four on the
-    evaluation window. Unsaved proposals do not appear here — save them on Cycle Extract first.
-    Nothing is read until you click one of the buttons below.
+    evaluation window. After those means: <strong>H / eq / eval</strong> individual
+    <strong>DB %</strong>, <strong>WB %</strong>, <strong>flow %</strong> and
+    <strong>dTreturn %</strong> (Interval H bands on each saved window),
+    <strong>D</strong> and <strong>S</strong> individual % (one number per interval
+    on the union of saved spans), and
+    <strong>eval ΔCOP</strong> (first against last slice of the saved evaluation window).
+    After those, <strong>H / D / S mean deviations</strong>: one arithmetic mean per interval
+    against its setpoint, in <strong>K</strong> (or <strong>% of set</strong> for flow) with the
+    draft mean bands — a different quantity from the individual %, so H mean DB is ±0.3 K where
+    H individual DB is ±1 K. Full-cycle mean Tsup, Tmean and Q stay on the Deviations page.
+    Tsup cells are means in °C, not a sample share.
+    Unsaved proposals do not appear here — save them on Cycle Extract first.
+  </p>
+  <p class="gw-help mb-2">
+    Every number on this page comes out of the <strong>database</strong>. The interval scores are
+    computed once, when the clocks are <strong>saved</strong> on Cycle Extract, and stored beside them:
+    no Plotdaten file is opened here, so loading is quick and leaving the page does not throw the table
+    away. A row whose scores are not stored — clocks saved before this, or clocks that have changed
+    since — keeps its clock times and shows <em>n/a</em> in the score cells, never a 0 and never an old
+    percentage. <strong>Compute missing scores</strong> fills exactly those rows, file by file; it
+    writes no clocks and never starts on its own.
+  </p>
+  <p class="gw-help mb-2">
+    <strong>#</strong> is the entry's position in the open database — the same number it has on
+    <strong>Mean Values</strong> and <strong>Deviations</strong>, so the three pages line up. The
+    three filters below <em>hide</em> rows; they never renumber <strong>#</strong>, never reload and
+    never open a Plotdaten file. <strong>Download CSV</strong> writes the rows you can see.
   </p>
   <button type="button" class="btn btn-sm btn-primary" id="gwLoadSelectedBtn" onclick="gwLoadSelected()"
           {% if not preselected_rowids %}style="display:none;"{% endif %}>
     <i class="fas fa-check-square"></i> Load the {{ preselected_rowids|length }} selected row(s)
   </button>
-  <button type="button" class="btn btn-sm btn-outline-primary" id="gwLoadAllBtn" onclick="gwLoadAll()">
-    <i class="fas fa-database"></i> Load all entries in the open database
-  </button>
   <button type="button" class="btn btn-sm btn-outline-secondary" id="gwExportBtn" onclick="gwExport()" disabled>
     <i class="fas fa-file-csv"></i> Download CSV
   </button>
+  <button type="button" class="btn btn-sm btn-outline-warning" id="gwComputeBtn"
+          onclick="gwOpenComputeConfirm()"
+          title="Reads each Plotdaten file once and stores the interval scores of the parents that have saved clocks but none. Writes no clocks.">
+    <i class="fas fa-calculator"></i> Compute missing scores
+  </button>
+
+  <!-- Three filters on the rows already in the browser. They hide rows; they do
+       not renumber `#`, do not reload, and never open a Plotdaten file. -->
+  <div class="gw-filters">
+    <div class="gw-filter">
+      <label for="gwFilterKind">Kind</label>
+      <select id="gwFilterKind" onchange="gwApplyFilters()">
+        <option value="">All</option>
+        <option value="defrost">defrost</option>
+        <option value="on_off">on–off</option>
+        <option value="continuous">continuous</option>
+        <option value="unknown">unknown</option>
+      </select>
+    </div>
+    <div class="gw-filter">
+      <label for="gwFilterCop">COP dataset</label>
+      <select id="gwFilterCop" onchange="gwApplyFilters()">
+        <option value="">All</option>
+        <option value="YES">YES</option>
+        <option value="NO">NO</option>
+      </select>
+    </div>
+    <div class="gw-filter">
+      <label for="gwFilterClocks">Clocks</label>
+      <select id="gwFilterClocks" onchange="gwApplyFilters()">
+        <option value="">All</option>
+        <option value="with">with saved clocks</option>
+        <option value="without">no saved clocks</option>
+      </select>
+    </div>
+    <div class="gw-filter">
+      <label>&nbsp;</label>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="gwClearFiltersBtn"
+              onclick="gwClearFilters()">Clear filters</button>
+    </div>
+  </div>
+
   <div class="gw-status" id="gwStatus">
     {% if preselected_rowids %}
       {{ preselected_rowids|length }} row(s) came from Mean Values. Loading…
     {% else %}
-      Nothing loaded. Tick rows on Mean Values and use <em>Guideline windows</em>, or load the whole database.
+      Reading the stored clocks and scores of the open database…
     {% endif %}
   </div>
 </div>
 
-<div class="gw-table-wrap">
+<div class="gw-table-scroll" id="gwTableScroll">
   <table class="table table-sm table-bordered table-hover" id="gwTable" style="display:none;">
     <thead>
       <tr class="gw-groups">
-        <th colspan="9">Entry</th>
+        <th colspan="10">Entry</th>
         <th colspan="8">D / S spans</th>
         <th colspan="6">H, equilibrium, evaluation</th>
         <th colspan="4">Entry means</th>
         <th colspan="4">Evaluation window means</th>
+        <th colspan="12" id="gwIntervalGroup">H / eq / eval individual % (Interval H)</th>
+        <th colspan="2" id="gwDGroup">D individual %</th>
+        <th colspan="4" id="gwSGroup">S individual %</th>
+        <th colspan="5" id="gwHMeanGroup">H mean deviation (K / % of set)</th>
+        <th colspan="2" id="gwDMeanGroup">D mean deviation (K)</th>
+        <th colspan="3" id="gwSMeanGroup">S mean deviation (K / % of set)</th>
+        <th rowspan="2" id="gwHdrDcop">eval ΔCOP %</th>
         <th rowspan="2">Note</th>
       </tr>
       <tr>
-        <th>rowid</th><th>File</th><th>Data set</th><th>Test</th><th>Profile</th><th>HP</th>
+        <th id="gwHdrIndex">#</th><th>File</th><th>Data set</th><th>Test</th><th>Profile</th><th>HP</th>
+        <th id="gwHdrCop">COP dataset</th>
         <th>Start s</th><th>End s</th><th>Kind</th>
         <th>D1 start</th><th>D1 end</th><th>D2 start</th><th>D2 end</th>
         <th>S1 start</th><th>S1 end</th><th>S2 start</th><th>S2 end</th>
         <th>H start</th><th>H end</th><th>eq start</th><th>eq end</th><th>eval start</th><th>eval end</th>
         <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
         <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
+        <th id="gwHdrHDb">H DB %</th><th id="gwHdrEqDb">eq DB %</th><th id="gwHdrEvalDb">eval DB %</th>
+        <th id="gwHdrHWb">H WB %</th><th id="gwHdrEqWb">eq WB %</th><th id="gwHdrEvalWb">eval WB %</th>
+        <th id="gwHdrHFl">H flow %</th><th id="gwHdrEqFl">eq flow %</th><th id="gwHdrEvalFl">eval flow %</th>
+        <th id="gwHdrHDt">H dTreturn %</th><th id="gwHdrEqDt">eq dTreturn %</th><th id="gwHdrEvalDt">eval dTreturn %</th>
+        <th id="gwHdrDDb">D DB %</th><th id="gwHdrDDt">D dTreturn %</th>
+        <th id="gwHdrSDb">S DB %</th><th id="gwHdrSWb">S WB %</th>
+        <th id="gwHdrSFl">S flow %</th><th id="gwHdrSDt">S dTreturn %</th>
+        <th id="gwHdrHMeanDb">H mean DB K</th><th id="gwHdrHMeanWb">H mean WB K</th>
+        <th id="gwHdrHMeanTs">H mean Tsup K</th><th id="gwHdrHMeanDt">H mean dTreturn K</th>
+        <th id="gwHdrHMeanFl">H mean flow % of set</th>
+        <th id="gwHdrDMeanDb">D mean DB K</th><th id="gwHdrDMeanWb">D mean WB K</th>
+        <th id="gwHdrSMeanDb">S mean DB K</th><th id="gwHdrSMeanWb">S mean WB K</th>
+        <th id="gwHdrSMeanFl">S mean flow % of set</th>
       </tr>
     </thead>
     <tbody id="gwBody"></tbody>
   </table>
+</div>
+
+<!-- Confirm for the score backfill. Nothing is read from Plotdaten before the
+     analyst presses the button inside this modal. -->
+<div class="modal fade" id="gwComputeModal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h5 class="modal-title">Compute missing scores</h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body"><div id="gwComputeModalBody"></div></div>
+      <div class="modal-footer py-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm btn-warning" id="gwComputeConfirmBtn">Compute</button>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -76,8 +210,22 @@
 <script type="application/json" id="gwPreselected">{{ (preselected_rowids or []) | tojson }}</script>
 <script>
   var _gwPreselected = JSON.parse(document.getElementById('gwPreselected').textContent || '[]');
-  var _gwSelector = null;        // the rowids of the table on screen (null = whole database)
+  var _gwSelector = null;        // the rowids the table was loaded with (null = whole database)
   var _gwLoaded = false;
+  var _gwRows = [];              // the loaded set — what "of Y rows" counts
+  var _gwVisible = [];           // what the three filters left on screen
+  var _gwMessage = '';           // the server's "N entries — …" sentence
+  var _gwMeta = { dtreturn_band_k: 0.5, delta_cop_pct: 2.5, delta_cop_slice_min: 5,
+                  dtreturn_pct_red: 2, dtreturn_pct_yellow: 1,
+                  db_pct_red: 5, db_pct_yellow: 1, wb_pct_red: 5, wb_pct_yellow: 1,
+                  flow_pct_red: 5, flow_pct_yellow: 1,
+                  d_db_k: 5, d_dtreturn_k: 2,
+                  s_db_k: 2, s_wb_k: 2, s_flow_pct_band: 2.5, s_dtreturn_k: 1,
+                  // Mean half-widths — a different quantity from the % above.
+                  mean_h_db_k: 0.3, mean_h_wb_k: 0.4, mean_h_tsup_k: 0.5,
+                  mean_h_dtreturn_k: 0.3, mean_h_flow_pct: 1,
+                  mean_d_db_k: 1.5, mean_d_wb_k: 1,
+                  mean_s_db_k: 0.6, mean_s_wb_k: 0.6, mean_s_flow_pct: 2.5 };
 
   function gwStatus(text) { document.getElementById('gwStatus').textContent = text; }
 
@@ -100,11 +248,103 @@
     return (v === null || v === undefined) ? '' : Number(v).toFixed(digits);
   }
 
-  function gwCell(text, cls) {
+  function gwCell(text, cls, title) {
     var td = document.createElement('td');
     if (cls) { td.className = cls; }
     td.textContent = text;
+    if (title) { td.title = title; }
     return td;
+  }
+
+  function gwNa(reason) {
+    return gwCell('n/a', 'gw-num gw-na', reason || '');
+  }
+
+  function gwPctClass(v, metric) {
+    var red = _gwMeta[(metric || 'dtreturn') + '_pct_red'];
+    var yellow = _gwMeta[(metric || 'dtreturn') + '_pct_yellow'];
+    if (v > red) { return 'gw-num gw-red'; }
+    if (v > yellow) { return 'gw-num gw-amber'; }
+    return 'gw-num gw-green';
+  }
+
+  function gwPctCell(v, reason, metric) {
+    if (v === null || v === undefined) { return gwNa(reason); }
+    return gwCell(Number(v).toFixed(2), gwPctClass(v, metric));
+  }
+
+  function gwDeltaCell(v, reason) {
+    if (v === null || v === undefined) { return gwNa(reason); }
+    var n = Number(v);
+    var cls = (Math.abs(n) > _gwMeta.delta_cop_pct) ? 'gw-num gw-red' : 'gw-num gw-green';
+    var text = (n >= 0 ? '+' : '') + n.toFixed(2);
+    return gwCell(text, cls);
+  }
+
+  /** One signed mean deviation of an interval against its setpoint.
+   *  Colour is a reading aid when the mean leaves its mean band, not a pass/fail.
+   *  A number's hover names the band it was read against; n/a holds the reason. */
+  function gwMeanCell(v, reason, band, unit) {
+    if (v === null || v === undefined) { return gwNa(reason); }
+    var n = Number(v);
+    var cls = (band != null && Math.abs(n) > band) ? 'gw-num gw-red' : 'gw-num gw-green';
+    var text = (n >= 0 ? '+' : '') + n.toFixed(2);
+    var title = (band == null) ? 'mean of the interval minus its setpoint'
+                               : ('mean of the interval minus its setpoint, band ±' + band + ' ' + unit);
+    return gwCell(text, cls, title);
+  }
+
+  function gwApplyMeta(d) {
+    ['dtreturn_band_k', 'delta_cop_pct', 'delta_cop_slice_min',
+     'dtreturn_pct_red', 'dtreturn_pct_yellow',
+     'db_pct_red', 'db_pct_yellow', 'wb_pct_red', 'wb_pct_yellow',
+     'flow_pct_red', 'flow_pct_yellow',
+     'd_db_k', 'd_dtreturn_k', 's_db_k', 's_wb_k', 's_flow_pct_band', 's_dtreturn_k',
+     'mean_h_db_k', 'mean_h_wb_k', 'mean_h_tsup_k', 'mean_h_dtreturn_k', 'mean_h_flow_pct',
+     'mean_d_db_k', 'mean_d_wb_k', 'mean_s_db_k', 'mean_s_wb_k', 'mean_s_flow_pct'
+    ].forEach(function (k) {
+      if (d[k] != null) { _gwMeta[k] = d[k]; }
+    });
+    var band = _gwMeta.dtreturn_band_k;
+    var slice = _gwMeta.delta_cop_slice_min;
+    var limit = _gwMeta.delta_cop_pct;
+    function setTitle(id, text) {
+      var el = document.getElementById(id);
+      if (el) { el.title = text; }
+    }
+    setTitle('gwHdrHDb', 'Share of samples in the saved H window whose dry-bulb is outside Interval H ±1 K');
+    setTitle('gwHdrEqDb', 'Same dry-bulb check on the saved equilibrium window');
+    setTitle('gwHdrEvalDb', 'Same dry-bulb check on the saved evaluation window');
+    setTitle('gwHdrHWb', 'Share of samples in the saved H window whose wet-bulb is outside Interval H ±1 K');
+    setTitle('gwHdrEqWb', 'Same wet-bulb check on the saved equilibrium window');
+    setTitle('gwHdrEvalWb', 'Same wet-bulb check on the saved evaluation window');
+    setTitle('gwHdrHFl', 'Share of samples in the saved H window whose flow is outside Interval H ±2.5 % (fixed flow only)');
+    setTitle('gwHdrEqFl', 'Same flow check on the saved equilibrium window');
+    setTitle('gwHdrEvalFl', 'Same flow check on the saved evaluation window');
+    setTitle('gwHdrHDt', 'Share of samples in the saved H window whose |T_return,emu − T_return,calc| exceeds ±' + band + ' K');
+    setTitle('gwHdrEqDt', 'Same return check on the saved equilibrium window (±' + band + ' K)');
+    setTitle('gwHdrEvalDt', 'Same return check on the saved evaluation window (±' + band + ' K)');
+    setTitle('gwHdrDcop', 'First ' + slice + ' min against last ' + slice + ' min of the saved evaluation window (limit ' + limit + ' %)');
+    setTitle('gwHdrDDb', 'Union of saved D spans: dry-bulb outside ±' + _gwMeta.d_db_k + ' K (not Interval H ±1 K)');
+    setTitle('gwHdrDDt', 'Union of saved D spans: |dTreturn| outside ±' + _gwMeta.d_dtreturn_k + ' K');
+    setTitle('gwHdrSDb', 'Union of saved S spans: dry-bulb outside ±' + _gwMeta.s_db_k + ' K');
+    setTitle('gwHdrSWb', 'Union of saved S spans: wet-bulb outside ±' + _gwMeta.s_wb_k + ' K');
+    setTitle('gwHdrSFl', 'Union of saved S spans: flow outside ±' + _gwMeta.s_flow_pct_band + ' % (fixed flow only)');
+    setTitle('gwHdrSDt', 'Union of saved S spans: |dTreturn| outside ±' + _gwMeta.s_dtreturn_k + ' K');
+    // Mean columns: one arithmetic mean per interval, not a share of samples.
+    setTitle('gwHMeanGroup', 'Arithmetic mean of the saved H window minus its setpoint — one number per quantity, not a sample share');
+    setTitle('gwDMeanGroup', 'Arithmetic mean over the union of the saved D spans minus its setpoint');
+    setTitle('gwSMeanGroup', 'Arithmetic mean over the union of the saved S spans minus its setpoint');
+    setTitle('gwHdrHMeanDb', 'Saved H window: mean dry-bulb minus setpoint, band ±' + _gwMeta.mean_h_db_k + ' K (not the individual ±1 K and not the parent mean 0.6 K)');
+    setTitle('gwHdrHMeanWb', 'Saved H window: mean wet-bulb minus setpoint, band ±' + _gwMeta.mean_h_wb_k + ' K');
+    setTitle('gwHdrHMeanTs', 'Saved H window: mean supply temperature minus setpoint, band ±' + _gwMeta.mean_h_tsup_k + ' K (there is no individual Tsup band)');
+    setTitle('gwHdrHMeanDt', 'Saved H window: mean of T_return,emu − T_return,calc against 0, band ±' + _gwMeta.mean_h_dtreturn_k + ' K');
+    setTitle('gwHdrHMeanFl', 'Saved H window: mean flow against set, band ±' + _gwMeta.mean_h_flow_pct + ' % of set (fixed flow only)');
+    setTitle('gwHdrDMeanDb', 'Union of saved D spans: mean dry-bulb minus setpoint, band ±' + _gwMeta.mean_d_db_k + ' K');
+    setTitle('gwHdrDMeanWb', 'Union of saved D spans: mean wet-bulb minus setpoint, band ±' + _gwMeta.mean_d_wb_k + ' K');
+    setTitle('gwHdrSMeanDb', 'Union of saved S spans: mean dry-bulb minus setpoint, band ±' + _gwMeta.mean_s_db_k + ' K');
+    setTitle('gwHdrSMeanWb', 'Union of saved S spans: mean wet-bulb minus setpoint, band ±' + _gwMeta.mean_s_wb_k + ' K');
+    setTitle('gwHdrSMeanFl', 'Union of saved S spans: mean flow against set, band ±' + _gwMeta.mean_s_flow_pct + ' % of set (fixed flow only)');
   }
 
   function gwRenderRows(rows) {
@@ -112,12 +352,24 @@
     body.innerHTML = '';
     rows.forEach(function (r) {
       var tr = document.createElement('tr');
-      tr.appendChild(gwCell(r.rowid, 'gw-num'));
+      var reasons = r.dtreturn_reasons || {};
+      var dbR = r.db_reasons || {};
+      var wbR = r.wb_reasons || {};
+      var flR = r.flow_reasons || {};
+      var dR = r.d_reasons || {};
+      var sR = r.s_reasons || {};
+      var hmR = r.h_mean_reasons || {};
+      var dmR = r.d_mean_reasons || {};
+      var smR = r.s_mean_reasons || {};
+      // `#`, not rowid: the same number this entry has on Mean Values and
+      // Deviations. Filters hide rows, so it never renumbers.
+      tr.appendChild(gwCell(r.index === null || r.index === undefined ? '' : r.index, 'gw-num'));
       tr.appendChild(gwCell(r.file_name || ''));
       tr.appendChild(gwCell(r.data_set === null || r.data_set === undefined ? '' : r.data_set, 'gw-num'));
       tr.appendChild(gwCell(r.test_cond || ''));
       tr.appendChild(gwCell(r.profile_id || ''));
       tr.appendChild(gwCell(r.hp_id === null || r.hp_id === undefined ? '' : r.hp_id));
+      tr.appendChild(gwCell(r.cop_dataset || ''));
       tr.appendChild(gwCell(gwSeconds(r.start_time), 'gw-num'));
       tr.appendChild(gwCell(gwSeconds(r.end_time), 'gw-num'));
       tr.appendChild(gwCell(r.kind === 'on_off' ? 'on–off' : r.kind,
@@ -134,10 +386,90 @@
       tr.appendChild(gwCell(gwValue(r.eval_q, 3), 'gw-num'));
       tr.appendChild(gwCell(gwValue(r.eval_p, 3), 'gw-num'));
       tr.appendChild(gwCell(gwValue(r.eval_cop, 3), 'gw-num'));
+      tr.appendChild(gwPctCell(r.h_db_pct, dbR.h, 'db'));
+      tr.appendChild(gwPctCell(r.eq_db_pct, dbR.eq, 'db'));
+      tr.appendChild(gwPctCell(r.eval_db_pct, dbR.eval, 'db'));
+      tr.appendChild(gwPctCell(r.h_wb_pct, wbR.h, 'wb'));
+      tr.appendChild(gwPctCell(r.eq_wb_pct, wbR.eq, 'wb'));
+      tr.appendChild(gwPctCell(r.eval_wb_pct, wbR.eval, 'wb'));
+      tr.appendChild(gwPctCell(r.h_flow_pct, flR.h, 'flow'));
+      tr.appendChild(gwPctCell(r.eq_flow_pct, flR.eq, 'flow'));
+      tr.appendChild(gwPctCell(r.eval_flow_pct, flR.eval, 'flow'));
+      tr.appendChild(gwPctCell(r.h_dtreturn_pct, reasons.h, 'dtreturn'));
+      tr.appendChild(gwPctCell(r.eq_dtreturn_pct, reasons.eq, 'dtreturn'));
+      tr.appendChild(gwPctCell(r.eval_dtreturn_pct, reasons.eval, 'dtreturn'));
+      tr.appendChild(gwPctCell(r.d_db_pct, dR.db, 'db'));
+      tr.appendChild(gwPctCell(r.d_dtreturn_pct, dR.dtreturn, 'dtreturn'));
+      tr.appendChild(gwPctCell(r.s_db_pct, sR.db, 'db'));
+      tr.appendChild(gwPctCell(r.s_wb_pct, sR.wb, 'wb'));
+      tr.appendChild(gwPctCell(r.s_flow_pct, sR.flow, 'flow'));
+      tr.appendChild(gwPctCell(r.s_dtreturn_pct, sR.dtreturn, 'dtreturn'));
+      tr.appendChild(gwMeanCell(r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K'));
+      tr.appendChild(gwMeanCell(r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K'));
+      tr.appendChild(gwMeanCell(r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K'));
+      tr.appendChild(gwMeanCell(r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K'));
+      tr.appendChild(gwMeanCell(r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set'));
+      tr.appendChild(gwMeanCell(r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K'));
+      tr.appendChild(gwMeanCell(r.d_mean_wb_k, dmR.wb, _gwMeta.mean_d_wb_k, 'K'));
+      tr.appendChild(gwMeanCell(r.s_mean_db_k, smR.db, _gwMeta.mean_s_db_k, 'K'));
+      tr.appendChild(gwMeanCell(r.s_mean_wb_k, smR.wb, _gwMeta.mean_s_wb_k, 'K'));
+      tr.appendChild(gwMeanCell(r.s_mean_flow_pct, smR.flow, _gwMeta.mean_s_flow_pct, '% of set'));
+      tr.appendChild(gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason));
       tr.appendChild(gwCell(r.note || '', 'gw-note'));
       body.appendChild(tr);
     });
     document.getElementById('gwTable').style.display = rows.length ? '' : 'none';
+  }
+
+  /* ───────────────────────────────────────────────────────────────────────
+     The three filters.
+
+     They run in the browser on `_gwRows`, the array the page already has.
+     Nothing is fetched, no workbook is opened and Compute missing scores is
+     never reached from here. Rows are hidden, not renumbered — `#` is the
+     whole-database position and stays with its entry.
+     ─────────────────────────────────────────────────────────────────────── */
+
+  function gwFilterValues() {
+    return {
+      kind: (document.getElementById('gwFilterKind') || {}).value || '',
+      cop: (document.getElementById('gwFilterCop') || {}).value || '',
+      clocks: (document.getElementById('gwFilterClocks') || {}).value || ''
+    };
+  }
+
+  /** AND of the three dropdowns. `with saved clocks` is kind !== 'unknown',
+   *  which today is exactly "has saved guideline D/S/H periods". */
+  function gwFilterRows(rows) {
+    var f = gwFilterValues();
+    return rows.filter(function (r) {
+      if (f.kind && (r.kind || 'unknown') !== f.kind) { return false; }
+      if (f.cop) {
+        // An empty cell is not a NO — it only matches All.
+        if (String(r.cop_dataset || '').toUpperCase() !== f.cop) { return false; }
+      }
+      if (f.clocks) {
+        var hasClocks = (r.kind || 'unknown') !== 'unknown';
+        if (f.clocks === 'with' && !hasClocks) { return false; }
+        if (f.clocks === 'without' && hasClocks) { return false; }
+      }
+      return true;
+    });
+  }
+
+  function gwApplyFilters() {
+    _gwVisible = gwFilterRows(_gwRows);
+    gwRenderRows(_gwVisible);
+    document.getElementById('gwExportBtn').disabled = !_gwLoaded || _gwVisible.length === 0;
+    gwStatus(_gwMessage + ' Showing ' + _gwVisible.length + ' of ' + _gwRows.length + ' rows.');
+  }
+
+  function gwClearFilters() {
+    ['gwFilterKind', 'gwFilterCop', 'gwFilterClocks'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) { el.value = ''; }
+    });
+    gwApplyFilters();
   }
 
   async function gwLoad(rowids, what) {
@@ -155,9 +487,10 @@
     }
     _gwSelector = rowids;
     _gwLoaded = true;
-    gwRenderRows(d.rows || []);
-    document.getElementById('gwExportBtn').disabled = (d.rows || []).length === 0;
-    gwStatus(d.message || ((d.rows || []).length + ' entries.'));
+    _gwRows = d.rows || [];
+    _gwMessage = d.message || (_gwRows.length + ' entries.');
+    gwApplyMeta(d);
+    gwApplyFilters();            // keeps the dropdowns the analyst had set
   }
 
   function gwLoadSelected() {
@@ -165,11 +498,14 @@
     gwLoad(_gwPreselected, 'the ' + _gwPreselected.length + ' selected row(s)');
   }
 
-  function gwLoadAll() {
-    gwLoad(null, 'every entry in the open database');
+  /** Whatever set is on screen, reloaded from SQLite. */
+  function gwReload() {
+    return gwLoad(_gwSelector, _gwSelector ? ('the ' + _gwSelector.length + ' selected row(s)')
+                                           : 'every entry in the open database');
   }
 
-  /** CSV of the table on screen: a form post, so the browser handles the download. */
+  /** CSV of the table on screen — the **filtered** rows, in the order shown.
+   *  A form post, so the browser handles the download. */
   function gwExport() {
     if (!_gwLoaded) { return; }
     var form = document.createElement('form');
@@ -178,14 +514,144 @@
     var input = document.createElement('input');
     input.type = 'hidden';
     input.name = 'rowids';
-    input.value = _gwSelector === null ? '' : JSON.stringify(_gwSelector);
+    input.value = JSON.stringify(_gwVisible.map(function (r) { return r.rowid; }));
     form.appendChild(input);
     document.body.appendChild(form);
     form.submit();
     document.body.removeChild(form);
   }
 
+  /* ───────────────────────────────────────────────────────────────────────
+     Compute missing scores.
+
+     The explicit backfill for parents that have saved clocks but no stored
+     interval scores (clocks saved before scores were stored). This is the
+     only control on this page that opens a
+     Plotdaten file. It runs one file per request so the analyst sees
+     "file i of n" and one unreadable sheet stops that file only, and it writes
+     the score cache: no proposal, no clock, no parent column.
+
+     It never starts on page load, the page's own auto-load never becomes it,
+     and neither do the three filters: a row with no stored scores simply shows
+     n/a until this has run.
+     ─────────────────────────────────────────────────────────────────────── */
+  var _gwComputeBusy = false;
+
+  function gwEsc(text) {
+    var d = document.createElement('div');
+    d.textContent = (text === null || text === undefined) ? '' : String(text);
+    return d.innerHTML;
+  }
+
+  function gwComputeButtons(disabled) {
+    ['gwLoadSelectedBtn', 'gwExportBtn', 'gwComputeBtn', 'gwClearFiltersBtn',
+     'gwFilterKind', 'gwFilterCop', 'gwFilterClocks'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) { b.disabled = !!disabled; }
+    });
+    if (!disabled) {
+      document.getElementById('gwExportBtn').disabled = !_gwLoaded || !_gwVisible.length;
+    }
+  }
+
+  /** The cheap list behind the confirm: clocks and cache rows only, no workbook. */
+  async function gwOpenComputeConfirm() {
+    if (_gwComputeBusy) { return; }
+    gwStatus('Counting the entries whose scores are not stored yet…');
+    var resp = await fetch('/api/guideline_windows/score_files', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    });
+    var d = await gwReadJson(resp);
+    if (!d.success) {
+      gwStatus('Could not read the file list: ' + (d.message || 'failed'));
+      return;
+    }
+    var files = (d.files || []).filter(function (f) { return f.n_missing > 0; });
+    var body = document.getElementById('gwComputeModalBody');
+    var btn = document.getElementById('gwComputeConfirmBtn');
+    var head = '<p>Database <code>' + gwEsc(d.database || '') + '</code> holds <b>'
+      + d.n_with_clocks + '</b> parent cycle(s) with saved guideline clocks. <b>'
+      + d.n_cached + '</b> already have stored scores.</p>';
+
+    if (!d.n_missing) {
+      body.innerHTML = head + '<p><b>Nothing to compute.</b> Every parent with saved clocks already '
+        + 'has stored scores at the current clocks and interval bands.</p>';
+      btn.style.display = 'none';
+      $('#gwComputeModal').modal('show');
+      gwStatus('Nothing to compute — every parent with saved clocks already has stored scores.');
+      return;
+    }
+
+    var list = files.slice(0, 12).map(function (f) {
+      return '<tr><td><code>' + gwEsc(f.file_name) + '</code></td><td class="text-right">'
+        + f.n_missing + '</td><td class="text-right">' + f.n_cached + '</td></tr>';
+    }).join('');
+    if (files.length > 12) {
+      list += '<tr><td colspan="3" class="gw-help">… and ' + (files.length - 12) + ' more file(s)</td></tr>';
+    }
+    body.innerHTML = head
+      + '<p><b>' + d.n_missing + '</b> parent cycle(s) in <b>' + files.length + '</b> file(s) have '
+      + 'clocks but no stored scores. Each of those files is opened <b>once</b> and its scores are '
+      + 'stored, so this page never has to read it again.</p>'
+      + '<div class="table-responsive" style="max-height:220px; overflow-y:auto;">'
+      + '<table class="table table-sm table-striped mb-0"><thead class="thead-light">'
+      + '<tr><th>file</th><th class="text-right">to compute</th><th class="text-right">already stored</th></tr>'
+      + '</thead><tbody>' + list + '</tbody></table></div>'
+      + '<p class="gw-help mt-2">This reads Plotdaten and can take a while on a large list. It writes '
+      + 'the stored scores only — it does <b>not</b> propose or save clocks, and it does not change the '
+      + 'parent Deviations. Clocks are saved on <b>Cycle Extract</b>.</p>';
+    btn.style.display = '';
+    btn.textContent = 'Compute scores for ' + files.length + ' file(s)';
+    btn.onclick = function () { $('#gwComputeModal').modal('hide'); gwRunCompute(files); };
+    $('#gwComputeModal').modal('show');
+    gwStatus('Confirm to compute the missing scores of ' + d.n_missing + ' entry(s) in '
+             + files.length + ' file(s).');
+  }
+
+  /** One request per file, so progress exists and a bad sheet is one file's problem. */
+  async function gwRunCompute(files) {
+    _gwComputeBusy = true;
+    gwComputeButtons(true);
+    var computed = 0, failed = [];
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      gwStatus('File ' + (i + 1) + ' of ' + files.length + ': ' + f.file_name
+        + ' — working. Stored so far: ' + computed
+        + (failed.length ? (', failed ' + failed.length) : '')
+        + '. This line updates when the file finishes (a large sheet can take a minute).');
+      await new Promise(function (resolve) { setTimeout(resolve, 0); });
+      var d;
+      try {
+        var resp = await fetch('/api/guideline_windows/compute_scores', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_name: f.file_name })
+        });
+        d = await gwReadJson(resp);
+      } catch (err) {
+        d = { success: false, message: String(err) };
+      }
+      if (!d.success) {
+        failed.push(f.file_name + ' — ' + (d.message || 'failed'));
+      } else {
+        computed += d.computed || 0;
+        (d.failed || []).forEach(function (why) { failed.push(why); });
+      }
+    }
+    _gwComputeBusy = false;
+    gwComputeButtons(false);
+    var msg = 'Done: scores stored for ' + computed + ' entry(s) over ' + files.length + ' file(s).';
+    if (failed.length) {
+      msg += ' ' + failed.length + ' file(s) failed: ' + failed.slice(0, 5).join('; ')
+           + (failed.length > 5 ? '; …' : '') + '.';
+    }
+    gwStatus(msg + ' Reloading the table…');
+    await gwReload();
+  }
+
   // Arriving from the Mean Values toolbar is itself the analyst's request, so load those rows.
-  if (_gwPreselected.length) { gwLoadSelected(); }
+  // With no selection the page loads every parent in the open database itself: since the score
+  // cache that is a SQLite read which opens no workbook, so there is nothing for a Load-all
+  // button to do and coming back to this page costs nothing.
+  if (_gwPreselected.length) { gwLoadSelected(); } else { gwLoad(null, 'every entry in the open database'); }
 </script>
 {% endblock %}

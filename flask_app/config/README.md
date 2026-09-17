@@ -8,6 +8,7 @@ JSON under this folder is the source of truth for guideline setpoints and unit p
 | `unit_types.json` | Yes | Capability flags per unit class |
 | `checks.json` | Yes | Which checks apply for which capabilities |
 | `cycle_periods.json` | Yes | Guideline clock lengths: `buffer_min`, `eq_min`, `eval_min` |
+| `interval_deviations.json` | Yes | Deviations per guideline interval: `delta_cop_pct`, `delta_cop_slice_min`, Interval H/eq/eval bands, D/S individual half-widths, and the `mean_*` half-widths scored as the H/D/S mean columns on Guideline Windows. Do not set D/S `"bands": "permissible_deviations"` |
 | `profiles/examples/` | Yes | Fictitious schema examples |
 | `profiles/shared/` | Yes | Public HPT placeholders (no private BAM data) |
 | `profiles/local/` | **No** (gitignored) | Real BAM / lab unit profiles |

@@ -378,7 +378,7 @@
                 </div>
                 <form id="addUnitDesignForm" class="form-inline flex-wrap">
                     <label class="mr-2">Add unit:</label>
-                    <input type="text" id="new_profile_id" class="form-control form-control-sm mr-2" placeholder="profile id, e.g. BAM_HP4" style="width: 170px;">
+                    <input type="text" id="new_profile_id" class="form-control form-control-sm mr-2" placeholder="profile id, e.g. HPT_RRT1" style="width: 170px;">
                     <input type="text" id="new_display_name" class="form-control form-control-sm mr-2" placeholder="display name" style="width: 150px;">
                     <input type="text" inputmode="decimal" id="new_pdesign_kw" class="form-control form-control-sm mr-2" placeholder="Pdesign (kW)" style="width: 120px;">
                     <select id="new_flow_mode" class="form-control form-control-sm mr-2" style="width: 110px;">
@@ -533,7 +533,7 @@
                     <th>Mean DB Dev (K)</th>
                     <th>Mean WB Dev (K)</th>
                     <th>Mean Tsup Dev (K)</th>
-                    <th title="Cycle mean of T_mean_log minus the ecodesign Table 3 mean. Variable-flow tests only; band is a BAM lab proposal.">Mean Tmean Dev (K)</th>
+                    <th title="Cycle mean of T_mean_log minus the ecodesign Table 3 mean. Variable-flow tests only; the 0.5 K band is a working tolerance (ecodesign defines none).">Mean Tmean Dev (K)</th>
                     <th>Mean Q dev (kW)</th>
                     <th>Mean Q dev (%)</th>
                     <th>Mean flow dev (%)</th>
@@ -970,18 +970,18 @@
                     </td>
                     <td>
                         {% if entry.has_statistics %}
-                            <button class="btn btn-sm btn-primary btn-plot" 
-                                    onclick="plotDeviation('{{ entry.file_name }}', {{ entry.data_set }}, {{ entry.start_time }}, {{ entry.end_time }})">
+                            {# One button: DB/WB, Tsup, dTreturn and flow come back in the same modal.
+                               Arguments live on data-* so Jinja ['HP'] is not parsed as JavaScript. #}
+                            <button type="button" class="btn btn-sm btn-primary btn-plot"
+                                    data-file-name="{{ entry.file_name }}"
+                                    data-dataset="{{ entry.data_set }}"
+                                    data-start-time="{{ entry.start_time }}"
+                                    data-end-time="{{ entry.end_time }}"
+                                    data-rowid="{{ entry.rowid }}"
+                                    data-profile-id="{{ entry.profile_id or '' }}"
+                                    data-hp-id="{{ (entry.get(column_name_map['HP']) if column_name_map.get('HP') else '') or '' }}">
                                 <i class="fas fa-chart-line"></i> Plot
                             </button>
-                            {% if entry.flow_setpoint is not none and column_name_map.get('HP') %}
-                            <button class="btn btn-sm btn-info btn-plot mt-1 btn-plot-flow" 
-                                    data-file-name="{{ entry.file_name }}" data-dataset="{{ entry.data_set }}" 
-                                    data-start-time="{{ entry.start_time }}" data-end-time="{{ entry.end_time }}" 
-                                    data-hp-id="{{ entry.get(column_name_map['HP']) or '' }}">
-                                <i class="fas fa-tint"></i> Flow
-                            </button>
-                            {% endif %}
                         {% else %}
                             <span class="text-muted"><small>Calculate first</small></span>
                         {% endif %}
@@ -991,7 +991,18 @@
             </tbody>
         </table>
     </div>
-    
+
+    <p class="text-muted mt-3 mb-0">
+        The table above scores the <strong>whole entry</strong> (H+D or H+S).
+        Interval H / equilibrium / evaluation <strong>dTreturn %</strong>
+        (measured return minus the set return, ±0.5&nbsp;K) and evaluation <strong>ΔCOP</strong>
+        are on <a href="{{ url_for('guideline_windows') }}">Guideline Windows</a>,
+        as are the <strong>H / D / S mean</strong> deviations (K, or % of set for flow).
+        The full-cycle mean Tsup, Tmean and Q limits stay here.
+        The Tsup plot of an entry shades <strong>saved</strong> guideline D/S, H, equilibrium
+        and evaluation when those clocks exist (same colours as Cycle Extract period layers).
+    </p>
+
     <!-- Plot Modal -->
     <div class="modal fade plot-modal" id="plotModal" tabindex="-1" role="dialog">
         <div class="modal-dialog modal-lg" role="document">
@@ -1578,7 +1589,7 @@
         const aliases = ($('#new_hp_id_aliases').val() || '').trim();
         const patterns = ($('#new_filename_patterns').val() || '').trim();
         if (!profileId) {
-            showConfigAlert('danger', 'Please enter a profile id (e.g. BAM_HP4).');
+            showConfigAlert('danger', 'Please enter a profile id (e.g. HPT_RRT1).');
             return;
         }
         if (!aliases && !patterns) {
@@ -1621,9 +1632,23 @@
         });
     });
     
-    function plotDeviation(fileName, dataSet, startTime, endTime) {
+    $(document).on('click', '.btn-plot', function() {
+        var b = $(this);
+        plotDeviation(
+            b.attr('data-file-name'),
+            parseFloat(b.attr('data-dataset')),
+            parseFloat(b.attr('data-start-time')),
+            parseFloat(b.attr('data-end-time')),
+            parseInt(b.attr('data-rowid'), 10),
+            b.attr('data-profile-id') || '',
+            b.attr('data-hp-id') || ''
+        );
+    });
+
+    function plotDeviation(fileName, dataSet, startTime, endTime, rowid, profileId, hpId) {
         $('#plotModal').modal('show');
-        $('#plotModal').find('.modal-title').text('Permissible Deviation Plot');
+        $('#plotModal').find('.modal-title').text(
+            'Plot — ' + fileName + ' · dataset ' + dataSet);
         $('#plotModalBody').html(`
             <div class="text-center">
                 <div class="spinner-border" role="status">
@@ -1642,13 +1667,24 @@
                 file_name: fileName,
                 data_set: dataSet,
                 start_time: startTime,
-                end_time: endTime
+                end_time: endTime,
+                rowid: rowid,
+                profile_id: profileId || '',
+                hp_id: hpId || ''
             }),
             success: function(response) {
                 if (response.success) {
+                    // One figure per quantity: the trace is drawn once. The fill
+                    // is the stepped interval band where clocks are saved, and
+                    // the parent limits stay on it as dashed lines.
                     let plotHtml = '<div class="deviation-plots">';
-                    
-                    // DB/WB plot (air-source only; omitted for water-to-water)
+                    if (response.band_mode === 'interval') {
+                        plotHtml += '<p class="text-muted small mb-3"><i class="fas fa-info-circle"></i> Filled band = draft <em>interval individual</em> widths, stepped at the saved guideline clocks (DB \u00b15 / \u00b11 / \u00b12 K on D / H / S, dTreturn \u00b12 / \u00b10.5 / \u00b11 K, flow \u00b12.5 % on H and S). Dashed lines are the parent / full-cycle limits the Deviations table scores. Shading marks D/S, H, equilibrium and evaluation. Tsup is the mean \u00b10.5 K check and never steps.</p>';
+                    } else {
+                        plotHtml += '<p class="text-muted small mb-3"><i class="fas fa-info-circle"></i> Filled band = parent / full-cycle limits, the widths behind the Deviations table. Save guideline clocks on Cycle Extract to step the band by interval.</p>';
+                    }
+
+                    // 1. Outdoor DB/WB (air-source only; omitted for water-to-water)
                     if (response.image_dbwb) {
                         plotHtml += '<div class="mb-4">';
                         plotHtml += '<h5 class="mb-3">DB/WB Temperature Deviation</h5>';
@@ -1659,31 +1695,43 @@
                         plotHtml += '<i class="fas fa-info-circle"></i> DB/WB plot not available (outdoor air not measured or not applicable for this unit).';
                         plotHtml += '</div>';
                     }
-                    
-                    // Tsup plot (if available)
+
+                    // 2. Tsup - the mean check, never a stepped sample band
                     if (response.image_tsup) {
                         plotHtml += '<div class="mb-4">';
-                        plotHtml += '<h5 class="mb-3">Tsup Temperature Deviation</h5>';
-                        plotHtml += `<img src="${response.image_tsup}" alt="Tsup Deviation Plot" class="img-fluid" style="max-width: 100%;">`;
+                        plotHtml += '<h5 class="mb-2">Tsup (mean)</h5>';
+                        plotHtml += `<img src="${response.image_tsup}" alt="Tsup mean check" class="img-fluid" style="width:100%; max-width:100%;">`;
                         plotHtml += '</div>';
                     } else {
                         plotHtml += '<div class="alert alert-info mt-3">';
                         plotHtml += '<i class="fas fa-info-circle"></i> Tsup plot not available (T_supply column not found in data).';
                         plotHtml += '</div>';
                     }
-                    
-                    // dTreturn plot (third plot)
+
+                    // 3. dTreturn
                     if (response.image_dtreturn) {
                         plotHtml += '<div class="mb-4">';
-                        plotHtml += '<h5 class="mb-3">dTreturn Deviation (T_return_emu − T_return_calc)</h5>';
-                        plotHtml += `<img src="${response.image_dtreturn}" alt="dTreturn Deviation Plot" class="img-fluid" style="max-width: 100%;">`;
+                        plotHtml += '<h5 class="mb-2">dTreturn</h5>';
+                        plotHtml += `<img src="${response.image_dtreturn}" alt="dTreturn" class="img-fluid" style="width:100%; max-width:100%;">`;
                         plotHtml += '</div>';
                     } else {
                         plotHtml += '<div class="alert alert-info mt-3">';
                         plotHtml += '<i class="fas fa-info-circle"></i> dTreturn plot not available (T_return_emu / T_return_calc missing).';
                         plotHtml += '</div>';
                     }
-                    
+
+                    // 4. Flow - same modal, fixed-flow entries only
+                    if (response.image_flow) {
+                        plotHtml += '<div class="mb-4">';
+                        plotHtml += '<h5 class="mb-2">Flow</h5>';
+                        plotHtml += `<img src="${response.image_flow}" alt="Flow" class="img-fluid" style="width:100%; max-width:100%;">`;
+                        plotHtml += '</div>';
+                    } else if (response.flow_message) {
+                        plotHtml += '<div class="alert alert-info mt-3">';
+                        plotHtml += '<i class="fas fa-info-circle"></i> Flow plot not shown: ' + response.flow_message;
+                        plotHtml += '</div>';
+                    }
+
                     plotHtml += '</div>';
                     $('#plotModalBody').html(plotHtml);
                 } else {
@@ -1704,51 +1752,6 @@
         });
     }
     
-    $(document).on('click', '.btn-plot-flow', function() {
-        const btn = $(this);
-        plotFlowDeviation(
-            btn.data('fileName'),
-            btn.data('dataset'),
-            btn.data('startTime'),
-            btn.data('endTime'),
-            btn.data('hpId') || ''
-        );
-    });
-    function plotFlowDeviation(fileName, dataSet, startTime, endTime, hpId) {
-        $('#plotModal').modal('show');
-        $('#plotModal').find('.modal-title').text('Flow Permissible Deviation');
-        $('#plotModalBody').html(`
-            <div class="text-center">
-                <div class="spinner-border" role="status">
-                    <span class="sr-only">Loading...</span>
-                </div>
-                <p>Generating flow plot...</p>
-            </div>
-        `);
-        $.ajax({
-            url: '/plot_flow_deviation',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({
-                file_name: fileName,
-                data_set: dataSet,
-                start_time: startTime,
-                end_time: endTime,
-                hp_id: hpId || ''
-            }),
-            success: function(response) {
-                if (response.success && response.image) {
-                    $('#plotModalBody').html('<img src="' + response.image + '" alt="Flow Deviation" class="img-fluid" style="max-width: 100%;">');
-                } else {
-                    $('#plotModalBody').html('<div class="alert alert-danger">' + (response.message || 'Failed to generate flow plot') + '</div>');
-                }
-            },
-            error: function(xhr, status, error) {
-                $('#plotModalBody').html('<div class="alert alert-danger"><strong>Error:</strong> ' + error + '</div>');
-            }
-        });
-    }
-
     // ---- Per-column update for deviation stats ----
     function setUpdateProgress(visible, percent, message) {
         if (visible) {

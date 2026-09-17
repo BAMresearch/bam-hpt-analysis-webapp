@@ -8,6 +8,8 @@
 **Code:** `flask_app/app.py`
 **Configuration read:**
 `flask_app/permissible_deviations.json`,
+`flask_app/config/interval_deviations.json`,
+`flask_app/config/cycle_periods.json`,
 `flask_app/config/condition_sets.json`,
 `flask_app/config/profiles/`,
 `flask_app/config/unit_types.json`,
@@ -29,7 +31,17 @@ Two distinctions run through the whole document: **"as implemented today"** desc
 | Window | Inclusive: `start_time ≤ time_elapsed ≤ end_time` |
 | Who sets it | Labs / keys workbook provide start–end; analyst confirms in the tool when creating/editing entries |
 | Auto-detect | Optional electrical-power transition / cycle classification (`cycle_type`, `pelec_transition_time`) for defrost / on–off period splits — **not** required for mean/COP/deviation stats on the full entry window |
-| Periods | Sub-periods can be stored separately; full-cycle `results` row remains the primary analysis unit for means/COP/`dev_*` |
+| Periods | Sub-periods can be stored separately; the full-cycle `results` row remains the primary analysis unit for means/COP/`dev_*` |
+
+**Guideline clocks** (Cycle Extract, stored on the parent row) name the draft intervals. Lengths are `flask_app/config/cycle_periods.json` (defaults: buffer 10 min, equilibrium 60 min, evaluation 70 min). How to propose and save them is in the User Guide.
+
+| Interval | Window |
+|----------|--------|
+| **D** | Defrost plus the buffer after heating resumes. Two stored spans on one parent are **one** interval (union of times) |
+| **S** | Standby plus the buffer after restart (same one-or-two-span union) |
+| **H** | Heating between D or S pieces. On a *continuous* cycle, H is the whole parent window |
+| **Equilibrium** | First `eq_min` of H (defrost and continuous). Reuses Interval H bands |
+| **Evaluation** | The `eval_min` **immediately after** equilibrium, not the last minutes of H or of the parent. Omitted when H is shorter than `eq_min + eval_min`. Reuses Interval H bands. On–off cycles have no eq/eval |
 
 **TBD (guideline / T4.3):** Whether acceptance uses complete cycles only, steady sub-periods only, or both; whether auto-detect becomes mandatory.
 
@@ -161,9 +173,9 @@ Which checks run is **`checks.json` × `unit_types.json` × the resolved flow mo
 |----------|--------|-------------|-----------------|----------------|
 | DB | `T_outdoor (DB)` | \(T_{\mathrm{db,set}} \pm\) `DB.value` | `source_medium = air` and the series exists | count, %, max +, max − |
 | WB | `T_outdoor (WB)` | \((T_{\mathrm{db,set}}-1) \pm\) `WB.value` | air-source with `has_wetbulb` and the series exists | count, %, max +, max − |
-| Tsup | `Ts Buh` if present else `T_supply` | \(T_{\mathrm{sup,set}} \pm\) `Tsup.value` | every unit type | count, %, max +, max − |
+| Tsup | `Ts Buh` if present else `T_supply` | \(T_{\mathrm{sup,set}} \pm\) `Tsup.value` | every unit type (**parent table only** — see §5.1) | count, %, max +, max − |
 | Flow | mass or volume flow vs profile flow set | set ± `flow_instantaneous_pct` % | **fixed-flow tests only** | count, %, mean flow %, max +, max − (in % of set) |
-| dTreturn | see §6 | see §6 | every unit type (empty if series missing) | count, %, max +, max − |
+| dTreturn | see §8 | see §8 | every unit type (empty if series missing) | count, %, max +, max − |
 
 A missing `T_outdoor (DB)` **column** does not abort the whole calculation: Tsup, dTreturn and flow are still computed; DB stays empty. WB is still scored if `T_outdoor (WB)` exists, because its band is derived from the DB setpoint, not the DB series. A missing DB **setpoint** (unresolvable letter × climate × application) aborts the whole entry only for air-source entries whose file **does** carry `T_outdoor (DB)`; without that column the entry is calculated with DB empty (WB still as above).
 
@@ -179,6 +191,49 @@ Two deviation extremes are reported per quantity:
 Both keep their sign and are not clamped to zero, so a series that stays below the setpoint reports a negative "Max +". Each cell is coloured red when it passes the transient band.
 
 The single worst-case deviation (`dev_max_*_deviation`) is retained in the database as deprecated; the table shows Max + / Max −.
+
+### 5.1 Guideline-interval checks (Guideline Windows)
+
+The **Deviations** page still scores the **whole parent window** with §5 / §8 / §11. Guideline Windows scores **saved** guideline clocks only. Colouring on both pages is a reading aid, not a stored pass/fail (§10). Missing series or a window that was not saved is **n/a**, never `0`.
+
+**Individual %** uses the same rule as the parent: share of samples outside the band, `count / N × 100`. Equilibrium and evaluation reuse Interval **H**. D and S use their own half-widths. There is **no Tsup %** on Guideline Windows: the draft outlet check is a **mean** ±0.5 K, not an individual sample band. Parent Deviations still stores full-cycle Tsup %.
+
+\(T_{\mathrm{return,calc}}\) is the **set** liquid-sink inlet. Therefore
+
+\[
+\mathrm{dTreturn} = T_{\mathrm{return,emu}} - T_{\mathrm{return,calc}}
+\]
+
+is measured return minus set on every interval (do not invent a separate return setpoint).
+
+| Check | Window | Individual band (as implemented) |
+|-------|--------|----------------------------------|
+| H / eq / eval DB, WB, flow | that saved window | same as parent Interval H: DB/WB ±1 K, flow ±2.5 % (fixed-flow only) |
+| H / eq / eval **dTreturn** | that saved window | **±0.5 K** (`interval_deviations.json` `dtreturn_k`) — **not** the parent −2…+2 K |
+| D individual | union of saved D spans | DB ±5.0 K; dTreturn ±2 K. No D WB %, D flow %, D Tsup % |
+| S individual | union of saved S spans | DB/WB ±2.0 K; flow ±2.5 % (fixed-flow); dTreturn ±1 K. No S Tsup % |
+
+Water-to-water skips outdoor DB/WB on these columns too (`checks.json`). A draft cell that is n/a stays n/a.
+
+**Interval means** are a different check: one arithmetic mean of the window against the setpoint, signed, in K (flow in % of set). They are **not** a sample share.
+
+| Mean | Window | Half-width |
+|------|--------|------------|
+| H mean DB / WB / Tsup / dTreturn / flow | saved H (or `on`) | ±0.3 K / ±0.4 K / ±0.5 K / ±0.3 K / ±1 % of set |
+| D mean DB / WB | union of D | ±1.5 K / ±1.0 K |
+| S mean DB / WB / flow | union of S | ±0.6 K / ±0.6 K / ±2.5 % of set |
+
+DB / WB / Tsup = \(\bar T - T_{\mathrm{set}}\); dTreturn mean = mean of \(T_{\mathrm{emu}}-T_{\mathrm{calc}}\) against 0 K. Tsup uses `Ts Buh` else `T_supply`. D has no mean Tsup, flow or return; S has no mean Tsup or return; mean \(T_{\mathrm{mean,log}}\) on H/D/S is undecided (n/a). Parent mean Tsup / Tmean / Q on Deviations are unchanged (0.5 K / 0.5 K / 5 %).
+
+**ΔCOP** (evaluation window only):
+
+1. Slice the first and last `delta_cop_slice_min` minutes of the **saved evaluation** window (default 5 min).
+2. Each slice: Q and P as on the parent entry (BAM-corr when lab-corr is missing, then BUH-corr); \(\mathrm{COP}=\bar Q/\bar P\) (§3).
+3. \(\Delta\mathrm{COP}=(\mathrm{COP}_{\mathrm{last}}-\mathrm{COP}_{\mathrm{first}})/\mathrm{COP}_{\mathrm{first}}\). Compare \(|\Delta\mathrm{COP}|\) to `delta_cop_pct` (2.5 %).
+
+Empty, not 0, when there is no evaluation window, the window is shorter than two slices, or a slice has no Q/P. Not the first/last five minutes of H.
+
+Config: `flask_app/config/interval_deviations.json`. These values are draft configuration, not agreed acceptance limits.
 
 ---
 
@@ -237,13 +292,15 @@ Water-to-water (`source_medium = water`) therefore has no instantaneous dry-/wet
 \mathrm{dTreturn} = T_{\mathrm{return,emu}} - T_{\mathrm{return,calc}}
 \]
 
-Outside band if \(\mathrm{dTreturn} <\) `dTreturn.lower` or \(\mathrm{dTreturn} >\) `dTreturn.upper` (JSON: −2 … +2 K).
+Outside band if \(\mathrm{dTreturn} <\) `dTreturn.lower` or \(\mathrm{dTreturn} >\) `dTreturn.upper` (`permissible_deviations.json`: **−2 … +2 K** on the **parent** window).
+
+Guideline Windows uses the **same difference** on saved H / eq / eval with ±0.5 K, on D with ±2 K, and on S with ±1 K (§5.1). Parent `dev_dtreturn_*` columns are not retuned.
 
 **Mean column `DTret`:** \(\overline{T}_{\mathrm{return,emu}} - \overline{T}_{\mathrm{return,calc}}\) — the same sign convention. It is a derived column whose formula is stored in `column_metadata.json` and re-evaluated whenever an entry is created or updated; it is empty when either input mean is unavailable.
 
 Extra cache statistics (min/max/p99_abs, etc.) support the dTreturn insights page and period splits — complementary to the Permissible Deviations table.
 
-**TBD (guideline / T4.3):** Whether the criterion is full-cycle dTreturn %, on-period only, or a formal pass/fail flag.
+**TBD (guideline / T4.3):** Whether acceptance uses full-cycle dTreturn %, H/eq/eval only, or a formal pass/fail flag. The tool currently shows both the parent band and the interval columns.
 
 ---
 
@@ -299,7 +356,9 @@ UI badges from `permissible_deviations.json`:
 | `mean_q_band_pct` | 5.0 % | Qset ± band drawn on the heating-capacity plot |
 | `*_violations_red` | 0 | Count → red if above |
 
-These are the values shipped with v0.1. They are configuration, not agreed acceptance limits — see the TBD below.
+These are the values shipped with v0.1 for the **parent** Deviations page. They are configuration, not agreed acceptance limits — see the TBD below.
+
+Interval individual and mean half-widths, and ΔCOP, live in `flask_app/config/interval_deviations.json` (§5.1). Do not copy those keys onto `permissible_deviations.json` or the parent table will silently change.
 
 ### Setpoints and unit parameters
 
@@ -312,6 +371,8 @@ These are the values shipped with v0.1. They are configuration, not agreed accep
 | WB setpoint | Hardcoded \(T_{\mathrm{db,set}} - 1\,\mathrm{K}\); `wb_rule` is not read by the deviation code |
 | Backup-heater cap, \(P_{\mathrm{design}}\), flow set, `flow_mode`, `unit_type` | Unit profiles under `flask_app/config/profiles/` (`local/` is not versioned). \(P_{\mathrm{design}}\) and the flow set also fall back to the legacy `hp_design` table by `hp_id`. |
 | Which checks run | `unit_types.json` + `checks.json` |
+| Interval individual / mean bands, ΔCOP | `flask_app/config/interval_deviations.json` |
+| Guideline clock lengths | `flask_app/config/cycle_periods.json` |
 
 **TBD:** Align the bands with the final round-robin guideline / EN table wording. Make the derived WB rule editable per condition if a campaign needs a different wet-bulb offset.
 
@@ -320,7 +381,7 @@ These are the values shipped with v0.1. They are configuration, not agreed accep
 ## 12. Open gaps (tool state)
 
 1. **Entries can have empty deviation statistics** until they are calculated — not a formula issue; backfill from the Permissible Deviations page. The whole-table calculation uses stored metadata for the letter; the per-column Update currently derives the letter from the filename only and does not read the stored climate/application (§5).
-2. Instantaneous Tsup statistics are implemented. On a whole cycle the Tsup outside-band share is inevitably large, because off and part-load phases legitimately leave the band; a meaningful acceptance criterion probably has to be evaluated on the steady sub-period (**TBD**).
+2. Instantaneous Tsup statistics are still computed on the **parent** window (`dev_tsup_*`). That share is often large because D/S legitimately leave the H band. Guideline Windows does **not** report Tsup % (draft outlet check is a mean). Individual % on H/eq/eval is implemented for DB/WB/flow/dTreturn (**TBD** which of these is acceptance).
 3. **Sign convention:** resolved — instantaneous dTreturn and the mean column `DTret` both use `emu − calc`.
 4. **No formal pass/fail export flags** — UI colouring only; the summary-export flag columns stay empty in v0.1.
 5. **A missing or inapplicable quantity** is **N/A**, not 0 %.
@@ -334,7 +395,7 @@ These are the values shipped with v0.1. They are configuration, not agreed accep
 
 - [ ] Official analysis period definition (complete cycle vs steady / on sub-period)
 - [ ] Official COP and mean-value column set for reporting
-- [ ] Whether instantaneous % (especially Tsup) is an acceptance criterion on full cycles
+- [ ] Whether instantaneous % (especially Tsup) is an acceptance criterion on full cycles vs H/eq/eval; Guideline Windows has no Tsup %
 - [ ] Pass/fail export flags and their thresholds — planned when the acceptance rules are agreed
 - [ ] RH→WB conversion rules, if they are needed
 - [ ] Multi-sheet template mapping for hybrid and water-to-water units
@@ -344,4 +405,4 @@ Operational instructions are in [`USER_GUIDE.md`](USER_GUIDE.md); analyst orient
 
 ---
 
-*Revision note: v0.1, 2026-09-03. Method statements were checked against the shipped code before circulation.*
+*Revision note: v0.1, 2026-09-03. Method statements were checked against the shipped code before circulation. 2026-09-17: guideline-interval windows, dTreturn widths, interval means and ΔCOP added as implemented (§1, §5.1, §8).*

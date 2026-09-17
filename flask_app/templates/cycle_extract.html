@@ -164,6 +164,33 @@
     </div>
   </div>
 
+  <!-- ─── Whole-database guideline clocks ─── -->
+  <!-- Its own always-visible block: the fill needs an open database, not a loaded
+       file, and the Existing-entries card above stays hidden until a file is loaded. -->
+  <div class="card mb-3" id="dbClockCard">
+    <div class="card-body py-2">
+      <div class="d-flex align-items-center flex-wrap">
+        <span class="font-weight-bold mr-3"><i class="fas fa-database"></i> Whole database</span>
+        <button id="dbFillClocksBtn" class="btn btn-outline-primary btn-sm mr-2" type="button"
+                {% if not database_is_ready %}disabled{% endif %}
+                title="Derive and store guideline clocks for every parent cycle in this database that has none yet. Asks first. Rows that already have saved clocks are left alone.">
+          <i class="fas fa-stopwatch"></i> Save clocks for the open database
+        </button>
+        <button id="dbClearClocksBtn" class="btn btn-outline-danger btn-sm mr-3" type="button"
+                {% if not database_is_ready %}disabled{% endif %}
+                title="Delete the saved guideline clocks so the next fill can derive them again. Asks first. Parent cycles and Period Statistics splits stay.">
+          <i class="fas fa-eraser"></i> Clear saved guideline clocks
+        </button>
+        <span class="small-help" id="dbClockStatus">
+          Fills the <b>gaps</b> in <span class="mono">{{ open_database_label }}</span>: every file that has
+          entries here, file by file, after you confirm. Already-saved parents are <b>not</b> rewritten —
+          to change a file you can see, open it, <b>Propose</b> and <b>Save all proposed</b>; to redo a
+          whole pass, <b>Clear</b> first. Nothing runs until you confirm.
+        </span>
+      </div>
+    </div>
+  </div>
+
   <!-- ─── Existing entries for comparison ─── -->
   <div class="card mb-3" id="existingCard" style="display:none;">
     <div class="card-header py-2">
@@ -192,7 +219,7 @@
                   title="Store the current proposals for this whole file — or only the rows ticked under &quot;show&quot;">
             <i class="fas fa-save"></i> Save all proposed
           </button>
-          <label class="mb-0 mr-3 small-help" title="Draw the sub-period layers for the rows you ticked below">
+          <label class="mb-0 mr-3 small-help" title="Draw the sub-period layers for the rows you ticked below. Off by default. show works for rows that already have saved clocks, and for rows you have proposed.">
             <input type="checkbox" id="periodLayersToggle"> <b>Period layers</b>
           </label>
           <span class="small-help" id="layerToggles" style="opacity:.5;">
@@ -213,6 +240,13 @@
         nothing: use <b>Save all proposed</b> for the file (or tick <b>show</b> on the rows you want), or
         <b>edit</b> a single row. Rows whose kind stays unknown are skipped and listed. Lengths come from
         <span class="mono">flask_app/config/cycle_periods.json</span>.
+        <b>Period layers</b> stay off until you turn them on. <b>show</b> is available for any row that
+        already has <b>saved</b> clocks and for any row you have proposed; ticked rows then draw D/S, H,
+        equilibrium and evaluation on this chart. While you are editing a row the layers draw its
+        <b>proposal</b>, otherwise the <b>saved</b> bands — so a file you have just reloaded shows its
+        stored clocks without re-deriving anything. Editing and saving still need
+        <b>Propose guideline clocks</b>. Draft Tsup is a mean check, not an individual band, so there is
+        no Tsup strip here — the Deviations Tsup plot shades saved clocks instead.
       </div>
     </div>
     <div class="card-body p-0">
@@ -237,6 +271,46 @@
       </div>
     </div>
   </div>
+
+  <!-- Confirm for the whole-database clock batch. Both buttons open this; nothing
+       is written before the analyst presses the button inside it. -->
+  <div class="modal fade" id="dbClockModal" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog modal-lg" role="document">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h5 class="modal-title" id="dbClockModalTitle">Whole database</h5>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div id="dbClockModalBody"></div>
+          <div id="dbClockKindRow" class="mt-3" style="display:none;">
+            <label class="mb-0 mr-2 small-help" for="dbClockKindSelect"
+                   title="Fills rows whose kind could not be determined. It never overwrites a kind a row already has.">
+              <b>Treat unknown rows as:</b>
+            </label>
+            <select id="dbClockKindSelect" class="form-control form-control-sm"
+                    style="width:auto; display:inline-block;">
+              <option value="">(leave unknown — those rows are skipped)</option>
+              <option value="defrost">defrost</option>
+              <option value="on_off">on–off</option>
+              <option value="continuous">continuous</option>
+            </select>
+          </div>
+          <div id="dbClockScopeRow" class="mt-3" style="display:none;">
+            <label class="mb-0 mr-2 small-help" for="dbClockScopeSelect"><b>Clear:</b></label>
+            <select id="dbClockScopeSelect" class="form-control form-control-sm"
+                    style="width:auto; display:inline-block;"></select>
+          </div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-secondary btn-sm" data-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm" id="dbClockConfirmBtn"></button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -257,7 +331,7 @@
   var _nextManualId = 1;
   var _pendingSt = null;
 
-  /* ── guideline clocks (Phase 1) ── */
+  /* guideline clocks */
   var _clockProposals = {};      // rowid -> server proposal (periods + sources + notes)
   var _clockOverrides = {};      // rowid -> analyst edits, replayed on every recompute
   var _clockShow = {};           // rowid -> draw this entry's bands
@@ -295,6 +369,45 @@
     if (ptype === 'equilibrium') return 'eq';
     if (ptype === 'evaluation') return 'eval';
     return null;
+  }
+
+  /* proposal vs saved
+     Cycle Extract is the editor, but it must also be able to *look* at what is
+     already stored. The file-load reply carries `saved_periods` / `has_saved`
+     per entry (times only, no re-derive), and a proposal carries a fresher copy
+     of the same two fields, so these four helpers are the only place that
+     decides which of the two a row is showing. Period rules stay server-side. */
+
+  /** Saved guideline periods of a row — the freshest copy the server sent. */
+  function savedPeriodsOf(rid, entry) {
+    var pr = _clockProposals[rid];
+    if (pr && pr.saved_periods) return pr.saved_periods;
+    return (entry && entry.saved_periods) || [];
+  }
+  /** True when this row has guideline clocks stored in cycle_periods. */
+  function hasSavedClocks(rid, entry) { return savedPeriodsOf(rid, entry).length > 0; }
+  /** show is offered for a row that has a proposal **or** saved clocks. */
+  function hasClocksToShow(rid, entry) {
+    return !!_clockProposals[rid] || hasSavedClocks(rid, entry);
+  }
+  /** Bands to draw: the proposal while you edit it, otherwise the saved clocks.
+      Never derived here and never guessed from the test-condition letter. */
+  function clockPeriodsToDraw(rid, entry) {
+    var pr = _clockProposals[rid];
+    if (pr) return pr.periods || [];
+    return savedPeriodsOf(rid, entry);
+  }
+  /** True when the proposal on screen is no longer what is stored. */
+  function proposalDiffersFromSaved(rid, entry) {
+    var pr = _clockProposals[rid];
+    var saved = savedPeriodsOf(rid, entry);
+    if (!pr || !saved.length) return false;
+    function key(list) {
+      return (list || []).map(function(p) {
+        return p.period_type + ':' + Math.round(p.start_time) + ':' + Math.round(p.end_time);
+      }).sort().join('|');
+    }
+    return key(pr.periods) !== key(saved);
   }
 
   function esc(s) {
@@ -448,6 +561,7 @@
       {row:1, label:'Q_BA', findLabel:'Q_BA', color:'#e67e22', vis:'legendonly'},
       // Row 2: Temperatures (left) + dTreturn (right axis)
       {row:2, label:'T_supply', findLabel:'T_supply', color:'#2980b9', vis:true},
+      {row:2, label:'Ts Buh', findLabel:'Ts Buh', color:'#1f6aa5', vis:'legendonly'},
       {row:2, label:'T_return_emu', findLabel:'T_return_emu', color:'#8e44ad', vis:'legendonly'},
       {row:2, label:'T_mean_log', findLabel:'T_mean_log', color:'#1abc9c', vis:'legendonly'},
       {row:2, label:'T_return_calc', findLabel:'T_return_calc', color:'#c0392b', vis:'legendonly'},
@@ -591,9 +705,10 @@
     if (_clockLayersOn) {
       _existingEntries.forEach(function(e) {
         if (!_clockShow[e.rowid]) return;
-        var pr = _clockProposals[e.rowid];
-        if (!pr || !pr.periods) return;
-        pr.periods.forEach(function(p) {
+        // The proposal while the row is being edited, otherwise the clocks that
+        // were saved for it — so a reloaded file draws its bands without a
+        // re-derive. Both come from the server.
+        clockPeriodsToDraw(e.rowid, e).forEach(function(p) {
           var lay = layerOfPeriod(p.period_type);
           if (!lay || !_clockLayerVisible[lay]) return;
           var st = PERIOD_STYLE[lay];
@@ -716,6 +831,13 @@
     });
     var d = await resp.json();
     _existingEntries = (d.success && d.entries) ? d.entries : [];
+    var nSaved = _existingEntries.filter(function(e){ return hasSavedClocks(e.rowid, e); }).length;
+    if (nSaved) {
+      clockStatus(nSaved + ' of ' + _existingEntries.length + ' entr'
+        + (_existingEntries.length === 1 ? 'y' : 'ies') + ' already carry <b>saved</b> guideline clocks. '
+        + 'Tick <b>show</b> and turn <b>Period layers</b> on to see those bands — no Propose needed. '
+        + '<b>Propose guideline clocks</b> is still what gives you clocks to <b>edit</b> or re-save.');
+    }
     renderExistingTable();
     renderChart();
   }
@@ -732,9 +854,18 @@
       tr.dataset.rowid = rid;
       var notes = [e.indicator_notes||'', e.notes||''].filter(function(x){return x;}).join(' | ');
       var pr = _clockProposals[rid];
-      var clockLabel = pr ? (_clockExpanded[rid] ? 'hide' : 'edit') : '—';
+      var canShow = hasClocksToShow(rid, e);
+      var savedIcon = hasSavedClocks(rid, e)
+        ? '<i class="fas fa-save text-success" title="clocks saved in cycle_periods"></i>' : '';
+      var diffNote = proposalDiffersFromSaved(rid, e)
+        ? ' <span class="small-help" title="The proposal on screen is not what is stored '+
+          '&mdash; press Save clocks to replace the saved rows.">&ne; saved</span>' : '';
+      var showTitle = canShow
+        ? (pr ? 'Draw the proposed bands of this entry' : 'Draw the saved bands of this entry')
+        : 'No clocks yet — press Propose guideline clocks';
       tr.innerHTML =
-        '<td><input type="checkbox" class="ex-show"'+(_clockShow[rid]?' checked':'')+(pr?'':' disabled')+'></td>'+
+        '<td><input type="checkbox" class="ex-show" title="'+esc(showTitle)+'"'+
+          (_clockShow[rid]?' checked':'')+(canShow?'':' disabled')+'></td>'+
         '<td class="text-right mono">'+rid+'</td>'+
         '<td class="text-right mono">'+fmt(e.data_set,0)+'</td>'+
         '<td class="text-right mono">'+fmt(e.start_time,0)+'</td>'+
@@ -744,9 +875,13 @@
         '<td class="mono">'+esc(e.dev_test_condition)+'</td>'+
         '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+esc(notes)+'">'+esc(notes)+'</td>'+
         '<td>'+(pr
-          ? '<button class="btn btn-outline-secondary btn-xs ex-clocks">'+clockLabel+'</button>'
-            + (pr.has_saved ? ' <i class="fas fa-save text-success" title="clocks saved in cycle_periods"></i>' : '')
-          : '<span class="small-help">'+clockLabel+'</span>')+'</td>';
+          ? '<button class="btn btn-outline-secondary btn-xs ex-clocks">'
+              + (_clockExpanded[rid] ? 'hide' : 'edit') + '</button>'
+            + (savedIcon ? (' ' + savedIcon) : '') + diffNote
+          : (savedIcon
+              ? savedIcon + ' <span class="small-help" title="Saved clocks can be shown; '+
+                'press Propose guideline clocks to edit them.">saved</span>'
+              : '<span class="small-help">&mdash;</span>'))+'</td>';
       body.appendChild(tr);
       if (pr && _clockExpanded[rid]) body.appendChild(buildClockRow(e, pr));
     });
@@ -783,7 +918,7 @@
                : pr.kind === 'defrost' ? 'D (defrost + buffer)'
                : 'D / S (kind not set)';
     var dsShort = pr.kind === 'on_off' ? 'S' : 'D';
-    // A window that opens in D/S may hold a second D/S span (§2.1.1), so that row
+    // A window that opens in D/S may hold a second D/S span, so that row
     // is always offered there: type a start to add or move it, clear it to drop it.
     var tailEditable = pr.begins_in === 'ds';
     // continuous: no D, no S, no power transition — the parent window is H.
@@ -877,11 +1012,16 @@
     var sel = document.getElementById('defaultKindSelect');
     return sel ? sel.value : '';
   }
-  /** Rows ticked under "show", so Save all can be limited to a selection. */
+  /** Rows ticked under "show". A tick may be a row you are only
+      looking at, so Save all uses tickedProposedRowids() as its scope. */
   function tickedRowids() {
     return Object.keys(_clockShow)
-      .filter(function(k){ return _clockShow[k] && _clockProposals[k]; })
+      .filter(function(k){ return _clockShow[k]; })
       .map(function(k){ return parseInt(k,10); });
+  }
+  /** Ticked rows that actually carry a proposal — the Save all selection. */
+  function tickedProposedRowids() {
+    return tickedRowids().filter(function(k){ return _clockProposals[k]; });
   }
 
   /** Read an API reply, naming the HTTP status when the body is not JSON. */
@@ -896,14 +1036,17 @@
     }
   }
 
-  /** Ask the server to (re-)derive the clocks. All clock rules live server-side. */
-  async function proposeClocks(rowids) {
+  /** Ask the server to (re-)derive the clocks. All clock rules live server-side.
+      `redetect` are the rowids whose reset was pressed: those ignore the saved
+      second D/S span for this one call and detect the drop again. */
+  async function proposeClocks(rowids, redetect) {
     if (!_fileName) { clockStatus('Load a file first.'); return; }
     clockStatus('Deriving guideline clocks for this file…');
     var resp = await fetch('/api/cycle_extract/propose_periods', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ file_name: _fileName, rowids: rowids || null,
-                             overrides: _clockOverrides, default_kind: defaultKind() })
+                             overrides: _clockOverrides, default_kind: defaultKind(),
+                             redetect_ds2: redetect || null })
     });
     var d = await readJson(resp);
     if (!d.success) { clockStatus('Clocks: ' + esc(d.message || 'failed')); return; }
@@ -926,7 +1069,8 @@
       + (twoSpan ? (', ' + twoSpan + ' with two D / S spans') : '')
       + (fromDefault ? (', ' + fromDefault + ' took kind <b>' + esc(defaultKind()) + '</b> from the file-level default') : '')
       + (unknown ? (', ' + unknown + ' need a kind — set one per row or pick a default above') : '')
-      + '. Tick <b>show</b> and <b>Period layers</b> to draw them.');
+      + '. Tick <b>show</b> and <b>Period layers</b> to draw them; a row you are editing draws its '
+      + 'proposal, a row you have not proposed draws its saved bands.');
     document.getElementById('saveAllClocksBtn').disabled = !Object.keys(_clockProposals).length;
     renderExistingTable();
     renderChart();
@@ -963,11 +1107,18 @@
     await proposeClocks([rid]);
   }
 
-  /** Store the proposals for the whole file, or for the ticked rows (§2.2.2). */
+  /** Store the proposals for the whole file, or for the ticked rows. */
   async function saveAllClocks() {
     if (!_fileName) { clockStatus('Load a file first.'); return; }
-    // No tick means the whole open file — never "nothing" (§Phase 1.2b).
-    var ticked = tickedRowids();
+    // No tick means the whole open file — never "nothing". A tick
+    // on a row you are only *looking* at (saved clocks, no proposal) must not
+    // silently widen that scope back to the whole file.
+    var ticked = tickedProposedRowids();
+    if (!ticked.length && tickedRowids().length) {
+      clockStatus('The ticked row(s) have no proposal yet. Press <b>Propose guideline clocks</b> first, '
+        + 'or untick them to save the whole file.');
+      return;
+    }
     var scope = ticked.length ? (ticked.length + ' ticked row(s)') : 'every row of this file';
     clockStatus('Saving the proposed clocks for ' + scope + '…');
     var resp = await fetch('/api/cycle_extract/save_all_periods', {
@@ -987,6 +1138,255 @@
     }
     await proposeClocks(ticked.length ? ticked : null);
     clockStatus(msg);   // re-propose refreshes the saved markers, this keeps the report
+  }
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Whole-database clock batch.
+
+     Two separate jobs. The **fill** writes clocks for parents that have none
+     (skip_saved: true), file by file, so one unreadable sheet fails that file
+     only and the analyst sees "file i of n". It never sends _clockOverrides:
+     those edits belong to the file on screen, this pass is unattended. The
+     **clear** throws a pass away so the fill can derive again — running the fill
+     twice cannot update anything, by design.
+
+     Neither runs on page load, and neither is Guideline Windows, which
+     only reads what is already stored.
+     ───────────────────────────────────────────────────────────────────────── */
+  var _dbClockBusy = false;
+  var _dbClockConfirmAction = null;
+
+  function dbClockStatus(html) {
+    var el = document.getElementById('dbClockStatus');
+    if (el) el.innerHTML = html;
+  }
+
+  function dbClockButtons(disabled) {
+    ['dbFillClocksBtn', 'dbClearClocksBtn'].forEach(function(id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = !!disabled;
+    });
+  }
+
+  /** The cheap list behind both confirms: parents per file and how many of them
+      already carry saved clocks. Reads no Plotdaten. */
+  async function fetchDatabaseClockFiles() {
+    var resp = await fetch('/api/cycle_extract/database_clock_files', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: '{}'
+    });
+    return await readJson(resp);
+  }
+
+  function showDbClockModal(title, bodyHtml, confirmLabel, confirmClass, action) {
+    document.getElementById('dbClockModalTitle').textContent = title;
+    document.getElementById('dbClockModalBody').innerHTML = bodyHtml;
+    document.getElementById('dbClockKindRow').style.display = 'none';
+    document.getElementById('dbClockScopeRow').style.display = 'none';
+    var btn = document.getElementById('dbClockConfirmBtn');
+    btn.className = 'btn btn-sm ' + confirmClass;
+    btn.textContent = confirmLabel;
+    btn.style.display = action ? '' : 'none';
+    _dbClockConfirmAction = action;
+    $('#dbClockModal').modal('show');
+  }
+
+  /** Fill: ask first, with the numbers the list endpoint just gave us. */
+  async function openDatabaseFillConfirm() {
+    if (_dbClockBusy) return;
+    dbClockStatus('Counting the parent cycles in this database…');
+    var d = await fetchDatabaseClockFiles();
+    if (!d.success) {
+      dbClockStatus('Could not read the file list: ' + esc(d.message || 'failed'));
+      return;
+    }
+    var files = (d.files || []).filter(function(f){ return f.n_unsaved > 0; });
+    var head = '<p>Database <span class="mono">' + esc(d.database || '') + '</span> holds '
+      + d.n_entries + ' parent cycl' + (d.n_entries === 1 ? 'e' : 'es') + ' in '
+      + d.n_files + ' file' + (d.n_files === 1 ? '' : 's') + '.</p>';
+    var note = '<p class="small-help">This is <b>not</b> the <b>Guideline Windows</b> page, which only '
+      + 'reads clocks that are already stored. This writes <span class="mono">cycle_periods</span> rows '
+      + 'and marks the power split manual on the rows it fills.</p>';
+
+    if (!d.n_unsaved) {
+      showDbClockModal('Save clocks for the open database',
+        head + '<p><b>Nothing to write.</b> All ' + d.n_saved + ' parent cycl'
+        + (d.n_saved === 1 ? 'e' : 'es') + ' already carry saved guideline clocks, and this pass never '
+        + 'overwrites them.</p><ul><li>To <b>update</b> one file: open it, <b>Propose guideline clocks</b>, '
+        + 'then <b>Save all proposed</b>.</li><li>To <b>retry the whole database</b> with new clock rules: '
+        + '<b>Clear saved guideline clocks</b> first, then run this again.</li></ul>' + note,
+        '', '', null);
+      dbClockStatus('Nothing to write — every parent in this database already has saved clocks. '
+        + 'Use <b>Save all proposed</b> to update one file, or <b>Clear saved guideline clocks</b> '
+        + 'to redo the whole database.');
+      return;
+    }
+
+    var list = files.slice(0, 12).map(function(f) {
+      return '<tr><td class="mono">' + esc(f.file_name) + '</td><td class="text-right">'
+        + f.n_unsaved + '</td><td class="text-right">' + f.n_saved + '</td></tr>';
+    }).join('');
+    if (files.length > 12) list += '<tr><td colspan="3" class="small-help">… and '
+      + (files.length - 12) + ' more file(s)</td></tr>';
+
+    showDbClockModal('Save clocks for the open database',
+      head
+      + '<p><b>' + d.n_unsaved + '</b> parent cycl' + (d.n_unsaved === 1 ? 'e' : 'es') + ' in <b>'
+      + files.length + '</b> file' + (files.length === 1 ? '' : 's') + ' will be proposed and saved. '
+      + '<b>' + d.n_saved + '</b> already-saved parent cycl' + (d.n_saved === 1 ? 'e is' : 'es are')
+      + ' left alone — this pass never overwrites stored clocks.</p>'
+      + '<div class="table-responsive" style="max-height:220px; overflow-y:auto;">'
+      + '<table class="table table-sm table-striped mb-0"><thead class="thead-light">'
+      + '<tr><th>file</th><th class="text-right">to write</th><th class="text-right">already saved</th></tr>'
+      + '</thead><tbody>' + list + '</tbody></table></div>'
+      + '<p class="small-help mt-2">Rows whose kind cannot be determined are skipped unless you pick a '
+      + 'default below; the default fills only unknown rows and never overwrites a kind a row already has. '
+      + 'The edits on the file you have open are <b>not</b> sent — this is an unattended pass.</p>'
+      + note,
+      'Save clocks for ' + files.length + ' file' + (files.length === 1 ? '' : 's'),
+      'btn-primary',
+      function() { runDatabaseFill(files); });
+
+    document.getElementById('dbClockKindRow').style.display = '';
+    document.getElementById('dbClockKindSelect').value = defaultKind();
+    dbClockStatus('Confirm to fill ' + d.n_unsaved + ' parent cycle(s) in ' + files.length + ' file(s).');
+  }
+
+  /** One save_all_periods per file, so progress exists and a bad sheet is one
+      file's problem. No SSE, and not the Guideline Windows Load-all progress. */
+  async function runDatabaseFill(files) {
+    var kind = document.getElementById('dbClockKindSelect').value;
+    _dbClockBusy = true;
+    dbClockButtons(true);
+    var savedEntries = 0, savedPeriods = 0, nSkipped = 0, failed = [], touchedOpenFile = false;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      dbClockStatus('File ' + (i + 1) + ' of ' + files.length + ': <span class="mono">'
+        + esc(f.file_name) + '</span> — working. Running total so far: saved '
+        + savedEntries + ', skipped ' + nSkipped
+        + (failed.length ? (', failed ' + failed.length) : '')
+        + '. This line updates when the file finishes (a large sheet can take a minute).');
+      await new Promise(function(resolve){ setTimeout(resolve, 0); });
+      var d;
+      try {
+        var resp = await fetch('/api/cycle_extract/save_all_periods', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ file_name: f.file_name, rowids: null,
+                                 default_kind: kind, skip_saved: true })
+        });
+        d = await readJson(resp);
+      } catch (err) {
+        d = { success:false, message:String(err) };
+      }
+      if (!d.success) {
+        failed.push(f.file_name + ' — ' + (d.message || 'failed'));
+      } else {
+        savedEntries += d.saved_entries || 0;
+        savedPeriods += d.saved_periods || 0;
+        nSkipped += (d.skipped || []).length;
+        if (d.saved_entries && f.file_name === _fileName) touchedOpenFile = true;
+      }
+    }
+    _dbClockBusy = false;
+    dbClockButtons(false);
+
+    var msg = 'Done: ' + savedEntries + ' entr' + (savedEntries === 1 ? 'y' : 'ies') + ' written ('
+      + savedPeriods + ' period rows) over ' + files.length + ' file'
+      + (files.length === 1 ? '' : 's') + ', ' + nSkipped
+      + ' row(s) skipped (already saved, or kind still unknown).';
+    if (failed.length) {
+      msg += ' <b>' + failed.length + ' file(s) failed:</b> '
+        + failed.slice(0, 5).map(esc).join('; ') + (failed.length > 5 ? '; …' : '') + '.';
+    }
+    msg += ' Check the result on <b>Guideline Windows</b>.';
+    dbClockStatus(msg);
+
+    // Only the file the analyst already had open is refreshed — never load
+    // somebody else's file for them.
+    if (touchedOpenFile) {
+      await loadExistingEntries();
+      if (Object.keys(_clockProposals).length) await proposeClocks(null);
+      clockStatus('This file was part of the database pass — the table now shows what is stored.');
+    }
+  }
+
+  /** Clear: the only whole-database way to throw a first pass away. */
+  async function openDatabaseClearConfirm() {
+    if (_dbClockBusy) return;
+    dbClockStatus('Counting the saved guideline clocks…');
+    var d = await fetchDatabaseClockFiles();
+    if (!d.success) {
+      dbClockStatus('Could not read the file list: ' + esc(d.message || 'failed'));
+      return;
+    }
+    var openFile = (_fileName || '');
+    var openSaved = ((d.files || []).filter(function(f){ return f.file_name === openFile; })[0]
+                     || {}).n_saved || 0;
+    if (!d.n_saved) {
+      showDbClockModal('Clear saved guideline clocks',
+        '<p><b>Nothing to clear.</b> No parent cycle in <span class="mono">'
+        + esc(d.database || '') + '</span> carries saved guideline clocks.</p>', '', '', null);
+      dbClockStatus('Nothing to clear — no saved guideline clocks in this database.');
+      return;
+    }
+
+    showDbClockModal('Clear saved guideline clocks',
+      '<p><b>' + d.n_saved + '</b> parent cycl' + (d.n_saved === 1 ? 'e' : 'es') + ' in <span class="mono">'
+      + esc(d.database || '') + '</span> carr' + (d.n_saved === 1 ? 'ies' : 'y')
+      + ' saved guideline clocks.</p>'
+      + '<p>Clearing deletes those guideline periods and the stored power split on those rows, so the '
+      + 'next <b>Save clocks for the open database</b> derives fresh clocks instead of reusing the pass '
+      + 'you are throwing away.</p>'
+      + '<ul><li>The parent cycles stay — windows, means and deviations are untouched.</li>'
+      + '<li>Period Statistics drop / ramp splits stay.</li>'
+      + '<li>Nothing is derived here: the fill does <b>not</b> run afterwards, you start it.</li></ul>'
+      + '<p class="small-help">This cannot be undone. Duplicate the database on <b>Datasets</b> first if '
+      + 'you may want that pass back.</p>',
+      'Clear saved clocks', 'btn-danger',
+      function() {
+        var sel = document.getElementById('dbClockScopeSelect');
+        runDatabaseClear(sel && sel.value ? sel.value : null);
+      });
+
+    var sel = document.getElementById('dbClockScopeSelect');
+    sel.innerHTML = '<option value="">the whole database (' + d.n_saved + ' entries)</option>';
+    if (openFile && openSaved) {
+      sel.innerHTML += '<option value="' + esc(openFile) + '">this file only — '
+        + esc(openFile) + ' (' + openSaved + ' entries)</option>';
+    }
+    document.getElementById('dbClockScopeRow').style.display = '';
+    dbClockStatus('Confirm to clear saved guideline clocks. Nothing is deleted until you do.');
+  }
+
+  async function runDatabaseClear(fileName) {
+    _dbClockBusy = true;
+    dbClockButtons(true);
+    dbClockStatus('Clearing saved guideline clocks…');
+    var d;
+    try {
+      var resp = await fetch('/api/cycle_extract/clear_guideline_clocks', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ file_name: fileName || null })
+      });
+      d = await readJson(resp);
+    } catch (err) {
+      d = { success:false, message:String(err) };
+    }
+    _dbClockBusy = false;
+    dbClockButtons(false);
+    if (!d.success) { dbClockStatus('Clear failed: ' + esc(d.message || '')); return; }
+    dbClockStatus('Cleared ' + d.cleared_entries + ' entr' + (d.cleared_entries === 1 ? 'y' : 'ies')
+      + ' (' + d.cleared_periods + ' period rows)'
+      + (fileName ? (' in <span class="mono">' + esc(fileName) + '</span>') : ' in this database')
+      + '. Parent cycles and Period Statistics splits are untouched. Run '
+      + '<b>Save clocks for the open database</b> when you want fresh clocks — it does not start itself.');
+
+    if (_fileName && (!fileName || fileName === _fileName)) {
+      _clockProposals = {}; _clockOverrides = {}; _clockExpanded = {};
+      document.getElementById('saveAllClocksBtn').disabled = true;
+      await loadExistingEntries();
+      clockStatus('Saved guideline clocks were cleared for this file. <b>Propose guideline clocks</b> '
+        + 'derives them again — nothing was proposed or saved for you.');
+    }
   }
 
   function wireExistingButtons() {
@@ -1072,7 +1472,9 @@
       });
     document.querySelectorAll('#existingBody .ck-reset').forEach(function(btn) {
       btn.addEventListener('click', function() {
-        var id = rid(btn); delete _clockOverrides[id]; recompute(id);
+        // reset drops the analyst's edits *and* the saved second-span seed, so
+        // the drop is detected again from the trace.
+        var id = rid(btn); delete _clockOverrides[id]; proposeClocks([id], [id]);
       });
     });
     document.querySelectorAll('#existingBody .ck-save').forEach(function(btn) {
@@ -1336,6 +1738,19 @@
 
     document.getElementById('proposeClocksBtn').addEventListener('click', function(){ proposeClocks(null); });
     document.getElementById('saveAllClocksBtn').addEventListener('click', function(){ saveAllClocks(); });
+
+    // Whole-database batch (2.6). Click only *asks*; the confirm button inside
+    // the modal is the one that writes or deletes. Nothing here runs on load.
+    var fillBtn = document.getElementById('dbFillClocksBtn');
+    if (fillBtn) fillBtn.addEventListener('click', function(){ openDatabaseFillConfirm(); });
+    var clearBtn = document.getElementById('dbClearClocksBtn');
+    if (clearBtn) clearBtn.addEventListener('click', function(){ openDatabaseClearConfirm(); });
+    document.getElementById('dbClockConfirmBtn').addEventListener('click', function() {
+      var act = _dbClockConfirmAction;
+      _dbClockConfirmAction = null;
+      $('#dbClockModal').modal('hide');
+      if (act) act();
+    });
     document.getElementById('defaultKindSelect').addEventListener('change', function() {
       // Re-derive every row so Kind and the clocks follow the new default at once,
       // with no extra Propose click. Rows that already have a kind keep it.

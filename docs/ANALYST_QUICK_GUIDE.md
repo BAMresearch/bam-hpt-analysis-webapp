@@ -1,6 +1,6 @@
 # Analyst Quick Guide — one analysis, start to finish
 
-**Date:** 2026-08-31  
+**Date:** 2026-09-17  
 **Audience:** HPT T4.2 analysts
 
 This is orientation plus one analysis.
@@ -137,7 +137,9 @@ Open `import_hpt.ipynb` with working directory = the cloned folder (§3).
 1. Pick the Plotdaten file.
 2. **Select a unit profile** (required). HP ID fills itself.
 3. Confirm or add cycles. Set **ds** per cycle (1, 2, 3, …) *before* Apply.
-4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Test label, Lab ID and HP ID (HP ID from the profile). **Notes** must contain `drop` or `ramp` if the window should be split into defrost/heating or on/off sub-periods; `other` means no split.
+4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Test label, Lab ID and HP ID (HP ID from the profile). **Notes** must contain `drop` or `ramp` if the window should be split into defrost/heating or on/off sub-periods on **Period Statistics**; `other` means no split.
+
+5. (Optional — needed for evaluation-window means and interval checks.) **Propose guideline clocks** → confirm kind → **Save all proposed** or **Save clocks**. Check them on **Guideline Windows**. Definitions: [Analysis Guide](ANALYSIS_GUIDE.md) §1 / §5.1.
 
 You may see yellow notifications; they are not errors but notes about how missing data is handled.
 
@@ -145,7 +147,9 @@ You may see yellow notifications; they are not errors but notes about how missin
 
 **Data:** check start/end, profile, flow (fixed/var). Recalculate if you edited windows.
 
-**Deviations:** calculate (empty cells mean “not calculated yet”). `0` = no violations; `N/A` = no valid points; `-` = not yet run. Variable-flow tests show **n/a** for flow columns (the check is Tmean / Tsup).
+**Deviations:** calculate (empty cells mean “not calculated yet”). `0` = no violations; `N/A` = no valid points; `-` = not yet run. Variable-flow tests show **n/a** for flow columns (the check is Tmean / Tsup). **Plot** shows the traces; if clocks are saved, the band steps by interval.
+
+**Guideline Windows:** read-only table of **saved** clocks, evaluation means, interval % / means and eval ΔCOP. If score cells are n/a on an older database, use **Compute missing scores**.
 
 ### F. Scatter (optional)
 
@@ -166,9 +170,10 @@ You may see yellow notifications; they are not errors but notes about how missin
 |------|------------|
 | Datasets | Which `.db` you are writing into |
 | Profiles | Unit parameters + heating-condition setpoints |
-| Cycle Extraction | File → analysis entries |
+| Cycle Extraction | File → analysis entries; optional guideline clocks |
 | Data | Means, COP, edit windows, mark scatter/COP sets |
-| Deviations | Instantaneous and mean bands |
+| Deviations | Parent-cycle bands; Plot |
+| Guideline Windows | Saved clocks, evaluation means, interval % / ΔCOP |
 | Period Statistics | Defrost / heating sub-periods (needs Notes `drop` or `ramp`) |
 | dTreturn Insights | Return-temperature controllability |
 | Scatter | Compare units / flows / (if needed) climate×application |

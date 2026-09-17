@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session, jsonify, abort
 from werkzeug.exceptions import HTTPException
+import hashlib
 import json
 import os
 import re
@@ -662,6 +663,10 @@ def prepare_active_database() -> None:
     ensure_cycle_periods_table()
     ensure_dtreturn_exclusions_table()
     try:
+        ensure_guideline_scores_table()
+    except Exception as e:
+        print(f"Guideline Windows score cache ensure skipped: {e}")
+    try:
         ensure_cycle_extraction_suggestions_table()
     except Exception:
         pass
@@ -1028,19 +1033,29 @@ def t_mean_from_average_pair(t_l_bar, t_r_bar, t_air: float = T_AIR_INDOOR_C):
 
 
 def add_t_mean_log_column(df: pd.DataFrame, t_air: float = T_AIR_INDOOR_C) -> pd.DataFrame:
-    """Add T_mean_log and dT_ln time-series columns (does nothing if temps are missing)."""
+    """Add T_mean_log and dT_ln time-series columns (does nothing if temps are missing).
+
+    Always copies before writing so a filtered window cannot raise
+    ``SettingWithCopyWarning`` (that warning printed once per guideline period
+    and made a whole-database clock fill look hung).
+    """
+    if df is None or getattr(df, 'empty', True):
+        return df
+    if 'T_mean_log' in df.columns and 'dT_ln' in df.columns:
+        return df
     t_l, t_r, _ = _leaving_and_return_series(df)
     if t_l is None or t_r is None:
         return df
     t_mean = logarithmic_mean_water_temperature(t_l.to_numpy(), t_r.to_numpy(), t_air)
-    df['T_mean_log'] = t_mean
-    df['dT_ln'] = df['T_mean_log'] - t_air
-    return df
+    out = df.copy()
+    out['T_mean_log'] = t_mean
+    out['dT_ln'] = out['T_mean_log'] - t_air
+    return out
 
 
 def compute_t_mean_period_stats(df_filtered: pd.DataFrame, avg_t_sup_buh=None, avg_values=None):
     """Return (avg_t_mean_log, t_mean_from_avgs, avg_dt_ln) for a cycle window."""
-    add_t_mean_log_column(df_filtered)
+    df_filtered = add_t_mean_log_column(df_filtered)
     avg_t_mean_log = None
     avg_dt_ln = None
     if 'T_mean_log' in df_filtered.columns:
@@ -1113,7 +1128,7 @@ def compute_single_column_value(df_filtered: pd.DataFrame, column_name: str) -> 
         if column_name == 'avg_t_return_calc' and 'T_return_calc' in df_filtered.columns:
             return float(df_filtered['T_return_calc'].mean())
         if column_name in ('avg_t_mean_log', 'avg_dt_ln', 't_mean_from_avgs'):
-            add_t_mean_log_column(df_filtered)
+            df_filtered = add_t_mean_log_column(df_filtered)
             if column_name == 'avg_t_mean_log':
                 if 'T_mean_log' not in df_filtered.columns:
                     return None
@@ -1407,7 +1422,7 @@ def calculate_derived_quantities(df):
         print(f"Calculated dT_HP: {df_calc['dT_HP'].iloc[0] if len(df_calc) > 0 else 'N/A'}")
     else:
         print("Missing columns for dT_HP calculation")
-    add_t_mean_log_column(df_calc)
+    df_calc = add_t_mean_log_column(df_calc)
     
     # Calculate dTreturn (Return temperature difference) - exactly like notebook
     if 'T_return_emu' in df_calc.columns and 'T_return_calc' in df_calc.columns:
@@ -4232,7 +4247,7 @@ def calculate_derived_quantities(df):
         print(f"Calculated dT_HP: {df_calc['dT_HP'].iloc[0] if len(df_calc) > 0 else 'N/A'}")
     else:
         print("Missing columns for dT_HP calculation")
-    add_t_mean_log_column(df_calc)
+    df_calc = add_t_mean_log_column(df_calc)
     
     # Calculate dTreturn (Return temperature difference) - exactly like notebook
     if 'T_return_emu' in df_calc.columns and 'T_return_calc' in df_calc.columns:
@@ -7163,7 +7178,7 @@ def load_permissible_deviations():
                 'physics, so they are judged on Tsup instead. No transient band is defined.'
             ),
             'standard_reference': (
-                'BAM lab proposal — the ecodesign draft defines no tolerance for the mean temperature. '
+                'Working tolerance — the ecodesign draft defines none for the mean temperature. '
                 '0.5 K chosen as the analogue of SN EN 14511-3:2022 Table 6 Interval H (mean supply temperature).'
             ),
         },
@@ -7916,7 +7931,7 @@ def ensure_cycle_extraction_suggestions_table() -> None:
                 data_set REAL,
                 start_time REAL NOT NULL,
                 end_time REAL NOT NULL,
-                marker_type TEXT NOT NULL, -- 'drop' (phase 2 default)
+                marker_type TEXT NOT NULL, -- 'drop' (default start marker)
                 confidence REAL,
                 notes_auto TEXT,
                 pelec_drop_mag REAL,
@@ -8874,17 +8889,21 @@ def _generate_periods_for_entry(entry_rowid, cycle_start_marker,
 
 
 # ---------------------------------------------------------------------------
-# Guideline clocks (Phase 1): D or S + H, plus equilibrium / evaluation inside H
+# Guideline clocks: D or S + H, plus equilibrium / evaluation inside H
 # ---------------------------------------------------------------------------
 
 GUIDELINE_DETECTION_METHOD = 'guideline'
 
 # A detected drop this close to the first D/S end or to the parent end is not a
 # second span: a window cut defrost start → next defrost start ends *at* the next
-# drop, and that defrost belongs to the next parent row (§2.1.1).
+# drop, and that defrost belongs to the next parent row.
 GUIDELINE_MIN_SPAN_S = 60.0
 
-# The only guideline kinds (§2.2.1). 'other' is never one of them: the old
+# A saved D/S span starting this close to the parent start is the leading buffer,
+# not a second span the analyst placed.
+GUIDELINE_SAVED_DS_LEAD_TOL_S = 1.0
+
+# The only guideline kinds. 'other' is never one of them: the old
 # pipeline's cycle_type='other' means "could not classify", i.e. unknown.
 GUIDELINE_KINDS = ('defrost', 'on_off', 'continuous')
 
@@ -8899,7 +8918,7 @@ def _normalise_guideline_kind(value):
     """One of ``GUIDELINE_KINDS`` for an analyst/UI value, else None.
 
     Never returns a kind for 'other' or for a test-condition letter — kind is not
-    taken from E/A/B/C/D or from the dataset name (§2.2.1).
+    taken from E/A/B/C/D or from the dataset name.
     """
     v = str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
     if v in ('on_off', 'onoff'):
@@ -8913,7 +8932,7 @@ def _normalise_guideline_kind(value):
 
 def _resolve_guideline_kind(row_kind, stored_cycle_type, indicator_flag, indicator_col,
                             saved_types, default_kind):
-    """(kind, source) in the fill order of §2.2.1.
+    """(kind, source) in the fill order below.
 
     Analyst choice on the row, stored ``cycle_type``, defrost-indicator column,
     clocks already saved for the entry, then the **file-level default** — which
@@ -8958,6 +8977,77 @@ def _guideline_period_labels(kind: str):
 
 def _guideline_buffer_s() -> int:
     return int(round(_guideline_lengths()['buffer_s']))
+
+
+def _saved_guideline_periods_map(conn, rowids):
+    """``{entry_rowid: [saved guideline period rows]}`` for these parents.
+
+    Times only: the stored ``cycle_periods`` rows written by Save, never a
+    re-derive, so a caller that must not read the Excel sheet (file load on
+    Cycle Extract) can still show what is stored. Rows written at a different
+    ``buffer_s`` than the configured one are picked up by the same per-entry
+    fallback as ``_saved_guideline_periods``, so changing ``buffer_min`` does
+    not make saved clocks look absent.
+    """
+    out = {}
+    ids = []
+    for r in rowids or []:
+        try:
+            ids.append(int(r))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return out
+
+    def _collect(where_ids, params_tail):
+        ph = ",".join(["?"] * len(where_ids))
+        rows = conn.execute(
+            f"SELECT entry_rowid, period_type, start_time, end_time FROM cycle_periods "
+            f"WHERE entry_rowid IN ({ph}) AND detection_method=?{params_tail[0]} "
+            f"ORDER BY start_time ASC, id ASC",
+            where_ids + [GUIDELINE_DETECTION_METHOD] + params_tail[1]
+        ).fetchall()
+        for p in rows:
+            out.setdefault(int(p['entry_rowid']), []).append(dict(p))
+
+    _collect(ids, (" AND buffer_s=?", [_guideline_buffer_s()]))
+    missing = [r for r in ids if r not in out]
+    if missing:
+        _collect(missing, ("", []))
+    return out
+
+
+def _saved_second_ds_seed(saved_periods, cycle_start):
+    """``(ds2_start, no_second_ds)`` read back from saved clocks.
+
+    A second D/S span the analyst typed — or a one-span cycle they forced by
+    clearing that field — is stored only as ``cycle_periods`` rows: no
+    ``results`` column carries it the way ``pelec_transition_time`` carries the
+    interior power event. Without this seed the next **Propose** after a reload
+    would re-detect the drop and throw the analyst's span away.
+
+    Two saved D/S spans → the later one is the seed. A single span that is the
+    leading buffer → the cycle had one span, so no drop is re-inserted. A single
+    span that starts later than the parent start is itself a placed second span.
+    Only called for a window that opens in D/S; **reset** bypasses it.
+    """
+    spans = []
+    for p in saved_periods or []:
+        if str((p or {}).get('period_type')) not in ('defrost', 'off'):
+            continue
+        start = _guideline_num((p or {}).get('start_time'))
+        end = _guideline_num((p or {}).get('end_time'))
+        if start is None or end is None or end <= start:
+            continue
+        spans.append((start, end))
+    if not spans:
+        return None, False
+    spans.sort()
+    if len(spans) >= 2:
+        return spans[-1][0], False
+    if spans[0][0] <= float(cycle_start) + GUIDELINE_SAVED_DS_LEAD_TOL_S:
+        return None, True
+    return spans[0][0], False
 
 
 def _cycle_opens_low(pelec_values) -> bool:
@@ -9016,7 +9106,7 @@ def _marker_from_begins_in(begins_in: str, kind: str) -> str:
 
 
 def _guideline_second_ds_start(override, next_drop, ds_end, cycle_end):
-    """Start of the second D/S span (§2.1.1), or None when the cycle has one.
+    """Start of the second D/S span, or None when the cycle has one.
 
     The analyst comes first: ``ds2_start`` moves or adds the span, ``no_second_ds``
     removes it. Otherwise the detected drop counts only when it leaves both a
@@ -9049,7 +9139,7 @@ def _build_guideline_clocks(cycle_start, cycle_end, kind, begins_in, trans,
     ``begins_in`` is 'ds' (window opens inside defrost/standby, the transition is
     the power rise) or 'h' (window opens inside heating, the transition is the
     drop that ends it). ``next_drop`` is a further drop detected inside the same
-    window; on a window that opens in D/S it turns D into two spans (§2.1.1).
+    window; on a window that opens in D/S it turns D into two spans.
     Both are ignored for ``continuous``, which has no D/S and needs no transition:
     the parent window is H and eq/eval run from its start.
 
@@ -9080,7 +9170,7 @@ def _build_guideline_clocks(cycle_start, cycle_end, kind, begins_in, trans,
     ds_end_override = override.get('ds_end')
     if kind == 'continuous':
         # No defrost, no standby: the parent window *is* H, so no power
-        # transition is required and eq/eval start at the parent start (§2.2.1).
+        # transition is required and eq/eval start at the parent start.
         h_start, h_end = cycle_start, cycle_end
         spans.append((main_type, h_start, h_end))
     elif trans is None and ds_end_override is None:
@@ -9095,7 +9185,7 @@ def _build_guideline_clocks(cycle_start, cycle_end, kind, begins_in, trans,
         else:
             # A drop after that first span means the window was cut defrost end →
             # next defrost end, so D has a second span and H is only the gap
-            # between them (§2.1.1). Without such a drop this stays one span.
+            # between them. Without such a drop this stays one span.
             drop2 = _guideline_second_ds_start(override, next_drop, ds_end, cycle_end)
             h_start, h_end = ds_end, (drop2 if drop2 is not None else cycle_end)
             spans.append((main_type, h_start, h_end))
@@ -9530,7 +9620,7 @@ def api_cycle_periods_cache_refresh():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: automated cycle extraction (drop→drop) with review/approval
+# Suggest cycles: automated drop-to-drop extraction with review/approval
 # ---------------------------------------------------------------------------
 
 @app.route('/cycle_extract', methods=['GET'])
@@ -9736,8 +9826,17 @@ def api_cycle_extract_load_data():
 
 @app.route('/api/cycle_extract/existing_entries', methods=['POST'])
 def api_cycle_extract_existing_entries():
-    """Return existing DB entries for a given file (optionally filtered by data_set)."""
+    """Existing DB entries of one file, with the guideline clocks already saved.
+
+    Each entry carries ``has_saved`` and ``saved_periods`` — the stored times
+    only — so **show** and the Period layers can draw the saved D/H/eq/eval
+    after a plain file load, without pressing Propose. This
+    route must stay cheap: it reads ``results`` and ``cycle_periods`` for this
+    file and never calls ``_guideline_proposals_for_file``, which would walk the
+    Excel sheet of every row. Proposing is still what produces editable clocks.
+    """
     try:
+        ensure_cycle_periods_table()
         payload = request.get_json() or {}
         file_name = (payload.get('file_name') or '').strip()
         data_set = payload.get('data_set', None)
@@ -9767,9 +9866,15 @@ def api_cycle_extract_existing_entries():
                     cols + "WHERE file_name=? ORDER BY data_set ASC, start_time ASC",
                     (file_name,)
                 ).fetchall()
+            entries = [dict(r) for r in rows]
+            saved_map = _saved_guideline_periods_map(conn, [e['rowid'] for e in entries])
         finally:
             conn.close()
-        return jsonify({'success': True, 'entries': [dict(r) for r in rows]})
+        for e in entries:
+            saved = saved_map.get(int(e['rowid']), [])
+            e['saved_periods'] = saved
+            e['has_saved'] = bool(saved)
+        return jsonify({'success': True, 'entries': entries})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -9807,19 +9912,31 @@ def _detect_next_drop_after(pelec, p_time, after_t):
     return _detect_pelec_drop(pelec[tail], p_time[tail])
 
 
-def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, default_kind=None):
+def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, default_kind=None,
+                                  redetect_ds2=None):
     """Derive the guideline clocks for the DB entries of one file.
 
     Shared by ``propose_periods`` (read-only) and ``save_all_periods``, so both
     see exactly the same clocks. ``overrides[rowid]`` replays the analyst's edits
     and ``default_kind`` is the file-level "treat unknown rows as" choice, which
-    fills only rows whose kind is still unknown (§2.2.1).
+    fills only rows whose kind is still unknown.
+
+    Where the analyst sent no second-D/S override, the saved clocks of that row
+    seed it, so a typed second span survives a reload. ``redetect_ds2`` is
+    the list of rowids whose **reset** button was pressed: those ignore the seed
+    for this one call and detect the drop again.
 
     Returns ``{'entries': [...], 'lengths': {...}, 'buffer_s': int}``. Only this
     file's entries are read — no full-database walk.
     """
     overrides = overrides if isinstance(overrides, dict) else {}
     default_kind = _normalise_guideline_kind(default_kind)
+    redetect = set()
+    for r in redetect_ds2 or []:
+        try:
+            redetect.add(int(r))
+        except (TypeError, ValueError):
+            continue
 
     cfg = load_cycle_periods_config()
     lengths = _guideline_lengths()
@@ -9836,17 +9953,7 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
         if isinstance(want_rowids, list) and want_rowids:
             keep = {int(x) for x in want_rowids}
             entries = [e for e in entries if int(e['rowid']) in keep]
-        saved_map = {}
-        if entries:
-            ph = ",".join(["?"] * len(entries))
-            rows = conn.execute(
-                f"SELECT entry_rowid, period_type, start_time, end_time FROM cycle_periods "
-                f"WHERE entry_rowid IN ({ph}) AND buffer_s=? AND detection_method=? "
-                f"ORDER BY start_time",
-                [int(e['rowid']) for e in entries] + [buffer_s, GUIDELINE_DETECTION_METHOD]
-            ).fetchall()
-            for p in rows:
-                saved_map.setdefault(int(p['entry_rowid']), []).append(dict(p))
+        saved_map = _saved_guideline_periods_map(conn, [e['rowid'] for e in entries])
     finally:
         conn.close()
 
@@ -9869,7 +9976,7 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
             sheets[ds_key] = _read_excel_sheet(file_name, ds_key)
         df_slice, pelec, p_time = _guideline_pelec_for_window(sheets[ds_key], stf, etf)
 
-        # --- kind (§2.2.1): analyst, stored cycle_type, indicator column,
+        # --- kind: analyst, stored cycle_type, indicator column,
         # already-saved clocks, then the file-level default. ---
         flag, ind_col = (None, None)
         if _normalise_guideline_kind(ov.get('kind')) is None \
@@ -9924,27 +10031,38 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
             except (KeyError, TypeError, ValueError):
                 return None
 
-        # --- second D/S span: a further drop inside the same window (§2.1.1) ---
+        # --- second D/S span: a further drop inside the same window ---
         next_drop, next_drop_source = None, None
+        seed_ds2, seed_no_second = None, False
         if kind != 'continuous' and begins_in == 'ds':
             if _num('ds2_start') is not None:
                 next_drop_source = 'analyst'
             elif ov.get('no_second_ds'):
                 next_drop_source = 'removed by the analyst'
             else:
-                ds_end_guess = _num('ds_end')
-                if ds_end_guess is None and trans is not None:
-                    ds_end_guess = float(trans) + lengths['buffer_s']
-                if ds_end_guess is not None and pelec is not None:
-                    next_drop = _detect_next_drop_after(pelec, p_time, min(ds_end_guess, etf))
-                next_drop_source = 'detected now' if next_drop is not None else 'no later drop found'
+                # With no override in this browser session, the saved clocks
+                # are the seed — otherwise a span the analyst typed before the
+                # reload would be replaced by a fresh detection. reset skips it.
+                if rid not in redetect:
+                    seed_ds2, seed_no_second = _saved_second_ds_seed(saved, stf)
+                if seed_no_second:
+                    next_drop_source = 'one span saved — reset re-detects'
+                elif seed_ds2 is not None:
+                    next_drop_source = 'saved clocks'
+                else:
+                    ds_end_guess = _num('ds_end')
+                    if ds_end_guess is None and trans is not None:
+                        ds_end_guess = float(trans) + lengths['buffer_s']
+                    if ds_end_guess is not None and pelec is not None:
+                        next_drop = _detect_next_drop_after(pelec, p_time, min(ds_end_guess, etf))
+                    next_drop_source = 'detected now' if next_drop is not None else 'no later drop found'
 
         clocks = _build_guideline_clocks(
             stf, etf, kind, begins_in, trans, lengths,
             override={
                 'ds_end': _num('ds_end'),
-                'ds2_start': _num('ds2_start'),
-                'no_second_ds': bool(ov.get('no_second_ds')),
+                'ds2_start': _num('ds2_start') if _num('ds2_start') is not None else seed_ds2,
+                'no_second_ds': bool(ov.get('no_second_ds')) or seed_no_second,
                 'eq_locked': ov.get('eq_locked', True),
                 'eval_locked': ov.get('eval_locked', True),
                 'eq_start': _num('eq_start'),
@@ -9991,7 +10109,7 @@ def api_cycle_extract_propose_periods():
     transition, the D/S end, the kind, or (once unlocked) the eq/eval times and
     re-derive the rest with the same server-side rule, so the clock logic lives
     in one place. ``default_kind`` is the file-level "treat unknown rows as"
-    choice. Nothing is written here — clocks are stored only on save (§2.2.2).
+    choice. Nothing is written here — clocks are stored only on save.
     """
     try:
         ensure_cycle_periods_table()
@@ -10004,6 +10122,7 @@ def api_cycle_extract_propose_periods():
             want_rowids=payload.get('rowids'),
             overrides=payload.get('overrides'),
             default_kind=payload.get('default_kind'),
+            redetect_ds2=payload.get('redetect_ds2'),
         )
         return jsonify({
             'success': True,
@@ -10108,16 +10227,62 @@ def api_cycle_extract_save_periods():
         finally:
             conn.close()
 
-        return jsonify({'success': True, 'saved': n, 'buffer_s': buffer_s})
+        # The workbook is already in memory, so the Guideline Windows interval
+        # scores are stored here instead of being re-derived every time
+        # that page is opened. The connection is closed first: scoring walks a
+        # sheet and must not hold `results` locked. A scoring failure leaves the
+        # clocks alone — the row simply shows as missing scores.
+        scored, score_failed = [], []
+        try:
+            scored, score_failed = _store_scores_for_parents(
+                [rid], {_sheet_cache_key(entry['file_name'], entry['data_set']): df_full})
+        except Exception as exc:
+            score_failed = [(entry['file_name'], entry['data_set'], str(exc))]
+
+        return jsonify({'success': True, 'saved': n, 'buffer_s': buffer_s,
+                        'scored': len(scored),
+                        'score_failed': [f'{f} — {why}' for f, _ds, why in score_failed]})
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)})
 
 
+def _guideline_scope_saved_map(file_name, want_rowids=None):
+    """``([rowid, ...], {rowid: saved periods})`` for one file, without a sheet read.
+
+    The rowid order is the one ``_guideline_proposals_for_file`` uses, and
+    ``want_rowids`` narrows it the same way, so "already saved" is decided on
+    exactly the parents the caller was about to derive. ``has_saved`` uses
+    ``_saved_guideline_periods_map`` (the configured ``buffer_s`` with the same
+    per-entry fallback to any buffer), so a leftover buffer cannot make stored
+    clocks look absent.
+    """
+    keep = None
+    if isinstance(want_rowids, list) and want_rowids:
+        keep = set()
+        for x in want_rowids:
+            try:
+                keep.add(int(x))
+            except (TypeError, ValueError):
+                continue
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM results WHERE file_name=? ORDER BY data_set ASC, start_time ASC",
+            (file_name,)
+        ).fetchall()
+        ids = [int(r['rowid']) for r in rows]
+        if keep is not None:
+            ids = [rid for rid in ids if rid in keep]
+        return ids, _saved_guideline_periods_map(conn, ids)
+    finally:
+        conn.close()
+
+
 @app.route('/api/cycle_extract/save_all_periods', methods=['POST'])
 def api_cycle_extract_save_all_periods():
-    """Save the current proposals for a whole file, or for the ticked rows (§2.2.2).
+    """Save the current proposals for a whole file, or for the ticked rows.
 
     The proposals are re-derived here with the same helper the read-only propose
     call uses, so "Save all" stores exactly what the analyst is looking at while
@@ -10126,8 +10291,14 @@ def api_cycle_extract_save_all_periods():
     batch still saves. Per-row Edit + Save stays for corrections.
 
     ``rowids`` limits the batch to the rows the analyst ticked. Null or empty
-    means the **whole open file**, not "nothing" (§Phase 1.2b). The reply is
+    means the **whole open file**, not "nothing". The reply is
     always JSON, so a failure never reaches the browser as an HTML error page.
+
+    ``skip_saved`` (default **false**) is what the whole-database batch
+    sends: parents that already carry saved guideline clocks are reported as
+    skipped and their sheet is never read, so a second pass over a large list
+    fills only the gaps. With it off — the file-level **Save all proposed** —
+    this route keeps overwriting, because the analyst is looking at that file.
     """
     try:
         ensure_cycle_periods_table()
@@ -10136,15 +10307,37 @@ def api_cycle_extract_save_all_periods():
         file_name = (payload.get('file_name') or '').strip()
         if not file_name:
             return jsonify({'success': False, 'message': 'file_name required'})
+        skip_saved = bool(payload.get('skip_saved'))
+        want_rowids = payload.get('rowids')
+        skipped = []
+
+        if skip_saved:
+            # Cheap pre-pass: decide what to leave alone *before* anything opens a
+            # sheet, so already-saved parents cost no Excel read at all.
+            scoped, saved_map = _guideline_scope_saved_map(file_name, want_rowids)
+            unsaved = [rid for rid in scoped if not saved_map.get(rid)]
+            skipped = [{'rowid': rid, 'reason': 'already has saved guideline clocks'}
+                       for rid in scoped if saved_map.get(rid)]
+            if not unsaved:
+                return jsonify({
+                    'success': True,
+                    'saved_rowids': [],
+                    'saved_entries': 0,
+                    'saved_periods': 0,
+                    'skipped': skipped,
+                    'buffer_s': _guideline_buffer_s(),
+                })
+            want_rowids = unsaved
+
         result = _guideline_proposals_for_file(
             file_name,
-            want_rowids=payload.get('rowids'),
+            want_rowids=want_rowids,
             overrides=payload.get('overrides'),
             default_kind=payload.get('default_kind'),
         )
         buffer_s = result['buffer_s']
 
-        saved_rowids, skipped, total_periods = [], [], 0
+        saved_rowids, total_periods = [], 0
         conn = get_db_connection()
         try:
             sheets = {}
@@ -10163,7 +10356,11 @@ def api_cycle_extract_save_all_periods():
                     continue
                 ds_key = pr.get('data_set')
                 if ds_key not in sheets:
-                    sheets[ds_key] = _read_excel_sheet(file_name, ds_key)
+                    raw = _read_excel_sheet(file_name, ds_key)
+                    # Copy off the Excel LRU cache, then add T_mean_log once so
+                    # each period insert does not rewrite a slice (and spam
+                    # SettingWithCopyWarning for every D/H/eq/eval row).
+                    sheets[ds_key] = add_t_mean_log_column(raw.copy()) if raw is not None else None
                 total_periods += _persist_guideline_clocks(
                     conn, rid, pr['kind'], pr['begins_in'], pr['transition_time'],
                     periods, buffer_s, sheets[ds_key]
@@ -10173,6 +10370,19 @@ def api_cycle_extract_save_all_periods():
         finally:
             conn.close()
 
+        # Store the Guideline Windows interval scores for what this pass wrote
+        # stored, reusing the sheets already read above — one sheet per file is
+        # still enough. After the commit and the close, so a long scoring pass
+        # never holds `results` locked (Flask is threaded). One unreadable sheet
+        # is reported and skipped; the clocks that were written stay.
+        scored, score_failed = [], []
+        try:
+            scored, score_failed = _store_scores_for_parents(
+                saved_rowids,
+                {_sheet_cache_key(file_name, ds): df for ds, df in sheets.items()})
+        except Exception as exc:
+            score_failed = [(file_name, None, str(exc))]
+
         return jsonify({
             'success': True,
             'saved_rowids': saved_rowids,
@@ -10180,6 +10390,8 @@ def api_cycle_extract_save_all_periods():
             'saved_periods': total_periods,
             'skipped': skipped,
             'buffer_s': buffer_s,
+            'scored': len(scored),
+            'score_failed': [f'{f} — {why}' for f, _ds, why in score_failed],
         })
     except Exception as e:
         import traceback
@@ -10188,12 +10400,162 @@ def api_cycle_extract_save_all_periods():
 
 
 # ---------------------------------------------------------------------------
-# Guideline windows page (Phase 2): read the saved clocks back, never re-propose
+# Whole-database clock batch. The write surface stays Cycle Extract: this
+# is the unattended gap-fill over every file that already has parent rows, plus
+# the Clear that makes a disliked first pass repeatable. Guideline Windows stays
+# read-only. Neither route reads Plotdaten.
+# ---------------------------------------------------------------------------
+
+
+@app.route('/api/cycle_extract/database_clock_files', methods=['POST', 'GET'])
+def api_cycle_extract_database_clock_files():
+    """One row per distinct ``results.file_name`` in the open database.
+
+    The cheap list behind the **Save clocks for the open database** confirm: how
+    many parents each file has, how many already carry saved guideline clocks
+    (``has_saved``) and how many the batch would write. It reads ``results``
+    and ``cycle_periods`` only — no ``_read_excel_sheet`` and no
+    ``_guideline_proposals_for_file`` — so opening the confirm never walks
+    Plotdaten. The scope is the database, not the Plotdaten folder listing: a
+    workbook with no parent rows is not in this list.
+    """
+    try:
+        ensure_cycle_periods_table()
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT rowid, file_name FROM results "
+                "WHERE file_name IS NOT NULL AND TRIM(file_name) != '' "
+                "ORDER BY file_name ASC, data_set ASC, start_time ASC"
+            ).fetchall()
+            ids = [int(r['rowid']) for r in rows]
+            saved_map = _saved_guideline_periods_map(conn, ids)
+        finally:
+            conn.close()
+
+        by_file = {}
+        for r in rows:
+            name = r['file_name']
+            f = by_file.setdefault(name, {'file_name': name, 'n_entries': 0,
+                                          'n_saved': 0, 'n_unsaved': 0})
+            f['n_entries'] += 1
+            if saved_map.get(int(r['rowid'])):
+                f['n_saved'] += 1
+            else:
+                f['n_unsaved'] += 1
+
+        files = [by_file[k] for k in sorted(by_file)]
+        return jsonify({
+            'success': True,
+            'files': files,
+            'n_files': len(files),
+            'n_entries': sum(f['n_entries'] for f in files),
+            'n_saved': sum(f['n_saved'] for f in files),
+            'n_unsaved': sum(f['n_unsaved'] for f in files),
+            'database': get_database_label(),
+            'buffer_s': _guideline_buffer_s(),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/cycle_extract/clear_guideline_clocks', methods=['POST'])
+def api_cycle_extract_clear_guideline_clocks():
+    """Throw a guideline-clock pass away so the next one can derive fresh.
+
+    ``file_name`` null (or absent) is every parent in the open database; a name
+    is that file's parents only. Running the gap-fill a second time cannot fix a
+    first pass the analyst dislikes — ``skip_saved`` would no-op — and a
+    replace-in-place would not re-detect either, because the saved rows seed
+    ``ds2_start`` and the stored ``pelec_transition_time`` is reused. So the
+    retry is Clear, then fill.
+
+    Deletes the ``detection_method='guideline'`` periods at **any** ``buffer_s``
+    (a leftover buffer would otherwise keep ``has_saved`` true) and NULLs the
+    stored power split on those parents so detection may run again. The parent
+    ``results`` rows, their windows, means and ``dev_*``, the
+    ``cycle_start_marker`` and every other detection method — Period Statistics
+    ``auto_pelec`` / ``manual`` / ``buffer_s=0`` rows included — stay. No sheet
+    is read and nothing is re-derived: Clear does not auto-fill.
+    """
+    try:
+        ensure_cycle_periods_table()
+        ensure_guideline_scores_table()
+        payload = request.get_json(silent=True) or {}
+        file_name = payload.get('file_name')
+        file_name = file_name.strip() if isinstance(file_name, str) else None
+        if not file_name:
+            file_name = None
+
+        # Sub-selects, not an IN list of rowids: a BAM database can hold far more
+        # parents than SQLite takes bound parameters.
+        if file_name:
+            parents = "SELECT rowid FROM results WHERE file_name=?"
+            args = (file_name,)
+        else:
+            parents = "SELECT rowid FROM results"
+            args = ()
+        where = (f"detection_method=? AND entry_rowid IN ({parents})")
+
+        conn = get_db_connection()
+        try:
+            counts = conn.execute(
+                f"SELECT COUNT(*) AS n_periods, COUNT(DISTINCT entry_rowid) AS n_entries "
+                f"FROM cycle_periods WHERE {where}",
+                (GUIDELINE_DETECTION_METHOD,) + args
+            ).fetchone()
+            cleared_periods = int(counts['n_periods'] or 0)
+            cleared_entries = int(counts['n_entries'] or 0)
+            if cleared_periods:
+                # The parents first: after the DELETE there is nothing left to
+                # identify which rows carried a guideline pass.
+                conn.execute(
+                    f"UPDATE results SET pelec_transition_time=NULL, "
+                    f"pelec_transition_source=NULL, pelec_detect_failed=0 "
+                    f"WHERE rowid IN (SELECT DISTINCT entry_rowid FROM cycle_periods "
+                    f"WHERE {where})",
+                    (GUIDELINE_DETECTION_METHOD,) + args
+                )
+                conn.execute(f"DELETE FROM cycle_periods WHERE {where}",
+                             (GUIDELINE_DETECTION_METHOD,) + args)
+            # The Guideline Windows score cache goes with the clocks it was
+            # computed from, whether or not anything was cleared just now:
+            # a payload left behind would be scored against times that no longer
+            # exist. The sub-select is on `results`, so it does not depend on the
+            # rows the DELETE above has already removed.
+            cleared_scores = conn.execute(
+                f"DELETE FROM guideline_window_scores WHERE entry_rowid IN ({parents})",
+                args).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+
+        return jsonify({
+            'success': True,
+            'file_name': file_name,
+            'cleared_entries': cleared_entries,
+            'cleared_periods': cleared_periods,
+            'cleared_scores': max(int(cleared_scores or 0), 0),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Guideline windows page: read the saved clocks back, never re-propose
 # ---------------------------------------------------------------------------
 
 GUIDELINE_WINDOW_CSV_COLUMNS = [
-    ('rowid', 'rowid'), ('file_name', 'file'), ('data_set', 'data_set'),
+    # `#`, not `rowid`: the same 1-based position the analyst reads on Mean
+    # Values and Deviations. SQLite `rowid` has holes after a delete, so it is
+    # kept in the JSON for the APIs and shown nowhere.
+    ('index', '#'), ('file_name', 'file'), ('data_set', 'data_set'),
     ('test_cond', 'test_cond'), ('profile_id', 'profile'), ('hp_id', 'hp_id'),
+    ('cop_dataset', 'COP_dataset'),
     ('start_time', 'parent_start_s'), ('end_time', 'parent_end_s'), ('kind', 'kind'),
     ('d1_start', 'D1_start_s'), ('d1_end', 'D1_end_s'),
     ('d2_start', 'D2_start_s'), ('d2_end', 'D2_end_s'),
@@ -10206,6 +10568,23 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     ('parent_p', 'parent_P_kW'), ('parent_cop', 'parent_COP'),
     ('eval_tsup', 'eval_Tsup_C'), ('eval_q', 'eval_Q_kW'),
     ('eval_p', 'eval_P_kW'), ('eval_cop', 'eval_COP'),
+    ('h_db_pct', 'H_DB_pct'), ('eq_db_pct', 'eq_DB_pct'), ('eval_db_pct', 'eval_DB_pct'),
+    ('h_wb_pct', 'H_WB_pct'), ('eq_wb_pct', 'eq_WB_pct'), ('eval_wb_pct', 'eval_WB_pct'),
+    ('h_flow_pct', 'H_flow_pct'), ('eq_flow_pct', 'eq_flow_pct'), ('eval_flow_pct', 'eval_flow_pct'),
+    ('h_dtreturn_pct', 'H_dTreturn_pct'), ('eq_dtreturn_pct', 'eq_dTreturn_pct'),
+    ('eval_dtreturn_pct', 'eval_dTreturn_pct'),
+    ('d_db_pct', 'D_DB_pct'), ('d_dtreturn_pct', 'D_dTreturn_pct'),
+    ('s_db_pct', 'S_DB_pct'), ('s_wb_pct', 'S_WB_pct'),
+    ('s_flow_pct', 'S_flow_pct'), ('s_dtreturn_pct', 'S_dTreturn_pct'),
+    # Mean deviations: one number per interval, K or % of set — not a
+    # share of samples, so every header carries its unit.
+    ('h_mean_db_k', 'H_mean_DB_K'), ('h_mean_wb_k', 'H_mean_WB_K'),
+    ('h_mean_tsup_k', 'H_mean_Tsup_K'), ('h_mean_dtreturn_k', 'H_mean_dTreturn_K'),
+    ('h_mean_flow_pct', 'H_mean_flow_pct_of_set'),
+    ('d_mean_db_k', 'D_mean_DB_K'), ('d_mean_wb_k', 'D_mean_WB_K'),
+    ('s_mean_db_k', 'S_mean_DB_K'), ('s_mean_wb_k', 'S_mean_WB_K'),
+    ('s_mean_flow_pct', 'S_mean_flow_pct_of_set'),
+    ('eval_delta_cop', 'eval_dCOP_pct'),
     ('note', 'note'),
 ]
 
@@ -10297,143 +10676,1009 @@ def _analysis_means_for_window(df_sheet, file_name, stf: float, etf: float, lab_
     return means
 
 
-def _guideline_window_rows(rowids=None) -> dict:
-    """One row per parent entry: stored clocks, parent means, evaluation means.
+def _window_dtreturn_pct(df_full, start, end, band):
+    """(dTreturn %, reason) for one saved window, or (None, reason) when it was not scored.
 
-    Read-only. Only **saved** guideline periods are read (``detection_method``
-    ``guideline`` at the configured buffer) — nothing is proposed here, so clocks
-    the analyst has not saved on Cycle Extract stay invisible and the row still
-    appears with its identity and parent means.
-
-    ``rowids`` None means every parent row in the open database. That is an
-    explicit request from the analyst, so the list is not capped.
+    The individual liquid sink inlet check: the share of samples whose
+    measured return is further than the interval half-width from the set return.
+    Everything that is not a scored window comes back empty with a reason, so a
+    cell the analyst reads as n/a can never have been a 0.
     """
-    lengths = _guideline_lengths()
-    buffer_s = _guideline_buffer_s()
+    if band is None:
+        return None, 'no dTreturn band is configured for this interval'
+    if start is None or end is None:
+        return None, 'no window of this kind is saved'
+    if df_full is None or 'time_elapsed' not in getattr(df_full, 'columns', []):
+        return None, 'the sheet could not be read'
+    window = df_full[(df_full['time_elapsed'] >= start) & (df_full['time_elapsed'] <= end)]
+    if window.empty:
+        return None, 'the sheet holds no samples in this window'
+    dtreturn = _dtreturn_series(window)
+    if dtreturn is None:
+        return None, 'the sheet has no T_return_emu / T_return_calc'
+    _count, pct = _dtreturn_outside_band(dtreturn, band[0], band[1], len(window))
+    if pct is None:
+        return None, 'no valid dTreturn samples in this window'
+    return _guideline_num(pct), ''
 
-    want = None
-    if rowids is not None:
-        seen = []
-        for raw in rowids:
-            try:
-                seen.append(int(raw))
-            except (TypeError, ValueError):
-                continue
-        want = sorted(set(seen))
 
+def _entry_with_hp_id(entry):
+    """SQLite results rows store ``HP_ID``; profile / flow lookups read ``hp_id``."""
+    entry = dict(entry or {})
+    if entry.get('hp_id') is None and entry.get('HP_ID') is not None:
+        entry['hp_id'] = entry['HP_ID']
+    return entry
+
+
+def _series_for_entry_deviations(entry, fallback_df):
+    """The parent-window series Deviations Calculate uses, else the already-read sheet.
+
+    ``load_time_series_data`` is what filled the Setpoint / DB % / WB % / flow %
+    columns on Deviations: stored ``time_series_data`` when present, otherwise
+    the Plotdaten sheet plus derived mass flow. Guideline Windows must cut H /
+    eq / eval from that same frame. The raw Excel cache is only a fallback
+    (dTreturn still reads it, because those column names match on both).
+    """
+    if not entry:
+        return fallback_df
+    start, end = entry.get('start_time'), entry.get('end_time')
+    if start is None or end is None:
+        return fallback_df
+    try:
+        loaded = load_time_series_data(
+            entry.get('file_name'), start, end, data_set=entry.get('data_set'))
+    except Exception:
+        loaded = None
+    if loaded is None or getattr(loaded, 'empty', True):
+        return fallback_df
+    return loaded
+
+
+def _window_h_band_pcts(df_full, file_name, data_set, start, end, entry):
+    """Interval H individual DB / WB / flow % on one saved window.
+
+    Same formulas as the parent Deviations table (``calculate_entry_deviations``),
+    cut to this window. Empty window or a check that does not apply → n/a, never 0.
+    ``df_full`` should already be the Deviations series when the caller has it.
+    """
+    missing = {k: (None, 'no window of this kind is saved') for k in ('db', 'wb', 'flow')}
+    if start is None or end is None:
+        return missing
+    if df_full is None or 'time_elapsed' not in getattr(df_full, 'columns', []):
+        return {k: (None, 'the sheet could not be read') for k in ('db', 'wb', 'flow')}
+    window = df_full[(df_full['time_elapsed'] >= start) & (df_full['time_elapsed'] <= end)]
+    if window.empty:
+        return {k: (None, 'the sheet holds no samples in this window') for k in ('db', 'wb', 'flow')}
+    entry = _entry_with_hp_id(entry)
+    warnings = []
+    import io
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        stats = calculate_entry_deviations(
+            file_name, data_set, start, end, warning_list=warnings,
+            hp_id=entry.get('hp_id'),
+            entry=entry, df=df_full,
+        )
+    if not stats:
+        reason = (warnings[0] if warnings else 'deviations could not be scored for this window')
+        return {k: (None, reason) for k in ('db', 'wb', 'flow')}
+    none_reason = {
+        'db': 'no valid dry-bulb samples (or the check does not apply)',
+        'wb': 'no valid wet-bulb samples (or the check does not apply)',
+        'flow': 'no valid flow samples (or the check does not apply)',
+    }
+    applicable = _entry_applicable_checks(entry)
+    db_set = stats.get('db_setpoint')
+    out = {}
+    for key, col in (('db', 'db_percentage'), ('wb', 'wb_percentage'), ('flow', 'flow_percentage')):
+        val = stats.get(col)
+        if val is not None:
+            out[key] = (_guideline_num(val), '')
+        elif key == 'flow' and _entry_is_variable_flow(entry):
+            out[key] = (None, 'variable-flow test — flow % is not scored')
+        elif key == 'flow' and 'flow' not in applicable:
+            out[key] = (None, 'the flow check does not apply')
+        elif key in ('db', 'wb') and db_set is None and key in applicable:
+            out[key] = (None, 'no outdoor setpoint for this test condition')
+        else:
+            out[key] = (None, none_reason[key])
+    return out
+
+
+def _interval_spec_half(spec, name):
+    """Positive half-width from an interval spec, or None if that quantity is not scored."""
+    if not isinstance(spec, dict):
+        return None
+    try:
+        half = float(spec.get(name))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(half) or half <= 0:
+        return None
+    return half
+
+
+def _clean_interval_spans(spans):
+    """[(start, end), ...] with finite edges and end > start."""
+    out = []
+    for item in spans or []:
+        if item is None:
+            continue
+        try:
+            start, end = item[0], item[1]
+        except (TypeError, IndexError, KeyError):
+            continue
+        start, end = _guideline_num(start), _guideline_num(end)
+        if start is None or end is None or end <= start:
+            continue
+        out.append((start, end))
+    return out
+
+
+def _spans_from_row(row, prefix):
+    """D1/D2 or S1/S2 clocks already on the Guideline Windows row."""
+    return _clean_interval_spans([
+        (row.get(f'{prefix}{i}_start'), row.get(f'{prefix}{i}_end')) for i in (1, 2)
+    ])
+
+
+def _union_span_frame(df, spans):
+    """Rows whose time_elapsed sits in any of the spans (the guideline D or S union)."""
+    spans = _clean_interval_spans(spans)
+    if df is None or 'time_elapsed' not in getattr(df, 'columns', []) or not spans:
+        return None
+    t = pd.to_numeric(df['time_elapsed'], errors='coerce')
+    mask = False
+    for start, end in spans:
+        part = (t >= start) & (t <= end)
+        mask = part if mask is False else (mask | part)
+    return df.loc[mask]
+
+
+def _pct_outside_half(series, setpoint, half, total):
+    """Share of samples outside setpoint ± half. NaN is neither in nor out."""
+    if setpoint is None or half is None or not total:
+        return None
+    s = pd.to_numeric(series, errors='coerce')
+    if not _has_valid_points(s):
+        return None
+    lo, hi = float(setpoint) - float(half), float(setpoint) + float(half)
+    count = int(len(s[(s < lo) | (s > hi)]))
+    return count / total * 100.0
+
+
+def _entry_db_setpoint(entry, file_name):
+    """Outdoor dry-bulb set used by Deviations, including a stored fallback."""
+    entry = _entry_with_hp_id(entry)
+    letter = unit_config.condition_letter(
+        entry.get('dev_test_condition') or entry.get('test_cond')
+    )
+    climate, application = _entry_climate_application({
+        **entry, 'file_name': file_name, 'hp_id': entry.get('hp_id'),
+    })
+    db_set = None
+    if letter:
+        db_set = unit_config.get_tdb_setpoint_for(
+            letter, climate=climate, application=application,
+            condition_set_id=entry.get('condition_set_id'),
+        )
+        if db_set is None:
+            db_set = unit_config.get_tdb_setpoint_for(letter)
+    if db_set is None:
+        try:
+            stored = entry.get('dev_db_setpoint')
+            db_set = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            db_set = None
+    return db_set
+
+
+def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set, quantities):
+    """Individual % on the union of saved D or S spans, using that interval's JSON widths.
+
+    ``quantities`` is the list of keys this interval is allowed to score. A draft
+    ``—`` cell is simply omitted from the list (D has no WB or flow), so a series
+    that exists on the sheet cannot invent a number. Empty = n/a, never 0.
+    DB/WB/flow use the Deviations series; dTreturn uses the raw sheet.
+    """
+    missing = {k: (None, 'no window of this kind is saved') for k in quantities}
+    spans = _clean_interval_spans(spans)
+    if not spans:
+        return missing
+    if not isinstance(spec, dict) or not spec:
+        return {k: (None, 'no bands are configured for this interval') for k in quantities}
+    entry = _entry_with_hp_id(entry)
+    applicable = _entry_applicable_checks(entry)
+
+    def _cut(df):
+        if df is None or 'time_elapsed' not in getattr(df, 'columns', []):
+            return None
+        return _union_span_frame(df, spans)
+
+    window_dev = _cut(df_dev)
+    window_raw = _cut(df_raw if df_raw is not None else df_dev)
+    out = {}
+    db_set = _entry_db_setpoint(entry, file_name)
+
+    if 'db' in quantities:
+        half = _interval_spec_half(spec, 'db_k')
+        if half is None:
+            out['db'] = (None, 'no DB band is configured for this interval')
+        elif 'db' not in applicable:
+            out['db'] = (None, 'the dry-bulb check does not apply')
+        elif window_dev is None:
+            out['db'] = (None, 'the sheet could not be read')
+        elif window_dev.empty:
+            out['db'] = (None, 'the sheet holds no samples in this window')
+        elif 'T_outdoor (DB)' not in window_dev.columns:
+            out['db'] = (None, 'the sheet has no T_outdoor (DB)')
+        elif db_set is None:
+            out['db'] = (None, 'no outdoor setpoint for this test condition')
+        else:
+            pct = _pct_outside_half(window_dev['T_outdoor (DB)'], db_set, half, len(window_dev))
+            out['db'] = ((_guideline_num(pct), '') if pct is not None
+                         else (None, 'no valid dry-bulb samples in this window'))
+
+    if 'wb' in quantities:
+        half = _interval_spec_half(spec, 'wb_k')
+        if half is None:
+            out['wb'] = (None, 'no WB band is configured for this interval')
+        elif 'wb' not in applicable:
+            out['wb'] = (None, 'the wet-bulb check does not apply')
+        elif window_dev is None:
+            out['wb'] = (None, 'the sheet could not be read')
+        elif window_dev.empty:
+            out['wb'] = (None, 'the sheet holds no samples in this window')
+        elif 'T_outdoor (WB)' not in window_dev.columns:
+            out['wb'] = (None, 'the sheet has no T_outdoor (WB)')
+        elif db_set is None:
+            out['wb'] = (None, 'no outdoor setpoint for this test condition')
+        else:
+            pct = _pct_outside_half(
+                window_dev['T_outdoor (WB)'], db_set - 1.0, half, len(window_dev))
+            out['wb'] = ((_guideline_num(pct), '') if pct is not None
+                         else (None, 'no valid wet-bulb samples in this window'))
+
+    if 'flow' in quantities:
+        half = _interval_spec_half(spec, 'flow_instantaneous_pct')
+        if half is None:
+            out['flow'] = (None, 'no flow band is configured for this interval')
+        elif _entry_is_variable_flow(entry):
+            out['flow'] = (None, 'variable-flow test — flow % is not scored')
+        elif 'flow' not in applicable:
+            out['flow'] = (None, 'the flow check does not apply')
+        elif window_dev is None:
+            out['flow'] = (None, 'the sheet could not be read')
+        elif window_dev.empty:
+            out['flow'] = (None, 'the sheet holds no samples in this window')
+        else:
+            flow_type, flow_set = get_flow_set_for_hp(
+                entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
+            if not flow_type or flow_set is None or flow_set <= 0:
+                out['flow'] = (None, 'no flow set for this unit')
+            else:
+                flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
+                if flow_col not in window_dev.columns:
+                    out['flow'] = (None, f'the sheet has no {flow_col}')
+                else:
+                    lo = flow_set * (1 - half / 100.0)
+                    hi = flow_set * (1 + half / 100.0)
+                    series = pd.to_numeric(window_dev[flow_col], errors='coerce')
+                    if not _has_valid_points(series):
+                        out['flow'] = (None, 'no valid flow samples in this window')
+                    else:
+                        count = int(len(series[(series < lo) | (series > hi)]))
+                        out['flow'] = (_guideline_num(count / len(window_dev) * 100.0), '')
+
+    if 'dtreturn' in quantities:
+        half = _interval_spec_half(spec, 'dtreturn_k')
+        band = (-half, half) if half is not None else None
+        if window_raw is None:
+            out['dtreturn'] = (None, 'the sheet could not be read')
+        elif window_raw.empty:
+            out['dtreturn'] = (None, 'the sheet holds no samples in this window')
+        else:
+            # Same count as H/eq/eval: reuse the interval dTreturn helper's formula.
+            pct, reason = (None, 'no dTreturn band is configured for this interval')
+            if band is not None:
+                dtreturn = _dtreturn_series(window_raw)
+                if dtreturn is None:
+                    pct, reason = None, 'the sheet has no T_return_emu / T_return_calc'
+                else:
+                    _count, pct = _dtreturn_outside_band(
+                        dtreturn, band[0], band[1], len(window_raw))
+                    reason = '' if pct is not None else 'no valid dTreturn samples in this window'
+                    pct = _guideline_num(pct)
+            out['dtreturn'] = (pct, reason)
+
+    return out
+
+
+# --- Mean deviations on the saved guideline windows ------------------------
+# The draft table has two different checks per quantity. The individual one above is
+# a share of samples outside a band; this one is a single arithmetic mean of the
+# interval against its setpoint. They have their own half-widths (H mean DB is
+# ±0.3 K where H individual DB is ±1 K), so the two must never share a formula.
+MEAN_DEV_SPEC_KEYS = {
+    'db': 'mean_db_k',
+    'wb': 'mean_wb_k',
+    'tsup': 'mean_tsup_k',
+    'dtreturn': 'mean_dtreturn_k',
+    'flow': 'mean_flow_pct',
+}
+# What each interval is allowed to score. A draft "—" cell is simply absent, so
+# a series that exists on the sheet cannot invent a number for it.
+MEAN_DEV_QUANTITIES = {
+    'H': ('db', 'wb', 'tsup', 'dtreturn', 'flow'),
+    'D': ('db', 'wb'),
+    'S': ('db', 'wb', 'flow'),
+}
+# Row field per interval and quantity. The suffix names the unit, so a mean in K
+# can never be read as one of the individual shares in %.
+MEAN_DEV_ROW_KEYS = {
+    'H': {'db': 'h_mean_db_k', 'wb': 'h_mean_wb_k', 'tsup': 'h_mean_tsup_k',
+          'dtreturn': 'h_mean_dtreturn_k', 'flow': 'h_mean_flow_pct'},
+    'D': {'db': 'd_mean_db_k', 'wb': 'd_mean_wb_k'},
+    'S': {'db': 's_mean_db_k', 'wb': 's_mean_wb_k', 'flow': 's_mean_flow_pct'},
+}
+MEAN_DEV_REASON_KEYS = {'H': 'h_mean_reasons', 'D': 'd_mean_reasons', 'S': 's_mean_reasons'}
+MEAN_DEV_NO_WINDOW = 'no window of this kind is saved'
+
+
+def _mean_dev_reason_defaults(interval, reason=MEAN_DEV_NO_WINDOW):
+    """Hover text for every mean cell of one interval before the sheet is read."""
+    return {q: reason for q in MEAN_DEV_QUANTITIES[interval]}
+
+
+def _mean_dev_na(interval, reason):
+    """Every mean of one interval as n/a with one shared reason — never 0."""
+    return {q: (None, reason) for q in MEAN_DEV_QUANTITIES[interval]}
+
+
+def _apply_mean_devs(row, interval, results):
+    """Write one interval's ``{quantity: (value, reason)}`` onto the table row."""
+    keys = MEAN_DEV_ROW_KEYS[interval]
+    reasons = row[MEAN_DEV_REASON_KEYS[interval]]
+    for quantity, (value, why) in results.items():
+        row[keys[quantity]] = value
+        reasons[quantity] = why
+
+
+def _series_mean(series):
+    """Arithmetic mean of a window series, or None when nothing was measured.
+
+    NaN is missing, not zero: an all-NaN column must come back as n/a instead of
+    a mean of 0 that would read as a perfectly held interval.
+    """
+    if series is None:
+        return None
+    s = pd.to_numeric(series, errors='coerce')
+    if not _has_valid_points(s):
+        return None
+    return _guideline_num(s.mean())
+
+
+def _mean_dev_half(spec, quantity):
+    """Mean half-width of one quantity on one interval, or None when the draft cell is —."""
+    if quantity not in MEAN_DEV_SPEC_KEYS:
+        return None
+    return _interval_spec_half(spec, MEAN_DEV_SPEC_KEYS[quantity])
+
+
+def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities):
+    """Signed **mean** deviations on the union of saved spans (the mean columns).
+
+    One number per quantity, not a sample share: ``mean(series) − setpoint`` in K
+    for DB / WB / Tsup, ``mean(T_return_emu − T_return_calc)`` in K against 0 for
+    the liquid sink inlet, and ``100 × (mean(flow) − flow_set) / flow_set`` in
+    per cent of set for flow. ``quantities`` is what this interval may score.
+
+    ``{quantity: (value, reason)}``. Empty = n/a, never 0, and the reason is what
+    the cell's hover shows. DB / WB / Tsup / flow read the Deviations series (the
+    same frame as the individual %); dTreturn reads the raw sheet, where
+    ``T_return_emu`` / ``T_return_calc`` already sit.
+    """
+    missing = {k: (None, 'no window of this kind is saved') for k in quantities}
+    spans = _clean_interval_spans(spans)
+    if not spans:
+        return missing
+    if not isinstance(spec, dict) or not spec:
+        return {k: (None, 'no mean bands are configured for this interval') for k in quantities}
+    entry = _entry_with_hp_id(entry)
+    applicable = _entry_applicable_checks(entry)
+    window_dev = _union_span_frame(df_dev, spans)
+    window_raw = _union_span_frame(df_raw if df_raw is not None else df_dev, spans)
+
+    def _frame_reason(window):
+        """Why this window cannot carry a mean at all, or '' when it can."""
+        if window is None:
+            return 'the sheet could not be read'
+        if window.empty:
+            return 'the sheet holds no samples in this window'
+        return ''
+
+    out = {}
+    db_set = _entry_db_setpoint(entry, file_name)
+
+    def _temperature_mean(quantity, column, setpoint, check_id, what, setpoint_reason):
+        """mean(column) − setpoint in K, or (None, why)."""
+        half = _mean_dev_half(spec, quantity)
+        if half is None:
+            return (None, f'no mean {what} band is configured for this interval')
+        if check_id not in applicable:
+            return (None, f'the {what} check does not apply')
+        frame_why = _frame_reason(window_dev)
+        if frame_why:
+            return (None, frame_why)
+        if column is None or column not in window_dev.columns:
+            return (None, f'the sheet has no {what} series')
+        if setpoint is None:
+            return (None, setpoint_reason)
+        mean = _series_mean(window_dev[column])
+        if mean is None:
+            return (None, f'no valid {what} samples in this window')
+        return (_guideline_num(mean - float(setpoint)), '')
+
+    if 'db' in quantities:
+        out['db'] = _temperature_mean(
+            'db', 'T_outdoor (DB)', db_set, 'db', 'dry-bulb',
+            'no outdoor setpoint for this test condition')
+
+    if 'wb' in quantities:
+        # Same wet-bulb setpoint convention as the parent table and the individual %.
+        wb_set = (db_set - 1.0) if db_set is not None else None
+        out['wb'] = _temperature_mean(
+            'wb', 'T_outdoor (WB)', wb_set, 'wb', 'wet-bulb',
+            'no outdoor setpoint for this test condition')
+
+    if 'tsup' in quantities:
+        # Same column choice as the Deviations Tsup plot: Ts Buh, else T_supply.
+        tsup_col = get_tsup_series_column(window_dev)
+        tsup_set = _tsup_setpoint_from_entry(entry, file_name=file_name)
+        out['tsup'] = _temperature_mean(
+            'tsup', tsup_col, tsup_set, 'tsup', 'supply temperature',
+            'no supply setpoint for this test condition')
+
+    if 'dtreturn' in quantities:
+        if _mean_dev_half(spec, 'dtreturn') is None:
+            out['dtreturn'] = (None, 'no mean inlet band is configured for this interval')
+        else:
+            frame_why = _frame_reason(window_raw)
+            if frame_why:
+                out['dtreturn'] = (None, frame_why)
+            else:
+                dtreturn = _dtreturn_series(window_raw)
+                if dtreturn is None:
+                    out['dtreturn'] = (None, 'the sheet has no T_return_emu / T_return_calc')
+                else:
+                    # T_return_calc is the set inlet, so the mean of the difference
+                    # is already the deviation from set and is scored against 0 K.
+                    mean = _series_mean(dtreturn)
+                    out['dtreturn'] = ((mean, '') if mean is not None
+                                       else (None, 'no valid dTreturn samples in this window'))
+
+    if 'flow' in quantities:
+        if _mean_dev_half(spec, 'flow') is None:
+            out['flow'] = (None, 'no mean flow band is configured for this interval')
+        elif _entry_is_variable_flow(entry):
+            out['flow'] = (None, 'variable-flow test — flow % is not scored')
+        elif 'flow' not in applicable:
+            out['flow'] = (None, 'the flow check does not apply')
+        else:
+            frame_why = _frame_reason(window_dev)
+            if frame_why:
+                out['flow'] = (None, frame_why)
+            else:
+                flow_type, flow_set = get_flow_set_for_hp(
+                    entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
+                if not flow_type or flow_set is None or flow_set <= 0:
+                    out['flow'] = (None, 'no flow set for this unit')
+                else:
+                    flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
+                    if flow_col not in window_dev.columns:
+                        out['flow'] = (None, f'the sheet has no {flow_col}')
+                    else:
+                        mean = _series_mean(window_dev[flow_col])
+                        if mean is None:
+                            out['flow'] = (None, 'no valid flow samples in this window')
+                        else:
+                            out['flow'] = (_guideline_num(
+                                100.0 * (mean - float(flow_set)) / float(flow_set)), '')
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Guideline Windows score cache.
+#
+# The interval scores are the expensive part of this page: one Plotdaten sheet
+# per file plus the Deviations series per parent. Clock **Save** already holds
+# that sheet, so the numbers are computed there and stored beside the clocks.
+# Guideline Windows then reads the store and never opens a workbook, so opening
+# the page costs a query and leaving it costs nothing to come back to.
+#
+# A parent that has clocks but no cache row — clocks saved before scores were
+# stored — is filled by the explicit **Compute missing scores** control, file
+# by file. The page's own auto-load is
+# not that backfill in disguise.
+#
+# This is **not** ``entry_interval_deviations``: that is the per-interval
+# Deviations payload written by /calculate_deviations, a different shape. Mixing
+# the two would let one path clobber the other.
+# ---------------------------------------------------------------------------
+
+# Bump when a score formula or the stored field set changes: every cached row
+# then misses its fingerprint and is recomputed instead of read back stale.
+GUIDELINE_SCORE_CACHE_VERSION = 1
+
+# The row fields that need the sheet. Everything else on a Guideline Windows row
+# — identity, kind, clock times, parent Tsup/Q/P/COP — is read from ``results``
+# and ``cycle_periods`` on every load and is never cached.
+GUIDELINE_SCORE_VALUE_KEYS = (
+    'eval_tsup', 'eval_q', 'eval_p', 'eval_cop',
+    'h_dtreturn_pct', 'eq_dtreturn_pct', 'eval_dtreturn_pct',
+    'h_db_pct', 'eq_db_pct', 'eval_db_pct',
+    'h_wb_pct', 'eq_wb_pct', 'eval_wb_pct',
+    'h_flow_pct', 'eq_flow_pct', 'eval_flow_pct',
+    'd_db_pct', 'd_dtreturn_pct',
+    's_db_pct', 's_wb_pct', 's_flow_pct', 's_dtreturn_pct',
+    'h_mean_db_k', 'h_mean_wb_k', 'h_mean_tsup_k', 'h_mean_dtreturn_k', 'h_mean_flow_pct',
+    'd_mean_db_k', 'd_mean_wb_k',
+    's_mean_db_k', 's_mean_wb_k', 's_mean_flow_pct',
+    'eval_delta_cop',
+)
+# The hover text beside those numbers. Stored with them, so an n/a cell keeps
+# saying *why* it is empty after a restart instead of turning into a bare blank.
+GUIDELINE_SCORE_REASON_KEYS = (
+    'dtreturn_reasons', 'db_reasons', 'wb_reasons', 'flow_reasons', 'd_reasons', 's_reasons',
+    'h_mean_reasons', 'd_mean_reasons', 's_mean_reasons',
+)
+GUIDELINE_SCORE_TEXT_KEYS = ('delta_cop_reason', 'note')
+
+GUIDELINE_SCORES_MISSING_REASON = (
+    'no interval scores are stored for this entry yet — use Compute missing scores on this page'
+)
+
+
+def ensure_guideline_scores_table() -> None:
+    """The score cache. One row per parent, replaced whenever its clocks are saved.
+
+    Separate from ``entry_interval_deviations`` on purpose: that table is
+    the Deviations extra-block payload and still belongs to /calculate_deviations.
+    """
     conn = get_db_connection()
     try:
-        result_cols = {r[1] for r in conn.execute('PRAGMA table_info(results)').fetchall()}
-        # Mean Values order, so the analyst reads the same sequence on both pages.
-        order_by = 'display_order ASC, rowid ASC' if 'display_order' in result_cols else 'rowid ASC'
-        if want is None:
-            entries = [dict(r) for r in conn.execute(
-                f'SELECT rowid, * FROM results ORDER BY {order_by}').fetchall()]
-        elif want:
-            ph = ','.join(['?'] * len(want))
-            entries = [dict(r) for r in conn.execute(
-                f'SELECT rowid, * FROM results WHERE rowid IN ({ph}) ORDER BY {order_by}',
-                want).fetchall()]
-        else:
-            entries = []
-
-        stored = {}
-        if entries:
-            ids = [int(e['rowid']) for e in entries]
-            ph = ','.join(['?'] * len(ids))
-            for p in conn.execute(
-                f'SELECT * FROM cycle_periods WHERE entry_rowid IN ({ph}) '
-                f'AND detection_method=? AND buffer_s=? ORDER BY start_time ASC, id ASC',
-                ids + [GUIDELINE_DETECTION_METHOD, buffer_s]
-            ).fetchall():
-                stored.setdefault(int(p['entry_rowid']), []).append(dict(p))
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guideline_window_scores (
+                entry_rowid INTEGER PRIMARY KEY,
+                buffer_s INTEGER,
+                fingerprint TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.commit()
     finally:
         conn.close()
 
-    rows, need_sheet = [], []
-    for entry in entries:
-        rid = int(entry['rowid'])
-        periods = stored.get(rid, [])
-        kind = _guideline_kind_from_stored(p['period_type'] for p in periods)
 
-        ds_type = {'defrost': 'defrost', 'on_off': 'off'}.get(kind)
-        ds_spans = [p for p in periods if p['period_type'] == ds_type] if ds_type else []
-        h_type = 'on' if kind == 'on_off' else 'heating'
-        h = next((p for p in periods if p['period_type'] == h_type), None)
-        eq = next((p for p in periods if p['period_type'] == 'equilibrium'), None)
-        # Periods come back ordered by start_time, so this is the earliest evaluation.
-        ev = next((p for p in periods if p['period_type'] == 'evaluation'), None)
+_interval_dev_hash_cache = None
+_interval_dev_hash_mtime = -1.0
 
-        row = {
-            'rowid': rid,
-            'file_name': entry.get('file_name'),
-            'data_set': entry.get('data_set'),
-            'test_cond': (entry.get('dev_test_condition') or entry.get('test_cond') or ''),
-            'profile_id': entry.get('profile_id') or '',
-            'hp_id': entry.get('HP_ID') if entry.get('HP_ID') is not None else entry.get('hp_id'),
-            'start_time': _guideline_num(entry.get('start_time')),
-            'end_time': _guideline_num(entry.get('end_time')),
-            'kind': kind,
-            'h_start': _guideline_num(h['start_time']) if h else None,
-            'h_end': _guideline_num(h['end_time']) if h else None,
-            'eq_start': _guideline_num(eq['start_time']) if eq else None,
-            'eq_end': _guideline_num(eq['end_time']) if eq else None,
-            'eval_start': _guideline_num(ev['start_time']) if ev else None,
-            'eval_end': _guideline_num(ev['end_time']) if ev else None,
-            'parent_tsup': _guideline_num(get_mean_supply_for_deviations(entry)),
-            'parent_q': _guideline_num(get_mean_q_for_deviations(entry)),
-            'parent_p': _guideline_num(get_mean_p_for_deviations(entry)),
-            'parent_cop': _guideline_num(get_mean_cop_for_deviations(entry)),
-            'eval_tsup': None, 'eval_q': None, 'eval_p': None, 'eval_cop': None,
-            'note': '',
-        }
-        # D1/D2 for a defrost cycle, S1/S2 for an on-off one; the other pair stays empty.
-        prefix = 'd' if kind == 'defrost' else ('s' if kind == 'on_off' else None)
-        for slot in (1, 2):
-            for edge in ('start', 'end'):
-                row[f'd{slot}_{edge}'] = None
-                row[f's{slot}_{edge}'] = None
-        if prefix:
-            for i, span in enumerate(ds_spans[:2], start=1):
-                row[f'{prefix}{i}_start'] = _guideline_num(span['start_time'])
-                row[f'{prefix}{i}_end'] = _guideline_num(span['end_time'])
 
-        if kind == 'unknown':
-            row['note'] = 'No guideline clocks saved — save them on Cycle Extract first.'
-        elif kind == 'on_off':
-            row['note'] = 'On–off cycle — no equilibrium/evaluation window by rule.'
-        elif ev is None:
-            h_len = None
-            if row['h_start'] is not None and row['h_end'] is not None:
-                h_len = row['h_end'] - row['h_start']
-            if h_len is not None and h_len < lengths['eq_s'] + lengths['eval_s']:
-                row['note'] = (f"H is shorter than eq {lengths['eq_min']:g} min + "
-                               f"eval {lengths['eval_min']:g} min — no evaluation window stored.")
-            else:
-                row['note'] = 'No evaluation window stored for this entry.'
-        else:
-            need_sheet.append((row, ev))
+def _interval_deviations_config_hash() -> str:
+    """Stable hash of ``config/interval_deviations.json`` (``absent`` when there is none).
 
-        rows.append(row)
+    Part of the cache fingerprint: retuning a half-width must make every stored
+    score miss, rather than show a percentage read against the old band.
+    """
+    global _interval_dev_hash_cache, _interval_dev_hash_mtime
+    path = os.path.join(unit_config.config_dir(), 'interval_deviations.json')
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if _interval_dev_hash_cache is not None and mtime == _interval_dev_hash_mtime:
+        return _interval_dev_hash_cache
+    if mtime is None:
+        digest = 'absent'
+    else:
+        try:
+            with open(path, 'rb') as fh:
+                digest = hashlib.sha1(fh.read()).hexdigest()
+        except OSError:
+            digest = 'unreadable'
+    _interval_dev_hash_cache = digest
+    _interval_dev_hash_mtime = mtime
+    return digest
 
-    # The evaluation means are recomputed from the sheet whenever it can be read:
-    # the cache Save wrote holds Tsup for a BAM defrost row but no Q/P/COP, and a
-    # partial cache must not pass as done. Requested rows only, one read per
-    # sheet. A missing sheet leaves the cells empty with a reason and the cached
-    # Tsup if there is one; it never fails the table.
-    by_sheet = {}
-    for row, ev in need_sheet:
-        by_sheet.setdefault((row['file_name'], row['data_set']), []).append((row, ev))
-    for (file_name, data_set), items in by_sheet.items():
-        df_full = _read_excel_sheet(file_name, data_set)
-        if df_full is None:
-            for row, ev in items:
-                row['eval_tsup'] = _guideline_num(ev.get('avg_ts_buh'))
-                row['note'] = 'Evaluation window stored, but its sheet could not be read.'
+
+def _guideline_score_fingerprint(periods, buffer_s) -> str:
+    """What a cached score was computed from: the clocks, the buffer, the bands.
+
+    Anything that would change a number changes this string, so a stale row is a
+    miss — n/a with a reason — and never a percentage from the previous clocks.
+    """
+    items = []
+    for p in periods or []:
+        try:
+            items.append([str(p['period_type']), round(float(p['start_time']), 3),
+                          round(float(p['end_time']), 3)])
+        except (KeyError, TypeError, ValueError):
             continue
+    items.sort()
+    raw = json.dumps({'v': GUIDELINE_SCORE_CACHE_VERSION,
+                      'periods': items,
+                      'buffer_s': int(buffer_s),
+                      'intervals': _interval_deviations_config_hash()}, sort_keys=True)
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
+def _guideline_periods_by_rowid(conn, rowids, buffer_s) -> dict:
+    """``{rowid: [saved guideline periods, earliest first]}``. Clocks only, no sheet.
+
+    ``rowids`` None is every parent in the open database, and then the query
+    carries no ``IN`` list at all — a BAM-sized list would otherwise push past
+    the bound-parameter limit. A list is read in chunks for the same reason.
+    """
+    out = {}
+    base = ("SELECT * FROM cycle_periods WHERE detection_method=? AND buffer_s=? {extra} "
+            "ORDER BY start_time ASC, id ASC")
+
+    def collect(sql, args):
+        for p in conn.execute(sql, args).fetchall():
+            out.setdefault(int(p['entry_rowid']), []).append(dict(p))
+
+    if rowids is None:
+        collect(base.format(extra=''), (GUIDELINE_DETECTION_METHOD, buffer_s))
+        return out
+    ids = sorted({int(r) for r in rowids})
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        ph = ','.join(['?'] * len(chunk))
+        collect(base.format(extra=f'AND entry_rowid IN ({ph})'),
+                [GUIDELINE_DETECTION_METHOD, buffer_s] + chunk)
+    return out
+
+
+def _load_guideline_scores(conn, rowids=None) -> dict:
+    """``{rowid: (fingerprint, payload)}`` from the cache. ``rowids`` None is all.
+
+    A database that predates the cache simply has no table yet; that is a miss
+    for every row, not an error on a read-only page.
+    """
+    out = {}
+    base = 'SELECT entry_rowid, fingerprint, payload FROM guideline_window_scores {extra}'
+
+    def collect(sql, args):
+        for r in conn.execute(sql, args).fetchall():
+            try:
+                payload = json.loads(r['payload'])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                out[int(r['entry_rowid'])] = (r['fingerprint'], payload)
+
+    try:
+        if rowids is None:
+            collect(base.format(extra=''), ())
+            return out
+        ids = sorted({int(r) for r in rowids})
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            ph = ','.join(['?'] * len(chunk))
+            collect(base.format(extra=f'WHERE entry_rowid IN ({ph})'), chunk)
+    except sqlite3.Error:
+        return {}
+    return out
+
+
+def _store_guideline_scores(conn, rid, buffer_s, fingerprint, payload) -> None:
+    """Replace one parent's cached scores. The clocks themselves are not touched."""
+    conn.execute(
+        'INSERT OR REPLACE INTO guideline_window_scores '
+        '(entry_rowid, buffer_s, fingerprint, payload, computed_at) VALUES (?,?,?,?,?)',
+        (int(rid), int(buffer_s), fingerprint, json.dumps(payload),
+         datetime.now().isoformat(timespec='seconds')))
+
+
+def _guideline_score_payload_from_row(row) -> dict:
+    """The sheet-derived fields of a scored row, in the shape the cache stores.
+
+    Every number goes through ``_guideline_num`` on the way in, so a NaN is
+    stored as missing and can never come back out of JSON as a 0.
+    """
+    payload = {k: _guideline_num(row.get(k)) for k in GUIDELINE_SCORE_VALUE_KEYS}
+    for k in GUIDELINE_SCORE_REASON_KEYS:
+        payload[k] = {str(a): str(b or '') for a, b in (row.get(k) or {}).items()}
+    for k in GUIDELINE_SCORE_TEXT_KEYS:
+        payload[k] = str(row.get(k) or '')
+    return payload
+
+
+def _apply_guideline_score_payload(row, payload) -> None:
+    """Put a cached payload back on a freshly built row. Missing stays missing."""
+    for k in GUIDELINE_SCORE_VALUE_KEYS:
+        row[k] = _guideline_num(payload.get(k))
+    for k in GUIDELINE_SCORE_REASON_KEYS:
+        stored = payload.get(k)
+        if isinstance(stored, dict):
+            row[k] = {str(a): str(b or '') for a, b in stored.items()}
+    row['delta_cop_reason'] = str(payload.get('delta_cop_reason') or '')
+    note = str(payload.get('note') or '')
+    if note:
+        row['note'] = note
+    row['scores_cached'] = True
+
+
+def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=None) -> None:
+    """Every score cell of one row n/a with one reason — never 0, never stale.
+
+    The evaluation window's own stored mean is kept: it comes from
+    ``cycle_periods``, so showing it costs no sheet and is not one of the
+    numbers this cache is about.
+    """
+    for k in GUIDELINE_SCORE_VALUE_KEYS:
+        row[k] = None
+    if ev is not None:
+        row['eval_tsup'] = _guideline_num(ev.get('avg_ts_buh'))
+    for slot_key in ('dtreturn_reasons', 'db_reasons', 'wb_reasons', 'flow_reasons'):
+        row[slot_key] = {slot: reason for slot in ('h', 'eq', 'eval')}
+    row['d_reasons'] = {k: reason for k in ('db', 'dtreturn')}
+    row['s_reasons'] = {k: reason for k in ('db', 'wb', 'flow', 'dtreturn')}
+    for iv in ('H', 'D', 'S'):
+        row[MEAN_DEV_REASON_KEYS[iv]] = _mean_dev_reason_defaults(iv, reason)
+    row['delta_cop_reason'] = reason
+    row['scores_cached'] = False
+
+
+def _guideline_cop_dataset(entry) -> str:
+    """The parent's COP dataset flag as Mean Values reads it: ``YES`` / ``NO`` / ``''``.
+
+    The column is ``results.COP_dataset``; older databases spell it
+    ``cop_dataset`` or ``COP Dataset``, so the key is matched case- and
+    separator-insensitively. No second flag is invented and an empty cell stays
+    empty — an entry with no value is **not** a NO.
+    """
+    raw = None
+    for key in entry.keys():
+        if str(key).strip().lower().replace('-', ' ').replace('_', ' ') == 'cop dataset':
+            raw = entry.get(key)
+            if raw is not None and str(raw).strip():
+                break
+    text = '' if raw is None else str(raw).strip()
+    return text.upper() if text.upper() in ('YES', 'NO') else text
+
+
+def _guideline_row_base(entry, periods, lengths, index=None):
+    """One Guideline Windows row before any score: identity, clocks, parent means.
+
+    SQLite only — the parent ``results`` row plus its saved ``cycle_periods``.
+    Returns ``(row, ev, dt_windows, wants_scores)``. ``wants_scores`` is true when
+    the row has a saved window worth scoring at all, so a parent with no clocks
+    is never counted as "missing scores" and never sent to a sheet.
+
+    ``index`` is the parent's 1-based position in the **whole open database**
+    (``display_order ASC, rowid ASC``) — the ``#`` of Mean Values and
+    Deviations. It is the visible identity; ``rowid`` stays in the payload for
+    the APIs that select by it. The scoring path passes no index, since nothing
+    it writes carries one.
+    """
+    rid = int(entry['rowid'])
+    kind = _guideline_kind_from_stored(p['period_type'] for p in periods)
+
+    ds_type = {'defrost': 'defrost', 'on_off': 'off'}.get(kind)
+    ds_spans = [p for p in periods if p['period_type'] == ds_type] if ds_type else []
+    h_type = 'on' if kind == 'on_off' else 'heating'
+    h = next((p for p in periods if p['period_type'] == h_type), None)
+    eq = next((p for p in periods if p['period_type'] == 'equilibrium'), None)
+    # Periods come back ordered by start_time, so this is the earliest evaluation.
+    ev = next((p for p in periods if p['period_type'] == 'evaluation'), None)
+
+    row = {
+        # The visible identity. `rowid` is kept for the APIs, never shown.
+        'index': index,
+        'rowid': rid,
+        'file_name': entry.get('file_name'),
+        'data_set': entry.get('data_set'),
+        'test_cond': (entry.get('dev_test_condition') or entry.get('test_cond') or ''),
+        'profile_id': entry.get('profile_id') or '',
+        'hp_id': entry.get('HP_ID') if entry.get('HP_ID') is not None else entry.get('hp_id'),
+        'cop_dataset': _guideline_cop_dataset(entry),
+        'start_time': _guideline_num(entry.get('start_time')),
+        'end_time': _guideline_num(entry.get('end_time')),
+        'kind': kind,
+        'h_start': _guideline_num(h['start_time']) if h else None,
+        'h_end': _guideline_num(h['end_time']) if h else None,
+        'eq_start': _guideline_num(eq['start_time']) if eq else None,
+        'eq_end': _guideline_num(eq['end_time']) if eq else None,
+        'eval_start': _guideline_num(ev['start_time']) if ev else None,
+        'eval_end': _guideline_num(ev['end_time']) if ev else None,
+        'parent_tsup': _guideline_num(get_mean_supply_for_deviations(entry)),
+        'parent_q': _guideline_num(get_mean_q_for_deviations(entry)),
+        'parent_p': _guideline_num(get_mean_p_for_deviations(entry)),
+        'parent_cop': _guideline_num(get_mean_cop_for_deviations(entry)),
+        # `eval_tsup` opens on the evaluation period's own stored mean. That is a
+        # SQLite value, not a sheet one, so it is what a row with no stored
+        # scores still shows; a cached payload replaces it with the analysis-time
+        # Tsup, which is the analysis-time number.
+        'eval_tsup': _guideline_num(ev.get('avg_ts_buh')) if ev is not None else None,
+        'eval_q': None, 'eval_p': None, 'eval_cop': None,
+        # Individual dTreturn per interval and ΔCOP over the evaluation
+        # window. Filled from the same sheet read as the evaluation means.
+        'h_dtreturn_pct': None, 'eq_dtreturn_pct': None, 'eval_dtreturn_pct': None,
+        'h_db_pct': None, 'eq_db_pct': None, 'eval_db_pct': None,
+        'h_wb_pct': None, 'eq_wb_pct': None, 'eval_wb_pct': None,
+        'h_flow_pct': None, 'eq_flow_pct': None, 'eval_flow_pct': None,
+        'd_db_pct': None, 'd_dtreturn_pct': None,
+        's_db_pct': None, 's_wb_pct': None, 's_flow_pct': None, 's_dtreturn_pct': None,
+        # One signed **mean** per interval — K for DB / WB /
+        # Tsup / dTreturn, % of set for flow. A different quantity from the
+        # individual shares above, with its own mean half-widths.
+        'h_mean_db_k': None, 'h_mean_wb_k': None, 'h_mean_tsup_k': None,
+        'h_mean_dtreturn_k': None, 'h_mean_flow_pct': None,
+        'd_mean_db_k': None, 'd_mean_wb_k': None,
+        's_mean_db_k': None, 's_mean_wb_k': None, 's_mean_flow_pct': None,
+        'eval_delta_cop': None,
+        'dtreturn_reasons': {}, 'db_reasons': {}, 'wb_reasons': {}, 'flow_reasons': {},
+        'd_reasons': {}, 's_reasons': {},
+        'h_mean_reasons': _mean_dev_reason_defaults('H'),
+        'd_mean_reasons': _mean_dev_reason_defaults('D'),
+        's_mean_reasons': _mean_dev_reason_defaults('S'),
+        'delta_cop_reason': '',
+        'note': '',
+        # Filled by the cache read: True = these scores are stored, False = this
+        # row has clocks but no usable cache row yet.
+        'scores_cached': None,
+    }
+    # D1/D2 for a defrost cycle, S1/S2 for an on-off one; the other pair stays empty.
+    prefix = 'd' if kind == 'defrost' else ('s' if kind == 'on_off' else None)
+    for slot in (1, 2):
+        for edge in ('start', 'end'):
+            row[f'd{slot}_{edge}'] = None
+            row[f's{slot}_{edge}'] = None
+    if prefix:
+        for i, span in enumerate(ds_spans[:2], start=1):
+            row[f'{prefix}{i}_start'] = _guideline_num(span['start_time'])
+            row[f'{prefix}{i}_end'] = _guideline_num(span['end_time'])
+
+    if kind == 'unknown':
+        row['note'] = 'No guideline clocks saved — save them on Cycle Extract first.'
+    elif kind == 'on_off':
+        row['note'] = 'On–off cycle — no equilibrium/evaluation window by rule.'
+    elif ev is None:
+        h_len = None
+        if row['h_start'] is not None and row['h_end'] is not None:
+            h_len = row['h_end'] - row['h_start']
+        if h_len is not None and h_len < lengths['eq_s'] + lengths['eval_s']:
+            row['note'] = (f"H is shorter than eq {lengths['eq_min']:g} min + "
+                           f"eval {lengths['eval_min']:g} min — no evaluation window stored.")
+        else:
+            row['note'] = 'No evaluation window stored for this entry.'
+
+    # H stands on its own: an on–off row and a row too short for an
+    # evaluation window still have a heating span to score dTreturn on.
+    dt_windows = {slot: (row[f'{slot}_start'], row[f'{slot}_end'])
+                  for slot in ('h', 'eq', 'eval')}
+    wants_scores = bool(
+        ev is not None
+        or any(s is not None and e is not None for s, e in dt_windows.values())
+        or _spans_from_row(row, 'd') or _spans_from_row(row, 's'))
+    return row, ev, dt_windows, wants_scores
+
+
+def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
+                                   interval_cfg=None, dt_bands=None) -> None:
+    """Score the rows of one sheet in place — the only place the numbers are made.
+
+    ``items`` is ``[(row, ev, dt_windows)]`` from ``_guideline_row_base`` and
+    ``parents`` maps rowid to that parent's ``results`` row. Same helpers and the
+    same formulas Guideline Windows used before the cache existed, so Save,
+    Compute missing scores and the table can never drift apart. One sheet read
+    per file is still enough: the prepared frame is built once here and shared.
+
+    stdout is captured for the whole block. ``determine_cap`` and
+    ``analysis_window_means`` print a line per cycle, which is a console flood
+    once a thousand parents are scored, and ``_series_for_entry_deviations``
+    prints one more.
+    """
+    if interval_cfg is None:
+        interval_cfg = load_interval_deviations_config()
+    if dt_bands is None:
+        dt_bands = {
+            'h': _interval_dtreturn_band(interval_cfg, 'H'),
+            'eq': _interval_dtreturn_band(interval_cfg, 'equilibrium'),
+            'eval': _interval_dtreturn_band(interval_cfg, 'evaluation'),
+        }
+    if df_full is None:
+        unread = 'the sheet could not be read'
+        for row, ev, dt_windows in items:
+            _guideline_scores_missing(row, unread, ev)
+            if ev is not None:
+                row['note'] = 'Evaluation window stored, but its sheet could not be read.'
+        return
+
+    import io
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
         df_sheet, lab_corr_missing, prep_reason = _prepare_sheet_for_analysis(df_full, file_name)
-        for row, ev in items:
+        # ΔCOP goes through the same prepared frame, so this sheet is opened once.
+        sheets = {(file_name, data_set): (df_sheet, lab_corr_missing,
+                                          prep_reason or 'the sheet could not be read')}
+        spec_h = (interval_cfg.get('intervals') or {}).get('H') or {}
+        spec_d = (interval_cfg.get('intervals') or {}).get('D') or {}
+        spec_s = (interval_cfg.get('intervals') or {}).get('S') or {}
+        for row, ev, dt_windows in items:
+            parent = _entry_with_hp_id(parents.get(int(row['rowid'])) or {})
+            # Same parent-window series as /calculate_deviations. dTreturn keeps
+            # the raw sheet (T_return_emu / T_return_calc are there already).
+            df_dev = _series_for_entry_deviations(parent, df_full)
+            for slot, (w_start, w_end) in dt_windows.items():
+                pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
+                row[f'{slot}_dtreturn_pct'] = pct
+                row['dtreturn_reasons'][slot] = reason
+                hband = _window_h_band_pcts(
+                    df_dev, row['file_name'], row['data_set'], w_start, w_end, parent)
+                for metric in ('db', 'wb', 'flow'):
+                    val, why = hband[metric]
+                    row[f'{slot}_{metric}_pct'] = val
+                    row[f'{metric}_reasons'][slot] = why
+            d_pcts = _window_ds_band_pcts(
+                df_dev, df_full, _spans_from_row(row, 'd'), spec_d, parent,
+                row['file_name'], row['data_set'], ('db', 'dtreturn'))
+            if row['kind'] != 'defrost':
+                why = 'not a defrost cycle'
+                d_pcts = {k: (None, why) for k in ('db', 'dtreturn')}
+            row['d_db_pct'], row['d_reasons']['db'] = d_pcts['db']
+            row['d_dtreturn_pct'], row['d_reasons']['dtreturn'] = d_pcts['dtreturn']
+            s_pcts = _window_ds_band_pcts(
+                df_dev, df_full, _spans_from_row(row, 's'), spec_s, parent,
+                row['file_name'], row['data_set'],
+                ('db', 'wb', 'flow', 'dtreturn'))
+            if row['kind'] != 'on_off':
+                why = 'not an on–off cycle'
+                s_pcts = {k: (None, why) for k in ('db', 'wb', 'flow', 'dtreturn')}
+            row['s_db_pct'], row['s_reasons']['db'] = s_pcts['db']
+            row['s_wb_pct'], row['s_reasons']['wb'] = s_pcts['wb']
+            row['s_flow_pct'], row['s_reasons']['flow'] = s_pcts['flow']
+            row['s_dtreturn_pct'], row['s_reasons']['dtreturn'] = s_pcts['dtreturn']
+
+            # Mean deviations. H stands on its own: a saved heating (or
+            # ``on``) window carries the H means even when the row has no
+            # equilibrium / evaluation. D and S are the union of their spans,
+            # one mean each, and stay n/a on a kind that has no such interval.
+            _apply_mean_devs(row, 'H', _window_mean_devs(
+                df_dev, df_full, [(row['h_start'], row['h_end'])], spec_h, parent,
+                row['file_name'], MEAN_DEV_QUANTITIES['H']))
+            d_means = _window_mean_devs(
+                df_dev, df_full, _spans_from_row(row, 'd'), spec_d, parent,
+                row['file_name'], MEAN_DEV_QUANTITIES['D'])
+            if row['kind'] != 'defrost':
+                d_means = _mean_dev_na('D', 'not a defrost cycle')
+            _apply_mean_devs(row, 'D', d_means)
+            s_means = _window_mean_devs(
+                df_dev, df_full, _spans_from_row(row, 's'), spec_s, parent,
+                row['file_name'], MEAN_DEV_QUANTITIES['S'])
+            if row['kind'] != 'on_off':
+                s_means = _mean_dev_na('S', 'not an on–off cycle')
+            _apply_mean_devs(row, 'S', s_means)
+
+            row['scores_cached'] = True
+            if ev is None:
+                row['delta_cop_reason'] = 'no evaluation window is saved'
+                continue
+            delta_cop = _interval_delta_cop(file_name, data_set, ev['start_time'],
+                                            ev['end_time'], interval_cfg, sheets)
+            row['eval_delta_cop'] = _guideline_num(delta_cop.get('value_pct'))
+            row['delta_cop_reason'] = delta_cop.get('reason') or ''
             stf, etf = float(ev['start_time']), float(ev['end_time'])
+            # Recompute the evaluation four from scratch. The base row opened
+            # `eval_tsup` on the evaluation period's stored mean, which must not
+            # make the "sheet holds no values" fallback below think it found one.
+            for k in ('eval_tsup', 'eval_q', 'eval_p', 'eval_cop'):
+                row[k] = None
             means = None
             if df_sheet is not None:
                 means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing)
@@ -10457,11 +11702,241 @@ def _guideline_window_rows(rowids=None) -> dict:
                 row['eval_tsup'] = _guideline_num(ev.get('avg_ts_buh'))
                 row['note'] = 'Evaluation window stored, but the sheet holds no values in it.'
 
+
+def _sheet_cache_key(file_name, data_set):
+    """Sheet identity for the in-memory hand-off: ``data_set`` 1 and 1.0 are one sheet.
+
+    ``results.data_set`` is REAL and the proposal carries whatever the caller
+    typed, so an unnormalised key would quietly miss and read the workbook twice.
+    """
+    try:
+        ds = float(data_set)
+    except (TypeError, ValueError):
+        ds = None
+    return (file_name, ds)
+
+
+def _guideline_scores_for_entries(entries, periods_by_rowid, sheets=None):
+    """``({rowid: payload}, [(file, data_set, reason)])`` for a set of parents.
+
+    ``sheets`` maps ``(file_name, data_set)`` to a frame that is already in
+    memory, which is how clock Save reuses the workbook it just read. Anything
+    not in there goes through ``_read_excel_sheet``, whose LRU means the same
+    sheet is still read from disk only once.
+
+    A file whose sheet cannot be read (or whose scoring raises) is reported and
+    the loop continues: the clocks that were written stay, and the parents of
+    that file simply keep no cache row, so they show as missing scores and
+    Compute missing scores can try them again later. Nothing is stored here —
+    the caller writes, after the scoring is done and no sheet is open.
+    """
+    lengths = _guideline_lengths()
+    parents = {int(e['rowid']): e for e in entries}
+    by_sheet, failed, payloads = {}, [], {}
+    for entry in entries:
+        rid = int(entry['rowid'])
+        periods = sorted(periods_by_rowid.get(rid) or [],
+                         key=lambda p: (float(p['start_time']), str(p['period_type'])))
+        row, ev, dt_windows, wants = _guideline_row_base(entry, periods, lengths)
+        if not wants:
+            continue
+        by_sheet.setdefault((row['file_name'], row['data_set']), []).append((row, ev, dt_windows))
+
+    interval_cfg = load_interval_deviations_config()
+    dt_bands = {
+        'h': _interval_dtreturn_band(interval_cfg, 'H'),
+        'eq': _interval_dtreturn_band(interval_cfg, 'equilibrium'),
+        'eval': _interval_dtreturn_band(interval_cfg, 'evaluation'),
+    }
+    for (file_name, data_set), items in by_sheet.items():
+        df_full = (sheets or {}).get(_sheet_cache_key(file_name, data_set))
+        if df_full is None:
+            df_full = _read_excel_sheet(file_name, data_set)
+        if df_full is None:
+            failed.append((file_name, data_set, 'the sheet could not be read'))
+            continue
+        try:
+            _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
+                                           interval_cfg, dt_bands)
+        except Exception as exc:
+            failed.append((file_name, data_set, str(exc)))
+            continue
+        for row, _ev, _windows in items:
+            payloads[int(row['rowid'])] = _guideline_score_payload_from_row(row)
+    return payloads, failed
+
+
+def _store_scores_for_parents(rowids, sheets=None):
+    """Score these parents and write the cache. ``(stored rowids, failures)``.
+
+    Called **after** the clocks are committed and the connection is closed:
+    scoring walks a sheet and Flask is ``threaded=True``, so it must never hold
+    ``results`` locked while it does. A failure here never undoes a clock — the
+    parent just keeps no cache row.
+    """
+    ids = sorted({int(r) for r in (rowids or [])})
+    if not ids:
+        return [], []
+    ensure_guideline_scores_table()
+    buffer_s = _guideline_buffer_s()
+    conn = get_db_connection()
+    try:
+        entries = []
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            ph = ','.join(['?'] * len(chunk))
+            entries.extend(dict(r) for r in conn.execute(
+                f'SELECT rowid, * FROM results WHERE rowid IN ({ph})', chunk).fetchall())
+        periods_by_rowid = _guideline_periods_by_rowid(conn, ids, buffer_s)
+    finally:
+        conn.close()
+
+    payloads, failed = _guideline_scores_for_entries(entries, periods_by_rowid, sheets)
+    if not payloads:
+        return [], failed
+    conn = get_db_connection()
+    try:
+        for rid, payload in payloads.items():
+            _store_guideline_scores(
+                conn, rid, buffer_s,
+                _guideline_score_fingerprint(periods_by_rowid.get(rid) or [], buffer_s),
+                payload)
+        conn.commit()
+    finally:
+        conn.close()
+    return sorted(payloads), failed
+
+
+def _guideline_window_rows(rowids=None) -> dict:
+    """One row per parent entry: stored clocks, parent means, **stored** scores.
+
+    Read-only and SQLite only. Only *saved* guideline periods are read
+    (``detection_method`` ``guideline`` at the configured buffer), so clocks the
+    analyst has not saved on Cycle Extract stay invisible and the row still
+    appears with its identity and parent means. The interval scores come from
+    the ``guideline_window_scores`` cache that clock Save wrote — **no Plotdaten
+    file is opened here**, so opening the page costs a query and coming
+    back to it costs nothing.
+
+    A parent whose cache row is absent, or whose fingerprint no longer matches
+    its clocks / the configured ``buffer_s`` / the interval bands, keeps its
+    clock times and shows every score cell as n/a with a reason. Never a 0, and
+    never a percentage left over from the previous clocks. **Compute missing
+    scores** on the page fills those, file by file.
+
+    ``rowids`` None means every parent row in the open database. That is an
+    explicit request from the analyst, so the list is not capped.
+    """
+    lengths = _guideline_lengths()
+    buffer_s = _guideline_buffer_s()
+    interval_cfg = load_interval_deviations_config()
+    # Individual inlet widths per interval: eq and eval reuse Interval H (±0.5 K).
+    dt_bands = {
+        'h': _interval_dtreturn_band(interval_cfg, 'H'),
+        'eq': _interval_dtreturn_band(interval_cfg, 'equilibrium'),
+        'eval': _interval_dtreturn_band(interval_cfg, 'evaluation'),
+    }
+    pct_thresholds = load_permissible_deviations()
+
+    want = None
+    if rowids is not None:
+        seen = []
+        for raw in rowids:
+            try:
+                seen.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        want = sorted(set(seen))
+
+    conn = get_db_connection()
+    try:
+        result_cols = {r[1] for r in conn.execute('PRAGMA table_info(results)').fetchall()}
+        # Mean Values order, so the analyst reads the same sequence on both pages.
+        order_by = 'display_order ASC, rowid ASC' if 'display_order' in result_cols else 'rowid ASC'
+        if want is None:
+            entries = [dict(r) for r in conn.execute(
+                f'SELECT rowid, * FROM results ORDER BY {order_by}').fetchall()]
+        elif want:
+            # Chunked like the clock and cache reads: a whole-database CSV posts
+            # every visible rowid, which on its own would pass the bound-parameter
+            # limit. The order is restored below, since the chunks are separate
+            # queries.
+            entries = []
+            for i in range(0, len(want), 900):
+                chunk = want[i:i + 900]
+                ph = ','.join(['?'] * len(chunk))
+                entries.extend(dict(r) for r in conn.execute(
+                    f'SELECT rowid, * FROM results WHERE rowid IN ({ph})', chunk).fetchall())
+        else:
+            entries = []
+
+        ids = [int(e['rowid']) for e in entries] if entries else []
+        stored = _guideline_periods_by_rowid(conn, None if want is None else ids, buffer_s) if ids else {}
+        cached = _load_guideline_scores(conn, None if want is None else ids) if ids else {}
+        # `#` is the position in the **whole** database, so a Mean Values subset
+        # shows the same number the analyst ticked there. Loading everything
+        # already has that sequence in hand; a subset costs one rowid-only scan.
+        if want is None:
+            index_by_rowid = {int(e['rowid']): i for i, e in enumerate(entries, start=1)}
+        elif ids:
+            index_by_rowid = {int(r['rowid']): i for i, r in enumerate(
+                conn.execute(f'SELECT rowid FROM results ORDER BY {order_by}').fetchall(), start=1)}
+            # One `#` is the sort key, so the chunks come back in Mean Values order.
+            entries.sort(key=lambda e: index_by_rowid.get(int(e['rowid']), 0))
+        else:
+            index_by_rowid = {}
+    finally:
+        conn.close()
+
+    rows, n_missing, n_scored = [], 0, 0
+    for entry in entries:
+        rid = int(entry['rowid'])
+        row, ev, _dt_windows, wants_scores = _guideline_row_base(
+            entry, stored.get(rid, []), lengths, index=index_by_rowid.get(rid))
+        if wants_scores:
+            hit = cached.get(rid)
+            if hit and hit[0] == _guideline_score_fingerprint(stored.get(rid, []), buffer_s):
+                _apply_guideline_score_payload(row, hit[1])
+                n_scored += 1
+            else:
+                _guideline_scores_missing(row, ev=ev)
+                n_missing += 1
+        rows.append(row)
+
     with_clocks = sum(1 for r in rows if r['kind'] != 'unknown')
     with_eval = sum(1 for r in rows if r['eval_start'] is not None)
     message = (f'{len(rows)} entries — {with_clocks} with saved guideline clocks, '
-               f'{with_eval} with an evaluation window (buffer {buffer_s} s).')
-    return {'rows': rows, 'buffer_s': buffer_s, 'lengths': lengths, 'message': message}
+               f'{with_eval} with an evaluation window, {n_scored} with stored interval scores, '
+               f'{n_missing} still missing scores (buffer {buffer_s} s). '
+               'Read from the database only — no Plotdaten file was opened.')
+    return {
+        'rows': rows, 'buffer_s': buffer_s, 'lengths': lengths, 'message': message,
+        'n_entries': len(rows), 'n_with_clocks': with_clocks,
+        'n_with_scores': n_scored, 'n_missing_scores': n_missing,
+        # What the four new columns were scored against, for the headings.
+        'dtreturn_band_k': dt_bands['h'][1] if dt_bands['h'] else None,
+        'delta_cop_pct': interval_cfg['delta_cop_pct'],
+        'delta_cop_slice_min': interval_cfg['delta_cop_slice_min'],
+        'dtreturn_pct_red': pct_thresholds.get('dtreturn_pct_red', 5.0),
+        'dtreturn_pct_yellow': pct_thresholds.get('dtreturn_pct_yellow', 1.0),
+        'db_pct_red': pct_thresholds.get('db_pct_red', 5.0),
+        'db_pct_yellow': pct_thresholds.get('db_pct_yellow', 1.0),
+        'wb_pct_red': pct_thresholds.get('wb_pct_red', 5.0),
+        'wb_pct_yellow': pct_thresholds.get('wb_pct_yellow', 1.0),
+        'flow_pct_red': pct_thresholds.get('flow_pct_red', 5.0),
+        'flow_pct_yellow': pct_thresholds.get('flow_pct_yellow', 1.0),
+        'd_db_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('D'), 'db_k'),
+        'd_dtreturn_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('D'), 'dtreturn_k'),
+        's_db_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'db_k'),
+        's_wb_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'wb_k'),
+        's_flow_pct_band': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'flow_instantaneous_pct'),
+        's_dtreturn_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'dtreturn_k'),
+        # The mean half-widths, so the headings can name the band the mean
+        # columns were read against (H mean DB ±0.3 K, not the parent 0.6 K).
+        **{f'mean_{iv.lower()}_{"flow_pct" if q == "flow" else q + "_k"}':
+           _mean_dev_half((interval_cfg.get('intervals') or {}).get(iv), q)
+           for iv in ('H', 'D', 'S') for q in MEAN_DEV_QUANTITIES[iv]},
+    }
 
 
 def _guideline_windows_selector(payload) -> list | None:
@@ -10476,7 +11951,12 @@ def _guideline_windows_selector(payload) -> list | None:
 
 @app.route('/guideline_windows', methods=['GET'])
 def guideline_windows():
-    """Empty shell. Nothing is read until the analyst asks for rows (§2.5)."""
+    """The page shell. No Plotdaten file is opened here, and none is opened by
+    the table the page then asks for: since the score cache both the
+    clocks and the interval scores come out of SQLite, so arriving on the page
+    shows what is stored instead of an empty table the analyst has to pay hours
+    for a second time. The sheet-walking backfill stays behind an explicit
+    **Compute missing scores** confirm."""
     return render_template('guideline_windows.html', preselected_rowids=[])
 
 
@@ -10505,11 +11985,13 @@ def api_guideline_windows():
     """Table rows for the selected entries, or for the whole open database.
 
     ``{"rowids": [1, 2]}`` limits the table to those parents; ``{"rowids": null}``
-    is the explicit "load all entries in the open database". The reply is always
-    JSON, so a failure never reaches the browser as an HTML page (§Phase 1.2b).
+    is every parent in the open database, which is what the page asks for when it
+    was not opened from a Mean Values selection. The reply is always JSON, so a
+    failure never reaches the browser as an HTML page.
     """
     try:
         ensure_cycle_periods_table()
+        ensure_guideline_scores_table()
         payload = request.get_json(silent=True) or {}
         result = _guideline_window_rows(_guideline_windows_selector(payload))
         return jsonify({
@@ -10518,6 +12000,29 @@ def api_guideline_windows():
             'message': result['message'],
             'buffer_s': result['buffer_s'],
             'lengths': result['lengths'],
+            'n_entries': result['n_entries'],
+            'n_with_clocks': result['n_with_clocks'],
+            'n_with_scores': result['n_with_scores'],
+            'n_missing_scores': result['n_missing_scores'],
+            'dtreturn_band_k': result['dtreturn_band_k'],
+            'delta_cop_pct': result['delta_cop_pct'],
+            'delta_cop_slice_min': result['delta_cop_slice_min'],
+            'dtreturn_pct_red': result['dtreturn_pct_red'],
+            'dtreturn_pct_yellow': result['dtreturn_pct_yellow'],
+            'db_pct_red': result['db_pct_red'],
+            'db_pct_yellow': result['db_pct_yellow'],
+            'wb_pct_red': result['wb_pct_red'],
+            'wb_pct_yellow': result['wb_pct_yellow'],
+            'flow_pct_red': result['flow_pct_red'],
+            'flow_pct_yellow': result['flow_pct_yellow'],
+            'd_db_k': result.get('d_db_k'),
+            'd_dtreturn_k': result.get('d_dtreturn_k'),
+            's_db_k': result.get('s_db_k'),
+            's_wb_k': result.get('s_wb_k'),
+            's_flow_pct_band': result.get('s_flow_pct_band'),
+            's_dtreturn_k': result.get('s_dtreturn_k'),
+            # The mean half-widths, so the mean headings name their own band.
+            **{k: v for k, v in result.items() if k.startswith('mean_')},
         })
     except Exception as e:
         import traceback
@@ -10527,9 +12032,17 @@ def api_guideline_windows():
 
 @app.route('/api/guideline_windows/export', methods=['POST'])
 def api_guideline_windows_export():
-    """CSV of the same table. Nothing is added to the t42_summary_v1 export."""
+    """CSV of the table on screen. Nothing is added to the t42_summary_v1 export.
+
+    The page posts the rowids that its three filters left **visible**, so the
+    file is the table the analyst is looking at, in the same order (rows come
+    back in ``display_order ASC, rowid ASC``, which is that order — the filters
+    hide rows, they never reorder them). `#` is still the whole-database
+    position and `rowid` is not a column. SQLite only, no Plotdaten.
+    """
     try:
         ensure_cycle_periods_table()
+        ensure_guideline_scores_table()
         payload = request.get_json(silent=True)
         if payload is None:
             raw = (request.form.get('rowids') or '').strip()
@@ -10551,6 +12064,149 @@ def api_guideline_windows_export():
             as_attachment=True,
             download_name=f"guideline_windows_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/guideline_windows/score_files', methods=['POST', 'GET'])
+def api_guideline_windows_score_files():
+    """Which files still need interval scores. SQLite only — no Plotdaten.
+
+    The cheap list behind the **Compute missing scores** confirm: per file, how
+    many parents carry saved guideline clocks, how many of those already have a
+    cached score row whose fingerprint still matches, and how many are missing.
+    A parent without clocks is not counted — there is nothing to score on it.
+
+    This reads ``results``, ``cycle_periods`` and ``guideline_window_scores``
+    and opens no workbook, so the confirm is instant even on a BAM-sized list.
+    """
+    try:
+        ensure_cycle_periods_table()
+        ensure_guideline_scores_table()
+        buffer_s = _guideline_buffer_s()
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT rowid, file_name FROM results "
+                "WHERE file_name IS NOT NULL AND TRIM(file_name) != '' "
+                "ORDER BY file_name ASC, data_set ASC, start_time ASC"
+            ).fetchall()
+            stored = _guideline_periods_by_rowid(conn, None, buffer_s)
+            cached = _load_guideline_scores(conn, None)
+        finally:
+            conn.close()
+
+        by_file = {}
+        for r in rows:
+            rid = int(r['rowid'])
+            periods = stored.get(rid)
+            if not periods:
+                continue            # no clocks — nothing to score, not a gap
+            f = by_file.setdefault(r['file_name'], {'file_name': r['file_name'],
+                                                    'n_with_clocks': 0, 'n_cached': 0,
+                                                    'n_missing': 0})
+            f['n_with_clocks'] += 1
+            hit = cached.get(rid)
+            if hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s):
+                f['n_cached'] += 1
+            else:
+                f['n_missing'] += 1
+
+        files = [by_file[k] for k in sorted(by_file)]
+        return jsonify({
+            'success': True,
+            'files': files,
+            'n_files': len(files),
+            'n_with_clocks': sum(f['n_with_clocks'] for f in files),
+            'n_cached': sum(f['n_cached'] for f in files),
+            'n_missing': sum(f['n_missing'] for f in files),
+            'n_files_missing': sum(1 for f in files if f['n_missing']),
+            'database': get_database_label(),
+            'buffer_s': buffer_s,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/guideline_windows/compute_scores', methods=['POST'])
+def api_guideline_windows_compute_scores():
+    """Compute and store the missing interval scores of **one file**.
+
+    The explicit backfill for a database whose clocks were saved before this
+    cache existed. One file per call, at the same grain as the whole-database
+    clock batch, so the browser can show ``file i of n`` and one unreadable
+    sheet stops that file only.
+
+    It writes the cache and nothing else: no proposal, no clock, no ``results``
+    column, no ``entry_interval_deviations`` row. It never runs on page load,
+    and the page's own auto-load never turns into it — a parent with no cache
+    row shows n/a until the analyst asks for this.
+
+    ``recompute`` (default false) also refreshes parents whose fingerprint still
+    matches; the default touches only what is missing or stale.
+    """
+    try:
+        ensure_cycle_periods_table()
+        ensure_guideline_scores_table()
+        payload = request.get_json(silent=True) or {}
+        file_name = (payload.get('file_name') or '').strip()
+        if not file_name:
+            return jsonify({'success': False, 'message': 'file_name required'})
+        recompute = bool(payload.get('recompute'))
+        buffer_s = _guideline_buffer_s()
+
+        conn = get_db_connection()
+        try:
+            entries = [dict(r) for r in conn.execute(
+                'SELECT rowid, * FROM results WHERE file_name=? ORDER BY data_set ASC, start_time ASC',
+                (file_name,)).fetchall()]
+            ids = [int(e['rowid']) for e in entries]
+            stored = _guideline_periods_by_rowid(conn, ids, buffer_s) if ids else {}
+            cached = _load_guideline_scores(conn, ids) if ids else {}
+        finally:
+            conn.close()
+
+        todo, skipped = [], 0
+        for entry in entries:
+            rid = int(entry['rowid'])
+            periods = stored.get(rid)
+            if not periods:
+                continue            # no saved clocks on this parent
+            if not recompute:
+                hit = cached.get(rid)
+                if hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s):
+                    skipped += 1
+                    continue
+            todo.append(entry)
+
+        if not todo:
+            return jsonify({'success': True, 'file_name': file_name, 'computed': 0,
+                            'skipped': skipped, 'failed': [], 'buffer_s': buffer_s})
+
+        payloads, failed = _guideline_scores_for_entries(todo, stored)
+        if payloads:
+            conn = get_db_connection()
+            try:
+                for rid, body in payloads.items():
+                    _store_guideline_scores(
+                        conn, rid, buffer_s,
+                        _guideline_score_fingerprint(stored.get(rid) or [], buffer_s), body)
+                conn.commit()
+            finally:
+                conn.close()
+
+        return jsonify({
+            'success': True,
+            'file_name': file_name,
+            'computed': len(payloads),
+            'skipped': skipped,
+            'failed': [f'{f} — {why}' for f, _ds, why in failed],
+            'buffer_s': buffer_s,
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -11001,9 +12657,10 @@ def _period_stats_from_df(df_full, stf: float, etf: float) -> dict:
     out = {k: None for k in PERIOD_MEAN_METRICS}
     if df_full is None or 'time_elapsed' not in df_full.columns:
         return out
-    df = df_full[(df_full['time_elapsed'] >= stf) & (df_full['time_elapsed'] <= etf)]
+    df = df_full[(df_full['time_elapsed'] >= stf) & (df_full['time_elapsed'] <= etf)].copy()
     if df.empty:
         return out
+    df = add_t_mean_log_column(df)
     for k in PERIOD_MEAN_METRICS:
         try:
             out[k] = compute_single_column_value(df, k)
@@ -11556,7 +13213,52 @@ def diagnose_setpoint_values():
             'message': f'Error: {str(e)}'
         })
 
-def calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=None, hp_id=None, entry=None):
+def _dtreturn_series(cycle_data):
+    """dTreturn = T_return_emu − T_return_calc over a window, or None if the pair is missing.
+
+    ``T_return_calc`` is the **set** liquid sink inlet, so this difference is
+    measured return minus set — the quantity both the parent band and the
+    per-interval band score.
+    """
+    cols = getattr(cycle_data, 'columns', [])
+    if 'T_return_emu' not in cols or 'T_return_calc' not in cols:
+        return None
+    return cycle_data['T_return_emu'] - cycle_data['T_return_calc']
+
+
+def _dtreturn_band_bounds(band=None):
+    """(lower, upper) for the dTreturn check: an explicit band, else the configured one.
+
+    ``band`` is how a caller scores a **shorter** window against its own width —
+    Guideline Windows uses the draft Interval H ±0.5 K. Without it the full-cycle
+    band from ``permissible_deviations.json`` (−2…+2 K) applies, unchanged.
+    """
+    if band is not None:
+        try:
+            return float(band[0]), float(band[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            pass
+    cfg = load_permissible_deviations().get('dTreturn', {'lower': -2.0, 'upper': 2.0})
+    try:
+        return float(cfg.get('lower', -2.0)), float(cfg.get('upper', 2.0))
+    except Exception:
+        return -2.0, 2.0
+
+
+def _dtreturn_outside_band(dtreturn, lower, upper, total_points):
+    """(count, percent) of samples outside the band, or (None, None) if nothing was measured.
+
+    The only dTreturn violation count in the tool: the parent table runs it over
+    the whole entry, Guideline Windows over one saved interval with a narrower
+    band. A NaN compares False both ways, so a gap is counted neither in nor out.
+    """
+    if dtreturn is None or not total_points or not _has_valid_points(dtreturn):
+        return None, None
+    count = int(len(dtreturn[(dtreturn < lower) | (dtreturn > upper)]))
+    return count, count / total_points * 100.0
+
+
+def calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=None, hp_id=None, entry=None, df=None, dtreturn_band=None):
     """Calculate deviation statistics for a single entry
     
     Args:
@@ -11567,6 +13269,12 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         warning_list: Optional list to append warning messages to
         hp_id: Optional HP id for flow set lookup (fixed-flow: mean flow dev %, flow violations)
         entry: Optional results-row dict (climate, application, test_cond, profile_id)
+        df: Optional already-loaded series for this file, so a caller scoring
+            several windows of one entry (the guideline intervals) reads the
+            sheet once. The window is still cut from it here.
+        dtreturn_band: Optional (lower, upper) in K for the dTreturn check, so a
+            guideline interval can be scored with its own width. The parent call
+            passes nothing and keeps the configured full-cycle band.
     
     Returns:
         Dictionary with statistics or None if calculation failed
@@ -11634,7 +13342,8 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             return None
         
         # Load time series data (pass data_set for correct database lookup)
-        df = load_time_series_data(file_name, start_time, end_time, data_set=data_set)
+        if df is None:
+            df = load_time_series_data(file_name, start_time, end_time, data_set=data_set)
         if df is None or df.empty:
             warning = f"Cannot calculate deviations for {file_name}: Time series data is None or empty"
             print(f"WARNING: {warning}")
@@ -11682,6 +13391,12 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         )
         if db_setpoint is None:
             db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+        if db_setpoint is None:
+            try:
+                stored = entry.get('dev_db_setpoint')
+                db_setpoint = float(stored) if stored is not None else None
+            except (TypeError, ValueError):
+                db_setpoint = None
         db_bands = DEVIATION_BANDS.get(test_condition)
         if db_setpoint is not None and not db_bands:
             db_bands = calculate_deviation_bands({test_condition: db_setpoint}, DB_BAND, WB_BAND).get(test_condition)
@@ -11693,8 +13408,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             print(f"WARNING: {warning}")
             if warning_list is not None:
                 warning_list.append(warning)
-            if db_applicable:
-                return None
+            # Leave DB/WB empty; Tsup, dTreturn and flow still score.
             db_bands = None
 
         total_points = len(cycle_data)
@@ -11784,20 +13498,13 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_dtreturn_deviation = None
         max_dtreturn_pos = None
         max_dtreturn_neg = None
-        dt_cfg = load_permissible_deviations().get('dTreturn', {'lower': -2.0, 'upper': 2.0})
-        try:
-            dt_lower = float(dt_cfg.get('lower', -2.0))
-            dt_upper = float(dt_cfg.get('upper', 2.0))
-        except Exception:
-            dt_lower, dt_upper = -2.0, 2.0
-        if 'T_return_emu' in cycle_data.columns and 'T_return_calc' in cycle_data.columns:
-            dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
+        dt_lower, dt_upper = _dtreturn_band_bounds(dtreturn_band)
+        dtreturn = _dtreturn_series(cycle_data)
+        if dtreturn is not None:
             if not _has_valid_points(dtreturn):
                 _note_missing_quantity(file_name, data_set, 'return temperature difference (dTreturn)', warning_list)
-            else:
-                dtreturn_outside = dtreturn[(dtreturn < dt_lower) | (dtreturn > dt_upper)]
-                dtreturn_count = int(len(dtreturn_outside))
-                dtreturn_percentage = (dtreturn_count / total_points * 100) if total_points > 0 else None
+            dtreturn_count, dtreturn_percentage = _dtreturn_outside_band(
+                dtreturn, dt_lower, dt_upper, total_points)
             dtreturn_nonan = dtreturn.dropna()
             if len(dtreturn_nonan) > 0:
                 max_dtreturn_deviation = float(dtreturn_nonan.loc[dtreturn_nonan.abs().idxmax()])
@@ -11884,6 +13591,9 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         print(f"Error calculating deviations for {file_name}, dataset {data_set}: {e}")
         import traceback
         traceback.print_exc()
+        if warning_list is not None:
+            warning_list.append(
+                f'{file_name}: deviation scoring failed ({type(e).__name__}: {e})')
         return None
 
 
@@ -12088,6 +13798,373 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
 
     return out
 
+
+# ---------------------------------------------------------------------------
+# Permissible deviations per guideline interval
+#
+# An addition to the Deviations page, never a replacement: the parent table
+# keeps scoring the whole results window (H+D or H+S) with today's bands, and
+# the extra block scores the saved guideline clocks — H, equilibrium and
+# evaluation — with the Interval H bands the tool already ships, plus ΔCOP on
+# the evaluation window. D and S wait for their half-widths; until those are in
+# the config they are shown as n/a, never as zero violations.
+# ---------------------------------------------------------------------------
+
+INTERVAL_DEVIATIONS_CONFIG_DEFAULTS = {
+    'delta_cop_pct': 2.5,
+    'delta_cop_slice_min': 5.0,
+    'intervals': {},
+}
+
+# The only band set this slice knows. An interval whose config says anything
+# else (or nothing) is not scored.
+INTERVAL_PD_BAND_SOURCE = 'permissible_deviations'
+
+# (config key, heading, stored period_type). D and S stay in the list so the
+# analyst sees that the interval exists and why it is still empty.
+INTERVAL_PD_ROWS = (
+    ('D', 'D', 'defrost'),
+    ('S', 'S', 'off'),
+    ('H', 'H', 'heating'),
+    ('equilibrium', 'Equilibrium', 'equilibrium'),
+    ('evaluation', 'Evaluation', 'evaluation'),
+)
+
+INTERVAL_PD_COUNT_KEYS = (
+    'total_points', 'db_outside_band_count', 'wb_outside_band_count',
+    'tsup_outside_band_count', 'dtreturn_outside_band_count', 'flow_outside_count',
+)
+INTERVAL_PD_FLOAT_KEYS = (
+    'db_percentage', 'wb_percentage', 'tsup_percentage', 'dtreturn_percentage',
+    'flow_percentage', 'db_setpoint', 'wb_setpoint', 'tsup_setpoint', 'flow_setpoint',
+) + SIGNED_EXTREME_KEYS
+INTERVAL_PD_TEXT_KEYS = ('test_condition', 'flow_set_type')
+
+_interval_dev_cfg_cache = None
+_interval_dev_cfg_mtime = -1.0
+
+
+def load_interval_deviations_config() -> dict:
+    """Interval settings from config/interval_deviations.json (re-read on change).
+
+    Holds the ΔCOP limit and slice length, which intervals have bands at all,
+    the D/S individual half-widths, and the ``mean_*`` half-widths of the draft
+    mean columns. The **individual** H bands are not duplicated here: H,
+    equilibrium and evaluation read them from ``permissible_deviations.json``.
+    """
+    global _interval_dev_cfg_cache, _interval_dev_cfg_mtime
+    path = os.path.join(unit_config.config_dir(), 'interval_deviations.json')
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if _interval_dev_cfg_cache is not None and mtime == _interval_dev_cfg_mtime:
+        return _interval_dev_cfg_cache
+
+    cfg = dict(INTERVAL_DEVIATIONS_CONFIG_DEFAULTS)
+    if mtime is not None:
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                raw = json.load(fh) or {}
+            cfg.update({k: v for k, v in raw.items() if k in INTERVAL_DEVIATIONS_CONFIG_DEFAULTS})
+        except Exception as exc:
+            print(f"[interval deviations] cannot read {path}: {exc}")
+    for key in ('delta_cop_pct', 'delta_cop_slice_min'):
+        try:
+            cfg[key] = float(cfg[key])
+        except (TypeError, ValueError):
+            cfg[key] = float(INTERVAL_DEVIATIONS_CONFIG_DEFAULTS[key])
+        if not np.isfinite(cfg[key]) or cfg[key] <= 0:
+            cfg[key] = float(INTERVAL_DEVIATIONS_CONFIG_DEFAULTS[key])
+    if not isinstance(cfg.get('intervals'), dict):
+        cfg['intervals'] = {}
+
+    _interval_dev_cfg_cache = cfg
+    _interval_dev_cfg_mtime = mtime
+    return cfg
+
+
+def _interval_pd_has_bands(cfg, key) -> bool:
+    """True when this interval reuses Interval H (``bands: permissible_deviations``).
+
+    D and S use explicit ``db_k`` / ``dtreturn_k`` on Guideline Windows and must
+    not be treated as Interval H here — that would score them ±1 K.
+    """
+    spec = (cfg.get('intervals') or {}).get(key)
+    return isinstance(spec, dict) and spec.get('bands') == INTERVAL_PD_BAND_SOURCE
+
+
+def _interval_dtreturn_band(cfg, key):
+    """Individual liquid sink **inlet** band of one interval as (lower, upper), or None.
+
+    H, equilibrium and evaluation carry ±0.5 K in ``interval_deviations.json``;
+    the −2…+2 K in ``permissible_deviations.json`` is the full-cycle parent width
+    and stays where it is. An interval with no half-width is n/a, never 0 %.
+    """
+    spec = (cfg.get('intervals') or {}).get(key)
+    if not isinstance(spec, dict):
+        return None
+    try:
+        half = float(spec.get('dtreturn_k'))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(half) or half <= 0:
+        return None
+    return (-half, half)
+
+
+def ensure_interval_deviations_table() -> None:
+    """Side table for the extra block. The parent ``dev_*`` columns stay full-cycle."""
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS entry_interval_deviations (
+                entry_rowid INTEGER PRIMARY KEY,
+                buffer_s INTEGER,
+                payload TEXT NOT NULL,
+                calculated_at TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _interval_pd_spans(periods, kind) -> dict:
+    """Stored spans per interval key. Two D (or S) pieces stay two spans here."""
+    by_type = {}
+    for p in periods:
+        by_type.setdefault(p['period_type'], []).append(
+            (_guideline_num(p['start_time']), _guideline_num(p['end_time']))
+        )
+
+    def clean(items):
+        return [[s, e] for s, e in items if s is not None and e is not None and e > s]
+
+    h_type = 'on' if kind == 'on_off' else 'heating'
+    return {
+        'D': clean(by_type.get('defrost', [])),
+        'S': clean(by_type.get('off', [])),
+        # One H: with two D spans it is the gap between them, already stored that way.
+        'H': clean(by_type.get(h_type, []))[:1],
+        'equilibrium': clean(by_type.get('equilibrium', []))[:1],
+        # Earliest evaluation, same rule as the Guideline Windows page.
+        'evaluation': clean(by_type.get('evaluation', []))[:1],
+    }
+
+
+def _interval_pd_absent_reason(key, kind, spans, lengths) -> str:
+    """Why an interval has no stored window. Short enough for a table cell title."""
+    if key == 'D':
+        return 'not a defrost cycle' if kind != 'defrost' else 'no defrost span saved'
+    if key == 'S':
+        return 'not an on–off cycle' if kind != 'on_off' else 'no standby span saved'
+    if key == 'H':
+        return 'no heating window saved'
+    if kind == 'on_off':
+        return 'on–off cycle — no equilibrium/evaluation by rule'
+    h = spans.get('H')
+    if h and (h[0][1] - h[0][0]) < lengths['eq_s'] + lengths['eval_s']:
+        return (f"H is shorter than eq {lengths['eq_min']:g} min + "
+                f"eval {lengths['eval_min']:g} min")
+    return 'not saved on Cycle Extract'
+
+
+def _interval_prepared_sheet(file_name, data_set, cache):
+    """(prepared sheet, lab-corr flag, reason), one Excel read per file in a batch."""
+    key = (file_name, data_set)
+    if key not in cache:
+        df_full = _read_excel_sheet(file_name, data_set)
+        if df_full is None:
+            cache[key] = (None, False, 'the sheet could not be read')
+        else:
+            cache[key] = _prepare_sheet_for_analysis(df_full, file_name)
+    return cache[key]
+
+
+def _interval_cop_from_means(means):
+    """COP of one slice: mean Q over mean P, never the mean of a ratio."""
+    if not means:
+        return None
+    q = _guideline_num(get_mean_q_for_deviations(means))
+    p = _guideline_num(get_mean_p_for_deviations(means))
+    if q is None or not p:
+        return None
+    return q / p
+
+
+def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets) -> dict:
+    """ΔCOP over the saved evaluation window: first slice against last slice.
+
+    The two slices go through the same analysis-time path as the entry's own Q
+    and P, so a sheet that carries only uncorrected series still
+    answers. Anything that makes a slice unusable leaves the value empty — a
+    missing ΔCOP is never 0 %.
+    """
+    slice_min = cfg['delta_cop_slice_min']
+    slice_s = slice_min * 60.0
+    out = {
+        'value_pct': None, 'cop_first': None, 'cop_last': None,
+        'limit_pct': cfg['delta_cop_pct'], 'slice_min': slice_min,
+        'first_window': None, 'last_window': None, 'reason': '',
+    }
+    stf, etf = _guideline_num(stf), _guideline_num(etf)
+    if stf is None or etf is None:
+        out['reason'] = 'the evaluation window has no usable times'
+        return out
+    if etf - stf < 2.0 * slice_s:
+        out['reason'] = (f'the evaluation window is shorter than '
+                         f'{2.0 * slice_min:g} min')
+        return out
+
+    df_sheet, lab_corr_missing, reason = _interval_prepared_sheet(file_name, data_set, sheets)
+    if df_sheet is None:
+        out['reason'] = reason or 'the sheet could not be read'
+        return out
+
+    out['first_window'] = [stf, stf + slice_s]
+    out['last_window'] = [etf - slice_s, etf]
+    out['cop_first'] = _interval_cop_from_means(
+        _analysis_means_for_window(df_sheet, file_name, stf, stf + slice_s, lab_corr_missing))
+    out['cop_last'] = _interval_cop_from_means(
+        _analysis_means_for_window(df_sheet, file_name, etf - slice_s, etf, lab_corr_missing))
+    if out['cop_first'] is None or out['cop_last'] is None:
+        out['reason'] = f'a {slice_min:g} min slice has no Q or P'
+        return out
+    if not out['cop_first']:
+        out['reason'] = 'the first slice COP is zero'
+        return out
+    out['value_pct'] = 100.0 * (out['cop_last'] - out['cop_first']) / out['cop_first']
+    return out
+
+
+def _interval_deviation_payload(entry, rowid, hp_id, periods, cfg, df_entry, sheets):
+    """The extra block for one parent, or None when it has no guideline clocks.
+
+    Each interval is scored on its own time mask by the parent's own routine, so
+    there is exactly one set of PD formulas in the tool. Colouring is left to the
+    page: nothing here is a stored PASS/FAIL.
+    """
+    kind = _guideline_kind_from_stored(p['period_type'] for p in periods)
+    if kind == 'unknown':
+        return None
+
+    lengths = _guideline_lengths()
+    spans = _interval_pd_spans(periods, kind)
+    file_name = entry.get('file_name')
+    data_set = entry.get('data_set')
+
+    payload = {
+        'rowid': int(rowid),
+        'file_name': file_name,
+        'data_set': data_set,
+        'kind': kind,
+        'buffer_s': _guideline_buffer_s(),
+        'intervals': [],
+        'delta_cop': None,
+        'note': '',
+    }
+
+    for key, label, _period_type in INTERVAL_PD_ROWS:
+        window = spans.get(key) or []
+        row = {'key': key, 'label': label, 'spans': window,
+               'status': 'absent', 'reason': '', 'stats': None}
+        if not window:
+            row['reason'] = _interval_pd_absent_reason(key, kind, spans, lengths)
+        elif not _interval_pd_has_bands(cfg, key):
+            row['status'] = 'no_bands'
+            row['reason'] = f'Interval {label} bands are not configured yet'
+        else:
+            stf, etf = window[0]
+            stats = calculate_entry_deviations(
+                file_name, data_set, stf, etf, hp_id=hp_id, entry=entry, df=df_entry,
+                dtreturn_band=_interval_dtreturn_band(cfg, key),
+            )
+            if not stats:
+                row['status'] = 'no_data'
+                row['reason'] = 'no usable data in this window'
+            else:
+                row['status'] = 'ok'
+                row['stats'] = {
+                    **{k: safe_int(stats.get(k)) for k in INTERVAL_PD_COUNT_KEYS},
+                    **{k: _guideline_num(stats.get(k)) for k in INTERVAL_PD_FLOAT_KEYS},
+                    **{k: (stats.get(k) if isinstance(stats.get(k), str) else None)
+                       for k in INTERVAL_PD_TEXT_KEYS},
+                }
+        payload['intervals'].append(row)
+
+    eval_span = spans.get('evaluation')
+    if eval_span:
+        payload['delta_cop'] = _interval_delta_cop(
+            file_name, data_set, eval_span[0][0], eval_span[0][1], cfg, sheets)
+    else:
+        payload['delta_cop'] = {
+            'value_pct': None, 'cop_first': None, 'cop_last': None,
+            'limit_pct': cfg['delta_cop_pct'], 'slice_min': cfg['delta_cop_slice_min'],
+            'first_window': None, 'last_window': None,
+            'reason': _interval_pd_absent_reason('evaluation', kind, spans, lengths),
+        }
+
+    if not any(r['status'] == 'ok' for r in payload['intervals']):
+        payload['note'] = 'Guideline clocks are saved, but none of them could be scored.'
+    return payload
+
+
+def _store_interval_deviations(conn, rowid, payload) -> None:
+    """Write (or clear) the extra block for one parent. ``results`` is untouched."""
+    if payload is None:
+        conn.execute('DELETE FROM entry_interval_deviations WHERE entry_rowid=?', (int(rowid),))
+        return
+    # allow_nan=False: a NaN here would be unparseable JSON at HTTP 200, the
+    # failure mode the JSON-only reply closed. Everything numeric went through
+    # _guideline_num, so this only ever fires on a bug.
+    conn.execute(
+        'INSERT OR REPLACE INTO entry_interval_deviations '
+        '(entry_rowid, buffer_s, payload, calculated_at) VALUES (?,?,?,?)',
+        (int(rowid), int(payload.get('buffer_s') or 0),
+         json.dumps(payload, allow_nan=False), datetime.now().isoformat())
+    )
+
+
+def _load_interval_deviations(conn) -> dict:
+    """Stored extra blocks by parent rowid. No sheet read, no Plotdaten, no walk."""
+    try:
+        rows = conn.execute(
+            'SELECT entry_rowid, payload, calculated_at FROM entry_interval_deviations'
+        ).fetchall()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        try:
+            payload = json.loads(r['payload'])
+        except (TypeError, ValueError):
+            continue
+        payload['calculated_at'] = r['calculated_at']
+        out[int(r['entry_rowid'])] = payload
+    return out
+
+
+def _recalculate_interval_deviations(conn, entry, rowid, hp_id, df_entry, sheets, cfg) -> bool:
+    """Refresh the extra block for one parent from its **saved** guideline clocks.
+
+    Stored periods only (``detection_method='guideline'`` at the configured
+    buffer) — nothing is proposed here. Called from the analyst's Calculate /
+    Update on Deviations and from nowhere else, so ``calculate_and_insert``
+    cannot be stopped by a red ΔCOP.
+    """
+    periods = [dict(p) for p in conn.execute(
+        'SELECT * FROM cycle_periods WHERE entry_rowid=? AND detection_method=? AND buffer_s=? '
+        'ORDER BY start_time ASC, id ASC',
+        (int(rowid), GUIDELINE_DETECTION_METHOD, _guideline_buffer_s())
+    ).fetchall()]
+    payload = _interval_deviation_payload(entry, rowid, hp_id, periods, cfg, df_entry, sheets)
+    _store_interval_deviations(conn, rowid, payload)
+    return payload is not None
+
+
 def safe_int(value, default=None):
     """Safely convert a value to int, handling bytes, None, and other types"""
     if value is None:
@@ -12129,9 +14206,11 @@ def deviations():
     
     # Initialize deviation columns if needed
     init_deviation_columns()
+    ensure_interval_deviations_table()
     
     # Load permissible deviations for template
     deviations_config = load_permissible_deviations()
+    interval_config = load_interval_deviations_config()
     
     conn = get_db_connection()
     try:
@@ -12396,9 +14475,29 @@ def deviations():
         # Count entries with and without statistics
         total_entries = len(results)
         calculated_entries = sum(1 for e in deviation_stats if e.get('has_statistics'))
-        
+
+        # Interval block: whatever the last Calculate stored for the
+        # rows that have saved guideline clocks. A plain table read — the page
+        # does not touch Plotdaten and does not re-propose a clock.
+        stored_intervals = _load_interval_deviations(conn)
+        interval_entries = []
+        for e in deviation_stats:
+            payload = stored_intervals.get(safe_int(e.get('rowid')))
+            if not payload:
+                continue
+            interval_entries.append({
+                'rowid': e.get('rowid'),
+                'file_name': e.get('file_name'),
+                'data_set': e.get('data_set'),
+                'test_condition': e.get('test_condition') or e.get('test_cond'),
+                'block': payload,
+                'by_key': {r['key']: r for r in (payload.get('intervals') or [])},
+            })
+
         return render_template('deviations.html', 
                              entries=deviation_stats,
+                             interval_entries=interval_entries,
+                             interval_config=interval_config,
                              deviation_bands=DEVIATION_BANDS,
                              setpoints=DEVIATION_SETPOINTS,
                              total_entries=total_entries,
@@ -13594,8 +15693,18 @@ def api_cycle_periods_pelec_plot():
 @app.route('/calculate_deviations', methods=['POST'])
 def calculate_deviations():
     """Calculate deviation statistics for selected entries or entries missing statistics"""
-    init_deviation_columns()
-    
+    try:
+        init_deviation_columns()
+        # The extra interval block is refreshed in the same pass; its tables are
+        # created before the write connection opens, so the DDL cannot collide
+        # with the UPDATEs below.
+        ensure_cycle_periods_table()
+        ensure_interval_deviations_table()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
     data = request.get_json()
     entry_ids = data.get('entry_ids', None)  # If provided, calculate only for these
     skip_existing = data.get('skip_existing', True)  # Skip entries that already have statistics
@@ -13642,9 +15751,13 @@ def calculate_deviations():
         calculated = 0
         skipped = 0
         errors = 0
+        interval_rows = 0
         warnings = []  # Collect warnings for failed entries
         from datetime import datetime
-        
+
+        interval_cfg = load_interval_deviations_config()
+        interval_sheets = {}  # prepared sheets for ΔCOP, one Excel read per file
+
         for entry in results:
             file_name = entry.get('file_name')
             data_set = entry.get('data_set')
@@ -13669,7 +15782,11 @@ def calculate_deviations():
                 skipped += 1
                 continue
             
-            stats = calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=warnings, hp_id=hp_id, entry=entry)
+            # Read the entry's series once: the parent window and every guideline
+            # interval of this row are cut from the same frame.
+            df_entry = load_time_series_data(file_name, start_time, end_time, data_set=data_set)
+
+            stats = calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=warnings, hp_id=hp_id, entry=entry, df=df_entry)
             if stats:
                 # Store in database - ensure all fields are properly handled
                 profile, _preason = unit_config.resolve_profile(
@@ -13763,14 +15880,27 @@ def calculate_deviations():
                 # The calculate_entry_deviations function already prints detailed warnings
                 errors += 1
                 print(f"ERROR: Could not calculate deviations for {file_name}, dataset {data_set}, rowid {rowid} - see warnings above for details")
-        
+
+            # The extra interval block is an addition. Missing clocks, a missing
+            # sheet or any other failure here leaves the parent numbers above
+            # exactly as they are.
+            try:
+                if _recalculate_interval_deviations(
+                        conn, entry, rowid, hp_id, df_entry, interval_sheets, interval_cfg):
+                    interval_rows += 1
+            except Exception as e:
+                print(f"WARNING: interval deviations skipped for {file_name}, rowid {rowid}: {e}")
+                warnings.append(f"{file_name}: interval deviations skipped ({e}). "
+                                f"Parent deviations are unaffected.")
+
         conn.commit()
-        
+
         return jsonify({
             'success': True,
             'calculated': calculated,
             'skipped': skipped,
             'errors': errors,
+            'interval_rows': interval_rows,
             'total': len(results),
             'warnings': warnings  # Include warnings in response
         })
@@ -13948,25 +16078,500 @@ def recalculate_deviation_stat():
         return jsonify({'success': False, 'message': str(e)})
 
 
-def _load_results_entry(file_name, data_set, start_time, end_time):
-    """Load the results row for one cycle. Empty dict if the row is missing."""
+def _load_results_entry(file_name, data_set, start_time, end_time, rowid=None):
+    """Load the results row for one cycle. Empty dict if the row is missing.
+
+    Prefer ``rowid`` when the plot button sends it. Matching only on file +
+    data_set-as-text + start/end used to miss the row (SQLite ``CAST(1.0 AS TEXT)``
+    is ``'1.0'``, a JSON ``1`` is ``'1'``), so saved clocks never reached the plot.
+    """
     try:
         conn = get_db_connection()
         try:
-            row = conn.execute(
-                "SELECT * FROM results WHERE file_name=? AND CAST(data_set AS TEXT)=CAST(? AS TEXT) "
-                "AND start_time=? AND end_time=?",
-                (file_name, data_set, start_time, end_time),
-            ).fetchone()
+            row = None
+            if rowid is not None and str(rowid).strip() != '':
+                try:
+                    rid = int(rowid)
+                except (TypeError, ValueError):
+                    rid = None
+                if rid is not None:
+                    row = conn.execute(
+                        "SELECT rowid, * FROM results WHERE rowid=?", (rid,)
+                    ).fetchone()
+            if row is None and file_name and start_time is not None and end_time is not None:
+                params = [file_name, float(start_time), float(end_time)]
+                sql = ("SELECT rowid, * FROM results WHERE file_name=? "
+                       "AND start_time=? AND end_time=?")
+                if data_set is not None and str(data_set).strip() != '':
+                    try:
+                        sql += " AND CAST(data_set AS REAL)=CAST(? AS REAL)"
+                        params.append(float(data_set))
+                    except (TypeError, ValueError):
+                        pass
+                row = conn.execute(sql, params).fetchone()
             return dict(row) if row else {}
         finally:
             conn.close()
     except Exception:
         return {}
 
+
+# Cycle Extract / Deviations Tsup plot: same layer colours as cycle_extract.html PERIOD_STYLE.
+_GUIDELINE_LAYER_Z = {'ds': 0, 'h': 1, 'eq': 2, 'eval': 3}
+_GUIDELINE_LAYER_STYLE = {
+    'ds':   {'facecolor': '#dc3545', 'alpha': 0.12, 'label': 'D / S'},
+    'h':    {'facecolor': '#28a745', 'alpha': 0.10, 'label': 'H'},
+    'eq':   {'facecolor': '#6f42c1', 'alpha': 0.14, 'label': 'Equilibrium'},
+    'eval': {'facecolor': '#17a2b8', 'alpha': 0.16, 'label': 'Evaluation'},
+}
+
+
+def _guideline_layer_of_period(ptype):
+    """cycle_periods type → Cycle Extract layer. Never from the test-condition letter."""
+    if ptype in ('defrost', 'off'):
+        return 'ds'
+    if ptype in ('heating', 'on'):
+        return 'h'
+    if ptype == 'equilibrium':
+        return 'eq'
+    if ptype == 'evaluation':
+        return 'eval'
+    return None
+
+
+def _guideline_clock_spans_from_periods(periods):
+    """Saved D/H/eq/eval (or S/H) as plot spans. Two D pieces stay two spans of one layer."""
+    out = []
+    for p in periods or []:
+        rec = dict(p) if not isinstance(p, dict) else p
+        layer = _guideline_layer_of_period(rec.get('period_type'))
+        if not layer:
+            continue
+        start = _guideline_num(rec.get('start_time'))
+        end = _guideline_num(rec.get('end_time'))
+        if start is None or end is None or end <= start:
+            continue
+        style = _GUIDELINE_LAYER_STYLE[layer]
+        out.append({
+            'layer': layer, 'start': start, 'end': end,
+            'facecolor': style['facecolor'], 'alpha': style['alpha'], 'label': style['label'],
+        })
+    out.sort(key=lambda s: (_GUIDELINE_LAYER_Z[s['layer']], s['start']))
+    return out
+
+
+def _saved_guideline_periods(entry):
+    """Raw guideline ``cycle_periods`` rows of this parent (detection_method guideline).
+
+    The stepped interval bands need the stored ``period_type`` itself, not
+    the Cycle Extract layer: defrost and off share the D/S colour but not a band
+    width (D DB ±5 K against S DB ±2 K).
+    """
+    rid = (entry or {}).get('rowid')
+    if rid is None:
+        return []
+    try:
+        conn = get_db_connection()
+        try:
+            buffer_s = _guideline_buffer_s()
+            rows = conn.execute(
+                'SELECT period_type, start_time, end_time FROM cycle_periods '
+                'WHERE entry_rowid=? AND detection_method=? AND buffer_s=? '
+                'ORDER BY start_time ASC, id ASC',
+                (int(rid), GUIDELINE_DETECTION_METHOD, buffer_s),
+            ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    'SELECT period_type, start_time, end_time FROM cycle_periods '
+                    'WHERE entry_rowid=? AND detection_method=? '
+                    'ORDER BY start_time ASC, id ASC',
+                    (int(rid), GUIDELINE_DETECTION_METHOD),
+                ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    return [dict(r) for r in rows]
+
+
+def _saved_guideline_clock_spans(entry):
+    """Saved guideline periods of this parent as shading spans."""
+    return _guideline_clock_spans_from_periods(_saved_guideline_periods(entry))
+
+
+def _shade_guideline_clock_spans(ax, spans):
+    """Vertical spans on a Tsup axes. First span of each layer keeps the legend label."""
+    if ax is None or not spans:
+        return
+    seen = set()
+    for sp in spans:
+        kwargs = dict(facecolor=sp['facecolor'], alpha=sp['alpha'], linewidth=0, zorder=0)
+        if sp['layer'] not in seen:
+            kwargs['label'] = sp['label']
+            seen.add(sp['layer'])
+        ax.axvspan(sp['start'], sp['end'], **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Stepped individual bands at the saved clock edges.
+#
+# Group 1 of the Deviations Plot keeps the full-cycle parent bands (DB/WB 1 K,
+# dTreturn -2...+2 K, flow 2.5 %) because the Deviations table scores the whole
+# parent cycle with that one band set. Group 2 draws the same traces with the
+# draft per-interval **individual** widths, stepped at the saved D/S/H edges.
+# Tsup is deliberately not a quantity here: the draft individual liquid sink
+# outlet cell is "-" and the Tsup figure stays the mean +/-0.5 K check.
+# ---------------------------------------------------------------------------
+
+INTERVAL_STEP_QUANTITIES = ('db', 'wb', 'dtreturn', 'flow')
+
+# interval_deviations.json key per quantity.
+_INTERVAL_STEP_SPEC_KEY = {
+    'db': 'db_k',
+    'wb': 'wb_k',
+    'dtreturn': 'dtreturn_k',
+    'flow': 'flow_instantaneous_pct',
+}
+
+# Interval H (and equilibrium / evaluation, which reuse H) keeps its individual
+# DB / WB / flow widths in permissible_deviations.json. dTreturn is absent on
+# purpose: the -2...+2 K there is the full-cycle parent width, never an H step.
+_INTERVAL_STEP_PARENT_KEY = {
+    'db': 'DB',
+    'wb': 'WB',
+    'flow': 'flow_instantaneous_pct',
+}
+
+# cycle_periods type -> interval, in coverage order: D wins over S, D/S win over
+# H. equilibrium and evaluation are absent - they sit inside H and reuse the H
+# width, and the clock shading already names them.
+_INTERVAL_STEP_COVERAGE = (
+    ('D', ('defrost',)),
+    ('S', ('off',)),
+    ('H', ('heating', 'on')),
+)
+
+# Colour per quantity, matching the Group 1 figure it repeats.
+_INTERVAL_STEP_COLOUR = {'db': 'blue', 'wb': 'red', 'dtreturn': 'purple', 'flow': 'green'}
+_INTERVAL_STEP_UNIT = {'db': 'K', 'wb': 'K', 'dtreturn': 'K', 'flow': '%'}
+
+
+def _merge_time_spans(spans):
+    """Overlapping or touching (start, end) pairs merged.
+
+    Two D spans with H in between stay two spans - that is the whole point of
+    the stepper.
+    """
+    items = sorted((s, e) for s, e in spans if e > s)
+    out = []
+    for start, end in items:
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def _subtract_time_spans(spans, blockers):
+    """``spans`` with every ``blockers`` piece cut out."""
+    out = []
+    for start, end in spans:
+        pieces = [(start, end)]
+        for b0, b1 in blockers:
+            nxt = []
+            for s, e in pieces:
+                if b1 <= s or b0 >= e:
+                    nxt.append((s, e))
+                    continue
+                if b0 > s:
+                    nxt.append((s, b0))
+                if b1 < e:
+                    nxt.append((b1, e))
+            pieces = nxt
+        out.extend(pieces)
+    return [(s, e) for s, e in out if e > s]
+
+
+def _interval_individual_half(quantity, interval, cfg=None, parent_bands=None):
+    """Individual half-width of one interval and quantity, or ``None`` for no band.
+
+    A draft n/a cell (D wet bulb, D flow, Tsup anywhere) has no key, so the
+    answer is ``None``: that span simply gets no step. It never falls back to
+    the Interval H width and it never becomes 0. Only intervals that declare
+    ``bands: permissible_deviations`` (H, equilibrium, evaluation) read the
+    shipped Interval H widths; D and S must not.
+    """
+    if quantity not in INTERVAL_STEP_QUANTITIES:
+        return None
+    cfg = cfg if cfg is not None else load_interval_deviations_config()
+    spec = (cfg.get('intervals') or {}).get(interval)
+    half = _interval_spec_half(spec, _INTERVAL_STEP_SPEC_KEY[quantity])
+    if half is not None:
+        return half
+    if not _interval_pd_has_bands(cfg, interval):
+        return None
+    parent_key = _INTERVAL_STEP_PARENT_KEY.get(quantity)
+    if not parent_key:
+        return None
+    parent_bands = parent_bands if parent_bands is not None else load_permissible_deviations()
+    raw = (parent_bands or {}).get(parent_key)
+    if isinstance(raw, dict):
+        raw = raw.get('value')
+    try:
+        half = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return half if np.isfinite(half) and half > 0 else None
+
+
+def _interval_individual_band_steps(periods, quantity, parent_start=None, parent_end=None,
+                                    cfg=None, parent_bands=None):
+    """Saved ``cycle_periods`` -> individual band steps for one quantity.
+
+    ``quantity`` is ``db`` | ``wb`` | ``dtreturn`` | ``flow``. Tsup is not one of
+    them: the draft individual liquid sink outlet is n/a.
+
+    Coverage runs defrost -> D, off -> S, heating/on -> H, each clipped to the
+    parent window. Where a D or S span overlaps heating, D/S wins and H keeps
+    only the gap, so two stored D spans give two D-width steps with an H-width
+    step between them - not one rectangle over the lot. Times with no saved
+    D/S/H period get no step at all: the picture never falls back to the parent
+    band there. Returns ``[{'start', 'end', 'interval', 'half'}, ...]`` sorted by
+    time, or ``[]`` when nothing is saved.
+    """
+    if quantity not in INTERVAL_STEP_QUANTITIES:
+        return []
+    low = _guideline_num(parent_start)
+    high = _guideline_num(parent_end)
+
+    by_interval = {}
+    for p in periods or []:
+        rec = p if isinstance(p, dict) else dict(p)
+        ptype = rec.get('period_type')
+        start = _guideline_num(rec.get('start_time'))
+        end = _guideline_num(rec.get('end_time'))
+        if start is None or end is None or end <= start:
+            continue
+        if low is not None:
+            start = max(start, low)
+        if high is not None:
+            end = min(end, high)
+        if end <= start:
+            continue
+        for interval, types in _INTERVAL_STEP_COVERAGE:
+            if ptype in types:
+                by_interval.setdefault(interval, []).append((start, end))
+                break
+
+    if not by_interval:
+        return []
+    cfg = cfg if cfg is not None else load_interval_deviations_config()
+    parent_bands = parent_bands if parent_bands is not None else load_permissible_deviations()
+
+    steps = []
+    taken = []
+    for interval, _types in _INTERVAL_STEP_COVERAGE:
+        own = _merge_time_spans(
+            _subtract_time_spans(_merge_time_spans(by_interval.get(interval, [])), taken))
+        # Claim the time even when this quantity has no width here, so H cannot
+        # fill a defrost gap with +/-1 K where the draft says n/a.
+        taken = _merge_time_spans(taken + own)
+        half = _interval_individual_half(quantity, interval, cfg=cfg, parent_bands=parent_bands)
+        if half is None:
+            continue
+        for start, end in own:
+            steps.append({'start': start, 'end': end, 'interval': interval, 'half': half})
+    steps.sort(key=lambda st: (st['start'], st['end']))
+    return steps
+
+
+def _draw_interval_band_steps(ax, steps, centre, quantity, label_name=''):
+    """Stepped individual band on one axes; returns the widths it actually drew.
+
+    ``fill_between`` per segment, never ``axhspan`` - an unclipped span would be
+    a full-cycle band again, which is exactly what Group 2 exists to replace.
+    """
+    if ax is None or not steps or centre is None:
+        return []
+    colour = _INTERVAL_STEP_COLOUR.get(quantity, 'grey')
+    unit = _INTERVAL_STEP_UNIT.get(quantity, '')
+    pct = (unit == '%')
+    drawn, seen = [], set()
+    for st in steps:
+        half = st['half']
+        if pct:
+            low, high = centre * (1.0 - half / 100.0), centre * (1.0 + half / 100.0)
+        else:
+            low, high = centre - half, centre + half
+        key = (st['interval'], half)
+        label = None
+        if key not in seen:
+            seen.add(key)
+            label = f"{st['interval']} \u00b1{half:g} {unit}".strip()
+            drawn.append(label)
+        ax.fill_between([st['start'], st['end']], [low, low], [high, high],
+                        color=colour, alpha=0.15, linewidth=0, zorder=1, label=label)
+        ax.plot([st['start'], st['end']], [low, low], color=colour,
+                linestyle='--', linewidth=1.2, alpha=0.8, zorder=2)
+        ax.plot([st['start'], st['end']], [high, high], color=colour,
+                linestyle='--', linewidth=1.2, alpha=0.8, zorder=2)
+    return drawn
+
+
+# Same canvas for every Deviations Plot figure so stacked PNGs line up. Long
+# titles plus bbox_inches='tight' used to make each image a different width.
+PLOT_FIGSIZE = (12, 5)
+
+
+def _compact_plot_title(kind, interval_fill=False):
+    """One short line on the axes. File, dataset and the fill rules live in the modal."""
+    if kind == 'tsup':
+        return 'Tsup — mean ±0.5 K'
+    fill = 'interval fill' if interval_fill else 'parent fill'
+    names = {'dbwb': 'DB/WB', 'dtreturn': 'dTreturn', 'flow': 'Flow'}
+    return f'{names.get(kind, kind)} — {fill}'
+
+
+def _figure_to_base64(fig):
+    """PNG data URI of one matplotlib figure; the figure is closed either way.
+
+    Save at the figure's own size (no ``bbox_inches='tight'``) so stacked plots
+    share a width. ``tight_layout`` keeps labels inside that canvas.
+    """
+    try:
+        fig.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=100)
+        buf.seek(0)
+        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('utf-8')
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Unified plots: one figure per quantity. The fill is the band the eye
+# should read - the stepped interval individual widths where guideline clocks
+# are saved, otherwise the parent / full-cycle band the Deviations table scores.
+# Where the fill is stepped, the parent limits stay visible as dashed lines, not
+# as a second axhspan: a full-width fill would hide the narrow corridors (H
+# dTreturn is +/-0.5 K inside the parent -2...+2 K).
+# ---------------------------------------------------------------------------
+
+PARENT_OVERLAY_LABEL = 'parent / full-cycle band'
+
+
+def _draw_parent_overlay(ax, limits, colour, label=PARENT_OVERLAY_LABEL):
+    """Dashed lines at the parent / full-cycle limits. Returns True if labelled."""
+    labelled = False
+    if ax is None or not limits:
+        return False
+    for value in limits:
+        if value is None:
+            continue
+        kwargs = dict(color=colour, linestyle='--', linewidth=1.3, alpha=0.8, zorder=4)
+        if label and not labelled:
+            kwargs['label'] = label
+            labelled = True
+        ax.axhline(y=value, **kwargs)
+    return labelled
+
+
+def _entry_flow_set(entry, hp_id, file_name):
+    """(set type, set value, reason). The unit profile wins; the stored Deviations set is the fallback."""
+    entry = entry or {}
+    flow_type, flow_set_value = get_flow_set_for_hp(
+        hp_id, file_name=file_name, profile_id=entry.get('profile_id'))
+    if not flow_type or flow_set_value is None or flow_set_value <= 0:
+        stored_type = str(entry.get('dev_flow_set_type') or '').strip().lower()
+        try:
+            stored_val = (float(entry.get('dev_flow_setpoint'))
+                          if entry.get('dev_flow_setpoint') is not None else None)
+        except (TypeError, ValueError):
+            stored_val = None
+        if stored_type in ('mass', 'volume') and stored_val is not None and stored_val > 0:
+            flow_type, flow_set_value = stored_type, stored_val
+    if not flow_type or flow_set_value is None or flow_set_value <= 0:
+        profile = entry.get('profile_id') or ''
+        return None, None, (
+            f'No flow set point configured for this unit '
+            f'(HP "{hp_id}", profile "{profile}"). '
+            'Set volume-flow or mass-flow on Design parameters / the unit profile. '
+            'A missing mass-flow column in the sheet is not the cause — '
+            'the plot uses the configured set type (volume or mass).')
+    return flow_type, flow_set_value, ''
+
+
+def _flow_deviation_figure(entry, hp_id, file_name, data_set, cycle_data,
+                           periods, clock_spans, parent_start, parent_end):
+    """The one flow figure, or ``(None, reason)``.
+
+    A variable-flow entry has no flow band at all - that is a skip with a
+    reason, never an error that takes the rest of the modal with it.
+    """
+    if _entry_is_variable_flow(entry):
+        return None, 'Flow band does not apply to variable-flow tests (judged on Tmean / Tsup).'
+    flow_type, flow_set_value, reason = _entry_flow_set(entry, hp_id, file_name)
+    if reason:
+        return None, reason
+    if cycle_data is None or getattr(cycle_data, 'empty', True):
+        return None, 'no time series data for this entry'
+    cycle_data, mass_flow_notices = derive_mass_flow_if_needed(cycle_data)
+    for note in mass_flow_notices:
+        print(note)
+    flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
+    if flow_col not in cycle_data.columns:
+        available = [c for c in cycle_data.columns if 'flow' in c.lower()]
+        return None, (f'Column "{flow_col}" not found in time series data for {file_name}. '
+                      f'Available flow-related columns: {available}')
+
+    pct = load_permissible_deviations().get('flow_instantaneous_pct', 2.5)
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        pct = 2.5
+    band_low = flow_set_value * (1 - pct / 100.0)
+    band_high = flow_set_value * (1 + pct / 100.0)
+    mean_flow = float(cycle_data[flow_col].mean())
+    unit = 'kg/s' if flow_type == 'mass' else 'm³/h'
+    steps = (_interval_individual_band_steps(periods, 'flow', parent_start, parent_end)
+             if clock_spans else [])
+
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    ax.plot(cycle_data['time_elapsed'], cycle_data[flow_col], label=flow_col,
+            linewidth=1.5, color='teal', zorder=3)
+    _shade_guideline_clock_spans(ax, clock_spans)
+    ax.axhline(y=flow_set_value, color='green', linestyle='-', linewidth=2,
+               label=f'Set point: {flow_set_value:.4g} {unit}', alpha=0.7, zorder=2)
+    ax.axhline(y=mean_flow, color='orange', linestyle='-', linewidth=2,
+               label=f'Mean: {mean_flow:.4g} {unit}', alpha=0.85, zorder=2)
+    if steps:
+        drawn = _draw_interval_band_steps(ax, steps, flow_set_value, 'flow', 'flow')
+        _draw_parent_overlay(ax, (band_low, band_high), 'green')
+        band_text = 'interval individual ' + ', '.join(drawn)
+    else:
+        ax.axhspan(band_low, band_high, color='green', alpha=0.12,
+                   label=f'{PARENT_OVERLAY_LABEL} ±{pct:g} %', zorder=0)
+        ax.axhline(y=band_low, color='green', linestyle=':', linewidth=1, alpha=0.6)
+        ax.axhline(y=band_high, color='green', linestyle=':', linewidth=1, alpha=0.6)
+        band_text = f'parent / full-cycle ±{pct:g} % of set'
+    ax.set_xlabel('Time Elapsed (s)', fontsize=12)
+    ax.set_ylabel(f'{flow_col} ({unit})', fontsize=12)
+    ax.set_title(_compact_plot_title('flow', interval_fill=bool(steps)))
+    ax.legend(loc='best', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    return _figure_to_base64(fig), ''
+
+
 @app.route('/plot_deviation', methods=['POST'])
 def plot_deviation():
-    """Generate deviation plots for a specific entry - DB/WB, Tsup, and dTreturn."""
+    """One figure per quantity for a single entry: DB/WB, Tsup, dTreturn, flow.
+
+    The trace is drawn once. Where guideline clocks are saved, the fill is the
+    stepped interval individual band and the parent limits stay as dashed lines;
+    without clocks it is the parent / full-cycle band on its own. Tsup never
+    steps - the draft liquid sink outlet has no individual band, so that figure
+    stays the mean +/-0.5 K check.
+    """
     # Reload permissible deviations config to ensure latest values
     global PERMISSIBLE_DEVIATIONS, DB_BAND, WB_BAND, TSUP_BAND, DEVIATION_BANDS
     PERMISSIBLE_DEVIATIONS = load_permissible_deviations()
@@ -13974,27 +16579,43 @@ def plot_deviation():
     WB_BAND = PERMISSIBLE_DEVIATIONS.get('WB', {}).get('value', 1.0)
     TSUP_BAND = PERMISSIBLE_DEVIATIONS.get('Tsup', {}).get('value', 0.5)
     DEVIATION_BANDS = calculate_deviation_bands(DEVIATION_SETPOINTS, DB_BAND, WB_BAND)
-    
+
     try:
         data = request.get_json()
         file_name = data.get('file_name')
         data_set = data.get('data_set')
         start_time = data.get('start_time')
         end_time = data.get('end_time')
-        
+        rowid = data.get('rowid')
+
         if not all([file_name, data_set is not None, start_time is not None, end_time is not None]):
             return jsonify({'success': False, 'message': 'Missing required parameters'})
 
-        entry = _load_results_entry(file_name, data_set, start_time, end_time)
+        entry = _entry_with_hp_id(
+            _load_results_entry(file_name, data_set, start_time, end_time, rowid=rowid))
+        entry.setdefault('file_name', file_name)
+        if data.get('profile_id'):
+            entry['profile_id'] = data.get('profile_id')
         hp_id = entry.get('hp_id')
-        
+        periods = _saved_guideline_periods(entry)
+        clock_spans = _guideline_clock_spans_from_periods(periods)
+        band_mode = 'interval' if clock_spans else 'parent'
+        # Clip the steps to the stored parent window when the row was found by
+        # rowid: the request may carry the wrong start/end.
+        parent_start = _guideline_num(entry.get('start_time'))
+        parent_end = _guideline_num(entry.get('end_time'))
+        if parent_start is None:
+            parent_start = _guideline_num(start_time)
+        if parent_end is None:
+            parent_end = _guideline_num(end_time)
+
         # Calculate deviations (includes cycle_data)
         stats = calculate_entry_deviations(
             file_name, data_set, start_time, end_time, hp_id=hp_id, entry=entry or None
         )
         if not stats or 'cycle_data' not in stats:
             return jsonify({'success': False, 'message': 'Could not load time series data'})
-        
+
         cycle_data = stats['cycle_data']
         test_condition = stats['test_condition']
         tsup_setpoint = stats.get('tsup_setpoint')
@@ -14003,89 +16624,92 @@ def plot_deviation():
         has_db = 'db' in applicable_checks and 'T_outdoor (DB)' in cycle_data.columns
         has_wb = 'wb' in applicable_checks and 'T_outdoor (WB)' in cycle_data.columns
 
-        # Outdoor plot is air-source only. Skip it for water-to-water so Tsup / dTreturn still render.
-        img_base64_dbwb = None
+        # ---- 1. Outdoor DB/WB. Air-source only: water-to-water skips it so
+        # Tsup / dTreturn / flow still render.
+        img_dbwb = None
         if (has_db or has_wb) and bands:
-            plt.figure(figsize=(12, 6))
-            if has_db:
-                plt.plot(cycle_data['time_elapsed'], cycle_data['T_outdoor (DB)'],
-                        label='Drybulb Temperature', linewidth=1.5)
-            if has_wb:
-                plt.plot(cycle_data['time_elapsed'], cycle_data['T_outdoor (WB)'],
-                        label='Wetbulb Temperature', linewidth=1.5)
-
             db_band = bands.get('DB') if has_db else None
             wb_band = bands.get('WB') if has_wb else None
-            if db_band:
-                plt.axhspan(db_band[0], db_band[1], color='blue', alpha=0.1, label='DB Band')
-                plt.axhline(y=db_band[0], color='blue', linestyle='--', linewidth=1)
-                plt.axhline(y=db_band[1], color='blue', linestyle='--', linewidth=1)
-            if wb_band:
-                plt.axhspan(wb_band[0], wb_band[1], color='red', alpha=0.1, label='WB Band')
-                plt.axhline(y=wb_band[0], color='red', linestyle='--', linewidth=1)
-                plt.axhline(y=wb_band[1], color='red', linestyle='--', linewidth=1)
+            db_set = ((float(db_band[0]) + float(db_band[1])) / 2.0) if db_band else None
+            wb_set = ((float(wb_band[0]) + float(wb_band[1])) / 2.0) if wb_band else None
+            db_steps = (_interval_individual_band_steps(periods, 'db', parent_start, parent_end)
+                        if (clock_spans and has_db and db_set is not None) else [])
+            wb_steps = (_interval_individual_band_steps(periods, 'wb', parent_start, parent_end)
+                        if (clock_spans and has_wb and wb_set is not None) else [])
 
-            plt.xlabel('Time Elapsed (s)', fontsize=12)
-            plt.ylabel('Temperature (°C)', fontsize=12)
-            plt.title(f'DB/WB Permissible Deviation: {file_name} (Dataset {data_set})', fontsize=14)
-            plt.legend(loc='best')
-            plt.grid(True, alpha=0.3)
+            fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+            if has_db:
+                ax.plot(cycle_data['time_elapsed'], cycle_data['T_outdoor (DB)'],
+                        label='Drybulb Temperature', linewidth=1.5, zorder=3)
+            if has_wb:
+                ax.plot(cycle_data['time_elapsed'], cycle_data['T_outdoor (WB)'],
+                        label='Wetbulb Temperature', linewidth=1.5, zorder=3)
+            _shade_guideline_clock_spans(ax, clock_spans)
 
-            img_buffer_dbwb = BytesIO()
-            plt.savefig(img_buffer_dbwb, format='png', dpi=100, bbox_inches='tight')
-            img_buffer_dbwb.seek(0)
-            img_base64_dbwb = base64.b64encode(img_buffer_dbwb.getvalue()).decode('utf-8')
-            plt.close()
-        
-        # Create Tsup plot if supply temperature column exists (prefer Ts Buh)
-        img_base64_tsup = None
-        # Determine which column to use: prefer Ts Buh for deviation analysis
+            if db_steps or wb_steps:
+                drawn = _draw_interval_band_steps(ax, db_steps, db_set, 'db', 'DB')
+                drawn += _draw_interval_band_steps(ax, wb_steps, wb_set, 'wb', 'WB')
+                labelled = _draw_parent_overlay(ax, db_band, 'blue') if db_band else False
+                _draw_parent_overlay(ax, wb_band, 'red',
+                                     label=None if labelled else PARENT_OVERLAY_LABEL)
+                band_text = 'interval individual ' + ', '.join(drawn)
+            else:
+                if db_band:
+                    ax.axhspan(db_band[0], db_band[1], color='blue', alpha=0.1,
+                               label=f'DB {PARENT_OVERLAY_LABEL}', zorder=0)
+                    ax.axhline(y=db_band[0], color='blue', linestyle='--', linewidth=1)
+                    ax.axhline(y=db_band[1], color='blue', linestyle='--', linewidth=1)
+                if wb_band:
+                    ax.axhspan(wb_band[0], wb_band[1], color='red', alpha=0.1,
+                               label=f'WB {PARENT_OVERLAY_LABEL}', zorder=0)
+                    ax.axhline(y=wb_band[0], color='red', linestyle='--', linewidth=1)
+                    ax.axhline(y=wb_band[1], color='red', linestyle='--', linewidth=1)
+                band_text = f'parent / full-cycle ±{DB_BAND:g} K'
+
+            ax.set_xlabel('Time Elapsed (s)', fontsize=12)
+            ax.set_ylabel('Temperature (°C)', fontsize=12)
+            ax.set_title(_compact_plot_title('dbwb', interval_fill=bool(db_steps or wb_steps)))
+            ax.legend(loc='best', fontsize=9)
+            ax.grid(True, alpha=0.3)
+            img_dbwb = _figure_to_base64(fig)
+
+        # ---- 2. Tsup. The draft has no individual liquid sink outlet band, so
+        # this figure is and stays the MEAN +/-0.5 K check. It never steps.
+        img_tsup = None
         tsup_column = None
         if 'Ts Buh' in cycle_data.columns:
             tsup_column = 'Ts Buh'
         elif 'T_supply' in cycle_data.columns:
             tsup_column = 'T_supply'
-        
-        if tsup_column and tsup_setpoint is not None:
-            plt.figure(figsize=(12, 6))
-            plt.plot(cycle_data['time_elapsed'], cycle_data[tsup_column], 
-                    label=f'Supply Temperature ({tsup_column})', linewidth=1.5, color='green')
-            
-            # Calculate mean Tsup value
-            mean_tsup = float(cycle_data[tsup_column].mean())
-            
-            # Add Tsup setpoint line
-            plt.axhline(y=tsup_setpoint, color='green', linestyle='--', linewidth=2, 
-                       label=f'Tsup Setpoint ({tsup_setpoint}°C)', alpha=0.7)
-            
-            # Add mean Tsup value line (important: deviation is for mean value)
-            plt.axhline(y=mean_tsup, color='orange', linestyle='-', linewidth=2, 
-                       label=f'Mean Tsup ({mean_tsup:.2f}°C)', alpha=0.8)
-            
-            # Add deviation band (from configuration) - centered on setpoint
-            tsup_band = PERMISSIBLE_DEVIATIONS.get('Tsup', {}).get('value', 0.5)
-            tsup_band_lower = tsup_setpoint - tsup_band
-            tsup_band_upper = tsup_setpoint + tsup_band
-            plt.axhspan(tsup_band_lower, tsup_band_upper, color='green', alpha=0.1, 
-                       label=f'Tsup Band (±{tsup_band}K)')
-            plt.axhline(y=tsup_band_lower, color='green', linestyle='--', linewidth=1, alpha=0.5)
-            plt.axhline(y=tsup_band_upper, color='green', linestyle='--', linewidth=1, alpha=0.5)
-            
-            plt.xlabel('Time Elapsed (s)', fontsize=12)
-            plt.ylabel('Temperature (°C)', fontsize=12)
-            plt.title(f'Tsup Permissible Deviation: {file_name} (Dataset {data_set})', fontsize=14)
-            plt.legend(loc='best')
-            plt.grid(True, alpha=0.3)
-            
-            # Convert Tsup plot to base64
-            img_buffer_tsup = BytesIO()
-            plt.savefig(img_buffer_tsup, format='png', dpi=100, bbox_inches='tight')
-            img_buffer_tsup.seek(0)
-            img_base64_tsup = base64.b64encode(img_buffer_tsup.getvalue()).decode('utf-8')
-            plt.close()
 
-        # Create dTreturn plot (T_return_emu - T_return_calc) with asymmetric bounds
-        img_base64_dtreturn = None
+        if tsup_column and tsup_setpoint is not None:
+            fig_tsup, ax_tsup = plt.subplots(figsize=PLOT_FIGSIZE)
+            ax_tsup.plot(cycle_data['time_elapsed'], cycle_data[tsup_column],
+                         label=f'Supply Temperature ({tsup_column})', linewidth=1.5,
+                         color='green', zorder=3)
+            _shade_guideline_clock_spans(ax_tsup, clock_spans)
+            mean_tsup = float(cycle_data[tsup_column].mean())
+            ax_tsup.axhline(y=tsup_setpoint, color='green', linestyle='--', linewidth=2,
+                            label=f'Tsup Setpoint ({tsup_setpoint}°C)', alpha=0.7, zorder=2)
+            ax_tsup.axhline(y=mean_tsup, color='orange', linestyle='-', linewidth=2,
+                            label=f'Mean Tsup ({mean_tsup:.2f}°C)', alpha=0.8, zorder=2)
+            tsup_band = PERMISSIBLE_DEVIATIONS.get('Tsup', {}).get('value', 0.5)
+            ax_tsup.axhspan(tsup_setpoint - tsup_band, tsup_setpoint + tsup_band,
+                            color='green', alpha=0.1,
+                            label=f'mean Tsup band (±{tsup_band} K)', zorder=0)
+            ax_tsup.axhline(y=tsup_setpoint - tsup_band, color='green', linestyle='--',
+                            linewidth=1, alpha=0.5)
+            ax_tsup.axhline(y=tsup_setpoint + tsup_band, color='green', linestyle='--',
+                            linewidth=1, alpha=0.5)
+            ax_tsup.set_xlabel('Time Elapsed (s)', fontsize=12)
+            ax_tsup.set_ylabel('Temperature (°C)', fontsize=12)
+            ax_tsup.set_title(_compact_plot_title('tsup'))
+            ax_tsup.legend(loc='best', fontsize=9)
+            ax_tsup.grid(True, alpha=0.3)
+            img_tsup = _figure_to_base64(fig_tsup)
+
+        # ---- 3. dTreturn = T_return_emu - T_return_calc, against the set inlet.
+        img_dtreturn = None
         if 'T_return_emu' in cycle_data.columns and 'T_return_calc' in cycle_data.columns:
             dt_cfg = PERMISSIBLE_DEVIATIONS.get('dTreturn', {'lower': -2.0, 'upper': 2.0})
             try:
@@ -14094,28 +16718,51 @@ def plot_deviation():
             except Exception:
                 dt_lower, dt_upper = -2.0, 2.0
             dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
-            plt.figure(figsize=(12, 5))
-            plt.plot(cycle_data['time_elapsed'], dtreturn, label='dTreturn = T_return_emu − T_return_calc', linewidth=1.5, color='purple')
-            plt.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.6, label='0 K')
-            plt.axhspan(dt_lower, dt_upper, color='purple', alpha=0.12, label=f'Band ({dt_lower:+.1f}…{dt_upper:+.1f}) K')
-            plt.axhline(y=dt_lower, color='purple', linestyle=':', linewidth=1, alpha=0.7)
-            plt.axhline(y=dt_upper, color='purple', linestyle=':', linewidth=1, alpha=0.7)
-            plt.xlabel('Time Elapsed (s)', fontsize=12)
-            plt.ylabel('Temperature difference (K)', fontsize=12)
-            plt.title(f'dTreturn Permissible Deviation: {file_name} (Dataset {data_set})', fontsize=14)
-            plt.legend(loc='best')
-            plt.grid(True, alpha=0.3)
-            img_buffer_dt = BytesIO()
-            plt.savefig(img_buffer_dt, format='png', dpi=100, bbox_inches='tight')
-            img_buffer_dt.seek(0)
-            img_base64_dtreturn = base64.b64encode(img_buffer_dt.getvalue()).decode('utf-8')
-            plt.close()
-        
+            dt_steps = (_interval_individual_band_steps(periods, 'dtreturn',
+                                                        parent_start, parent_end)
+                        if clock_spans else [])
+
+            fig_dt, ax_dt = plt.subplots(figsize=PLOT_FIGSIZE)
+            ax_dt.plot(cycle_data['time_elapsed'], dtreturn,
+                       label='dTreturn = T_return_emu − T_return_calc',
+                       linewidth=1.5, color='purple', zorder=3)
+            _shade_guideline_clock_spans(ax_dt, clock_spans)
+            ax_dt.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.6,
+                          label='0 K', zorder=2)
+            if dt_steps:
+                drawn = _draw_interval_band_steps(ax_dt, dt_steps, 0.0, 'dtreturn', 'dTreturn')
+                _draw_parent_overlay(ax_dt, (dt_lower, dt_upper), 'purple')
+                band_text = 'interval individual ' + ', '.join(drawn)
+            else:
+                ax_dt.axhspan(dt_lower, dt_upper, color='purple', alpha=0.12,
+                              label=f'{PARENT_OVERLAY_LABEL} '
+                                    f'({dt_lower:+.1f}…{dt_upper:+.1f}) K', zorder=0)
+                ax_dt.axhline(y=dt_lower, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+                ax_dt.axhline(y=dt_upper, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+                band_text = f'parent / full-cycle {dt_lower:+.1f}…{dt_upper:+.1f} K'
+            ax_dt.set_xlabel('Time Elapsed (s)', fontsize=12)
+            ax_dt.set_ylabel('Temperature difference (K)', fontsize=12)
+            ax_dt.set_title(_compact_plot_title('dtreturn', interval_fill=bool(dt_steps)))
+            ax_dt.legend(loc='best', fontsize=9)
+            ax_dt.grid(True, alpha=0.3)
+            img_dtreturn = _figure_to_base64(fig_dt)
+
+        # ---- 4. Flow, in the same modal. Variable-flow or no configured set is
+        # a skip with a reason, not a failure of the whole reply.
+        img_flow, flow_reason = _flow_deviation_figure(
+            entry, hp_id, file_name, data_set, cycle_data,
+            periods, clock_spans, parent_start, parent_end)
+
         return jsonify({
             'success': True,
-            'image_dbwb': f'data:image/png;base64,{img_base64_dbwb}' if img_base64_dbwb else None,
-            'image_tsup': f'data:image/png;base64,{img_base64_tsup}' if img_base64_tsup else None,
-            'image_dtreturn': f'data:image/png;base64,{img_base64_dtreturn}' if img_base64_dtreturn else None
+            'image_dbwb': img_dbwb,
+            'image_tsup': img_tsup,
+            'image_dtreturn': img_dtreturn,
+            'image_flow': img_flow,
+            'flow_message': flow_reason or None,
+            'band_mode': band_mode,
+            'clocks_shaded': bool(clock_spans),
+            'clock_layers': sorted({sp['layer'] for sp in clock_spans}),
         })
     except Exception as e:
         print(f"Error generating deviation plot: {e}")
@@ -14123,9 +16770,10 @@ def plot_deviation():
         traceback.print_exc()
         return jsonify({'success': False, 'message': f'Error: {str(e)}'})
 
+
 @app.route('/plot_flow_deviation', methods=['POST'])
 def plot_flow_deviation():
-    """Generate flow deviation plot (time series with set value and ±band) for fixed-flow entries."""
+    """Thin API for the one flow figure. The Deviations Plot modal draws it inline."""
     try:
         req = request.get_json()
         file_name = req.get('file_name')
@@ -14133,6 +16781,7 @@ def plot_flow_deviation():
         start_time = req.get('start_time')
         end_time = req.get('end_time')
         hp_id = req.get('hp_id')
+        rowid = req.get('rowid')
         if not all([file_name, start_time is not None, end_time is not None]):
             return jsonify({'success': False, 'message': 'Missing required parameters (file_name, start_time, end_time)'})
         # Coerce to float so Excel filtering and DB lookups work (JSON may send int or string)
@@ -14141,20 +16790,18 @@ def plot_flow_deviation():
             end_time = float(end_time)
         except (TypeError, ValueError):
             return jsonify({'success': False, 'message': 'Invalid start_time or end_time'})
-        flow_type, flow_set_value = get_flow_set_for_hp(hp_id, file_name=file_name) if (hp_id or file_name) else (None, None)
-        if not flow_type or flow_set_value is None or flow_set_value <= 0:
-            return jsonify({'success': False, 'message': f'No flow set point configured for HP "{hp_id}" (check Design parameters on this page)'})
-        entry = _load_results_entry(file_name, data_set, start_time, end_time)
-        if hp_id is not None:
+        entry = _entry_with_hp_id(
+            _load_results_entry(file_name, data_set, start_time, end_time, rowid=rowid))
+        if hp_id not in (None, ''):
             entry.setdefault('hp_id', hp_id)
         if req.get('profile_id'):
-            entry.setdefault('profile_id', req.get('profile_id'))
+            entry['profile_id'] = req.get('profile_id')
         entry.setdefault('file_name', file_name)
-        if _entry_is_variable_flow(entry):
-            return jsonify({'success': False, 'message': 'Flow band does not apply to variable-flow tests (judged on Tmean / Tsup).'})
+        hp_id = entry.get('hp_id') if entry.get('hp_id') not in (None, '') else hp_id
 
-        # Prefer cycle_data from the same path as DB/WB/Tsup plot (calculate_entry_deviations).
-        # If that fails (no stored time series), load from Excel using process_file.
+        # Prefer cycle_data from the same path as the other figures
+        # (calculate_entry_deviations). If that fails (no stored time series),
+        # load from Excel using process_file.
         cycle_data = None
         stats = calculate_entry_deviations(
             file_name, data_set, start_time, end_time, hp_id=hp_id, entry=entry or None
@@ -14169,39 +16816,27 @@ def plot_flow_deviation():
         if cycle_data is None or cycle_data.empty:
             return jsonify({'success': False, 'message': 'Could not load time series data for this entry. The Excel file may use a different sheet or time range than expected.'})
 
-        # Ensure mass flow is available: measured wins, empty or absent is derived
-        cycle_data, mass_flow_notices = derive_mass_flow_if_needed(cycle_data)
-        for note in mass_flow_notices:
-            print(note)
+        periods = _saved_guideline_periods(entry)
+        clock_spans = _guideline_clock_spans_from_periods(periods)
+        parent_start = _guideline_num(entry.get('start_time'))
+        parent_end = _guideline_num(entry.get('end_time'))
+        if parent_start is None:
+            parent_start = start_time
+        if parent_end is None:
+            parent_end = end_time
 
-        flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
-        if flow_col not in cycle_data.columns:
-            available = [c for c in cycle_data.columns if 'flow' in c.lower()]
-            return jsonify({'success': False, 'message': f'Column "{flow_col}" not found in time series data for {file_name}. Available flow-related columns: {available}'})
-
-        flow_instantaneous_pct = load_permissible_deviations().get('flow_instantaneous_pct', 2.5)
-        band_low = flow_set_value * (1 - flow_instantaneous_pct / 100.0)
-        band_high = flow_set_value * (1 + flow_instantaneous_pct / 100.0)
-        mean_flow = float(cycle_data[flow_col].mean())
-        unit = 'kg/s' if flow_type == 'mass' else 'm³/h'
-        plt.figure(figsize=(12, 5))
-        plt.plot(cycle_data['time_elapsed'], cycle_data[flow_col], label=f'{flow_col}', linewidth=1.5, color='teal')
-        plt.axhline(y=flow_set_value, color='green', linestyle='--', linewidth=2, label=f'Set point: {flow_set_value:.4g} {unit}')
-        plt.axhline(y=mean_flow, color='orange', linestyle='-', linewidth=2, label=f'Mean: {mean_flow:.4g} {unit}', alpha=0.85)
-        plt.axhspan(band_low, band_high, color='green', alpha=0.12, label=f'±{flow_instantaneous_pct}% band ({band_low:.4g}–{band_high:.4g})')
-        plt.axhline(y=band_low, color='green', linestyle=':', linewidth=1, alpha=0.6)
-        plt.axhline(y=band_high, color='green', linestyle=':', linewidth=1, alpha=0.6)
-        plt.xlabel('Time Elapsed (s)', fontsize=12)
-        plt.ylabel(f'{flow_col} ({unit})', fontsize=12)
-        plt.title(f'Flow Permissible Deviation: {file_name} (Dataset {data_set})', fontsize=14)
-        plt.legend(loc='best')
-        plt.grid(True, alpha=0.3)
-        img_buffer = BytesIO()
-        plt.savefig(img_buffer, format='png', dpi=100, bbox_inches='tight')
-        img_buffer.seek(0)
-        img_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
-        plt.close()
-        return jsonify({'success': True, 'image': f'data:image/png;base64,{img_base64}'})
+        image, reason = _flow_deviation_figure(
+            entry, hp_id, file_name, data_set, cycle_data,
+            periods, clock_spans, parent_start, parent_end)
+        if not image:
+            return jsonify({'success': False, 'message': reason or 'No flow figure for this entry'})
+        return jsonify({
+            'success': True,
+            'image': image,
+            'band_mode': 'interval' if clock_spans else 'parent',
+            'clocks_shaded': bool(clock_spans),
+            'clock_layers': sorted({sp['layer'] for sp in clock_spans}),
+        })
     except Exception as e:
         print(f"Error generating flow deviation plot: {e}")
         import traceback
