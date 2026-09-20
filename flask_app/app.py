@@ -32,7 +32,7 @@ if not os.environ.get('FLASK_SECRET_KEY'):
 
 @app.context_processor
 def inject_dataset_context():
-    """Expose open database label and default condition set to all templates (B1.5 / B1.6)."""
+    """Expose open database label and default condition set to all templates."""
     try:
         db_path = get_database_path()
         db_label = os.path.basename(db_path) if db_path else ''
@@ -163,7 +163,7 @@ if _data_dir and not os.path.isabs(_data_dir):
 # Unit / condition configuration (B1): JSON under flask_app/config/
 import unit_config  # noqa: E402
 import summary_export  # noqa: E402  # T4.2 C2 summary CSV/XLS
-import dataset_manager  # noqa: E402  # B1.6 dataset create/open/switch
+import dataset_manager  # noqa: E402  # dataset create/open/switch
 
 # Optional monitoring means (HPT air-to-water REV1): Plotdaten column → results column.
 # Extras only — they are never added to required_columns / average_columns, so BAM Plotdaten
@@ -578,7 +578,7 @@ def _list_analysis_units(conn):
 
 
 def get_database_path():
-    """Absolute path to the SQLite results database (configurable; B1.5 / B1.6)."""
+    """Absolute path to the SQLite results database (configurable)."""
     configured = (config.get('database_path') or '').strip()
     if configured:
         path = configured if os.path.isabs(configured) else os.path.normpath(os.path.join(_APP_DIR, configured))
@@ -2424,7 +2424,7 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
                 decision = store_pelec_transition_on_insert(cursor, df_filtered, rowid, file_name)
             except Exception as exc:
                 print(f"[pelec_transition] rowid={rowid}: not stored ({exc})")
-            # Step 2 (§2.2.1): the same path writes the **default** guideline
+            # The same path also writes the **default** guideline
             # clocks, so D/H/eq/eval exist at Extract instead of only after
             # Edit clocks + Save. They are stamped 'guideline'/auto — Save is
             # still what marks the analyst's confirmation — and a row that
@@ -2666,7 +2666,7 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
         
         if df_filtered is not None:
             print(f"DataFrame shape: {df_filtered.shape}")
-            # Step 2 writes cycle_periods rows on this path, so the table (and
+            # The default clocks write cycle_periods rows here, so the table (and
             # its cache columns) must exist before the insert transaction opens
             # — ensure_* uses its own connection and would otherwise queue
             # behind our own write.
@@ -7011,7 +7011,7 @@ def calculate_deviation_bands(setpoints, db_band, wb_band):
     return deviation_bands
 
 def _reload_setpoint_maps():
-    """Load outdoor DB and supply setpoints from config/condition_sets.json (B1.1)."""
+    """Load outdoor DB and supply setpoints from config/condition_sets.json."""
     global DEVIATION_SETPOINTS, TSUP_SETPOINTS
     DEVIATION_SETPOINTS = unit_config.get_tdb_setpoints()
     TSUP_SETPOINTS = unit_config.get_tsup_setpoints()
@@ -7847,7 +7847,7 @@ def init_deviation_columns():
             # inherently undetectable or degenerate cycles on every "Update cache".
             # "Rebuild all" (force_all) ignores this flag and retries.
             'pelec_detect_failed': 'INTEGER',
-            # B1.3: which unit profile / condition set was used (nullable)
+            # which unit profile / condition set was used (nullable)
             'profile_id': 'TEXT',
             'condition_set_id': 'TEXT',
             'climate': 'TEXT',
@@ -8017,7 +8017,7 @@ CYCLE_PERIODS_CONFIG_DEFAULTS = {
     'eq_min': 60.0,
     'eval_min': 70.0,
     'defrost_indicator_columns': [],
-    # End of a defrost (§2.2.1): dT_HP must cross up through this many kelvin and
+    # End of a defrost: dT_HP must cross up through this many kelvin and
     # hold there for this many seconds. D2.1 v0.6 gives the 0.2 K but no hold
     # duration (its 30 s is the maximum H sampling interval, not a defrost-end
     # timer), so the hold is a tool choice: a one-sample flicker must not win.
@@ -8792,7 +8792,7 @@ def _detect_pelec_drop(pelec_series, time_series):
     return None
 
 
-# --- End of a defrost: dT_HP recovery, not the power ramp (§2.2.1) ----------
+# --- End of a defrost: dT_HP recovery, not the power ramp -------------------
 # The power ramp is a hint. The stamp is the last time the heat pump's own
 # temperature lift comes back and stays: dT_HP = T_sup - T_return_emu, with
 # `Ts Buh` preferred over `T_supply` exactly as every other Tsup check does.
@@ -8828,7 +8828,7 @@ def _sustained_power_end(pelec, p_time, after_t, sustain_s):
     Bounds the defrost-end search inside the parent window: once the compressor
     has run at the heating level for longer than the D/S buffer, the window is
     unambiguously in H, so a later dT_HP recovery belongs to a **second** D/S
-    span (§2.1.1), not to the defrost this window opened in. Returns None when
+    span, not to the defrost this window opened in. Returns None when
     the power never settles that long.
     """
     if pelec is None or p_time is None or len(pelec) < 10 or sustain_s <= 0:
@@ -8952,9 +8952,9 @@ def _detect_pelec_transition(df_slice, pelec, p_time, kind, begins_in,
                              window_start, window_end):
     """(time, note) — the interior power event of one parent window.
 
-    Power is the detector everywhere (§2.2): the ramp-up when the window opens
+    Power is the detector everywhere: the ramp-up when the window opens
     in D/S, the drop when it opens in H. On a **defrost** window that opens in
-    D/S the ramp is only a hint and the dT_HP hold decides (§2.2.1). On–off
+    D/S the ramp is only a hint and the dT_HP hold decides. On–off
     windows, and any window that opens in H, use power alone — the 0.2 K rule is
     not a way to find a defrost *start*. A continuous cycle has no interior
     event at all, so the caller must not ask for one.
@@ -9272,12 +9272,12 @@ def _guideline_kind_veto(kind, kind_source, df_slice, pelec, p_time,
 def _filter_defrost_suggestions_with_dt_hp(df_full, suggestions, test_cond):
     """Post-filter on Suggest: a defrost letter keeps only windows that defrosted.
 
-    Suggest stays **drop→drop** (§2.7). ``_detect_cycle_boundaries_drop_to_drop``
+    Suggest stays **drop→drop**. ``_detect_cycle_boundaries_drop_to_drop``
     — Min gap, the shoulder rule, the true-off merge — is still the only finder;
     this runs on its result and can only remove windows, never move or add one.
 
     What it removes is the power wiggle that looks like a drop but never
-    defrosted. §2.2.1 already says what "a defrost happened in this parent" means:
+    defrosted. What "a defrost happened in this parent" means is already fixed:
     dT_HP = T_sup − T_return_emu staying **below** ``dt_hp_recover_k`` for
     ``dt_hp_hold_s``. The same ``_dt_hp_series`` / ``_dt_hp_low_hold_start`` the
     kind veto calls, so the 0.2 K / 60 s are never written a second time, and a
@@ -9531,7 +9531,7 @@ PELEC_TRANSITION_COLUMNS = {
 def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
     """Detect and store ``pelec_transition_time`` as the parent row is written.
 
-    Cycle Extract owns this field (§2.2.1), so **Apply** must not leave it empty
+    Cycle Extract owns this field, so **Apply** must not leave it empty
     until someone opens dTreturn Insights. Only the time is stored: no guideline
     clocks, no ``cycle_periods`` row, no second ``results`` row.
 
@@ -9646,7 +9646,7 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
         print(f"[pelec_transition] rowid={rowid} kind=continuous ({kind_source}) "
               f"- no interior event, time left empty")
         # A demoted cycle still earns clocks: H is the parent window, eq/eval
-        # run from its start and there is no D/S (§2.2.1).
+        # run from its start and there is no D/S.
         return {'row': row, 'kind': 'continuous', 'kind_source': kind_source,
                 'begins_in': None, 'trans': None, 'trace': trace,
                 'pelec': pelec, 'p_time': p_time,
@@ -9674,7 +9674,7 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
 
 
 def store_default_guideline_clocks_on_insert(cursor, df_window, rowid, file_name, decision=None):
-    """Write the **default** guideline clocks as the parent row is written (Step 2).
+    """Write the **default** guideline clocks as the parent row is written.
 
     Apply already settles the kind, the veto and ``pelec_transition_time``
     (``store_pelec_transition_on_insert``); this turns that one decision into the
@@ -9691,7 +9691,7 @@ def store_default_guideline_clocks_on_insert(cursor, df_window, rowid, file_name
 
     Skipped, with Apply succeeding either way:
 
-    * kind ``unknown`` — §2.2.1 forbids inventing one;
+    * kind ``unknown`` — a kind is never invented;
     * the veto could not tell (``trace is None``: no T series on a defrost hint,
       no readable Pelec on an on–off hint) — the decision is ``None`` there;
     * guideline clocks already exist for this parent, or the analyst owns the
@@ -9739,7 +9739,7 @@ def store_default_guideline_clocks_on_insert(cursor, df_window, rowid, file_name
     begins_in = decision.get('begins_in')
     trans = decision.get('trans')
 
-    # A further drop inside the same window turns D/S into two spans (§2.1.1),
+    # A further drop inside the same window turns D/S into two spans,
     # exactly as on Edit clocks. Only the trace after the first D/S end is
     # searched, so the rise that opened the window is not read as the next drop.
     next_drop = None
@@ -10683,7 +10683,7 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
                 begins_in = 'ds' if opens_low else 'h'
                 begins_source = 'power level at cycle start'
 
-        # --- robustness (§2.2.1): a cycling hint with no trace of the condition
+        # --- robustness: a cycling hint with no trace of the condition
         # in this window is continuous. Same helper Apply uses. ---
         kind, kind_source, _trace = _guideline_kind_veto(
             kind, kind_source, df_slice, pelec, p_time, begins_in,
@@ -10703,7 +10703,7 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
             trans_source = e.get('pelec_transition_source') or 'auto'
         else:
             # Same rule Apply uses: power everywhere, plus the dT_HP hold on a
-            # defrost window that opens in D/S (§2.2.1).
+            # defrost window that opens in D/S.
             trans, note = _detect_pelec_transition(
                 df_slice, pelec, p_time, kind, begins_in, stf, etf)
             trans_source = f'detected now — {note}' if trans is not None else f'detection failed — {note}'
@@ -13532,7 +13532,7 @@ def _pivot_period_stats(periods: list, cycle_type: str, start_marker: str) -> di
     if cycle_type == 'on_off_cycle':
         offs = [p for p in periods if p.get('period_type') == 'off']
         ons = [p for p in periods if p.get('period_type') == 'on']
-        # §2.1.1: a parent cut through standby stores **two** ``off`` spans, the
+        # A parent cut through standby stores **two** ``off`` spans, the
         # same way a parent cut through defrost stores two ``defrost`` rows.
         # Union them into Off (weighted mean, min/max dT, summed duration) and
         # show the pieces as Off1 / Off2. A single span stays a plain Off.
@@ -15723,7 +15723,7 @@ def _load_period_statistics_rows(cycle_kind: str) -> list:
         legacy_by_entry = _period_statistics_periods_by_entry(
             conn, PERIOD_STATS_LEGACY_METHOD,
             sorted({SETTLING_BUFFER_S, *legacy_buffers.values()}))
-        # Mean-band colour (§2.8): the two JSON files once, and one setpoint
+        # Mean-band colour: the two JSON files once, and one setpoint
         # lookup per unit x test condition rather than per listed parent.
         colour_bands = _period_stat_colour_bands()
         setpoint_cache = {}
@@ -19630,7 +19630,7 @@ def api_hp_design_delete(hp_id):
 
 
 def backfill_profile_and_condition_ids(only_null: bool = True) -> dict:
-    """Set profile_id / condition_set_id on results from filename / hp_id (B1.3).
+    """Set profile_id / condition_set_id on results from filename / hp_id.
 
     Does not recompute any mean/COP/deviation numbers.
     """
@@ -19765,7 +19765,7 @@ def _retarget_profile_id_on_entries(old_id, new_id):
 
 @app.route('/profiles')
 def profiles_page():
-    """View/edit unit profiles and condition sets (file-backed, B1.2b)."""
+    """View/edit unit profiles and condition sets (file-backed)."""
     unit_config.reload_all()
     profiles = unit_config.list_profiles()
     known_ids = [p.get('profile_id') for p in profiles if p.get('profile_id')]
@@ -20035,7 +20035,7 @@ def api_export_columns_default():
 
 @app.route("/datasets")
 def datasets_page():
-    """Create / open / switch analysis databases (B1.6). Never overwrites existing files."""
+    """Create / open / switch analysis databases. Never overwrites existing files."""
     active = get_database_path()
     ready = database_is_ready()
     dbs = dataset_manager.list_managed_databases(active_path=active if ready else None)
@@ -20145,7 +20145,7 @@ def api_datasets_browse():
 
 if __name__ == '__main__':
     # Ensure auxiliary tables exist at startup only when a DB is already configured & present.
-    # Never create an empty file just because the path is missing (B1.6).
+    # Never create an empty file just because the path is missing.
     if database_is_ready():
         try:
             prepare_active_database()

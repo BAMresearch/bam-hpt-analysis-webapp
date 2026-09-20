@@ -1,4 +1,4 @@
-"""Dataset (SQLite database) management for first-run and switching (B1.6).
+"""Dataset (SQLite database) management for first-run and switching.
 
 Safety rules:
 - Never delete, truncate, DROP, or overwrite an existing .db file.

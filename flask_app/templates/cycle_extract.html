@@ -1743,7 +1743,7 @@
     document.getElementById('proposeClocksBtn').addEventListener('click', function(){ proposeClocks(null); });
     document.getElementById('saveAllClocksBtn').addEventListener('click', function(){ saveAllClocks(); });
 
-    // Whole-database batch (2.6). Click only *asks*; the confirm button inside
+    // Whole-database batch. Click only *asks*; the confirm button inside
     // the modal is the one that writes or deletes. Nothing here runs on load.
     var fillBtn = document.getElementById('dbFillClocksBtn');
     if (fillBtn) fillBtn.addEventListener('click', function(){ openDatabaseFillConfirm(); });

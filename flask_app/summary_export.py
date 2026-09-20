@@ -1,9 +1,7 @@
-"""T4.2 summary export (C2 / C2b) — schema t42_summary_v1.
+"""T4.2 summary export — schema t42_summary_v1.
 
 Builds one row per results entry for CSV / Excel hand-off.
-Column contract: HPT/WP4/T4.2_Evidence/EXPORT_SCHEMA_T42.md
-
-C2b: optional column subset at download time; local default prefs file.
+Optional column subset at download time; local default prefs file.
 """
 from __future__ import annotations
 
@@ -347,7 +345,7 @@ def ui_column_groups() -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
 
 
 def get_tool_version(config: Optional[Dict[str, Any]] = None) -> str:
-    """Resolve tool_version for RP-03 (config override → VERSION file → git → fallback)."""
+    """Resolve tool_version (config override → VERSION file → git → fallback)."""
     if config:
         override = (config.get("tool_version") or "").strip()
         if override:

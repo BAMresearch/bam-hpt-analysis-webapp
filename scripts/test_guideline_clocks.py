@@ -801,7 +801,7 @@ def test_cycle_extract_clock_buttons_say_edit_clocks():
     check('USER_GUIDE uses the new labels',
           '**Edit clocks**' in guide and '**Save all clocks**' in guide
           and 'Propose guideline clocks' not in guide and 'Save all proposed' not in guide)
-    check('USER_GUIDE gives Apply, Edit clocks and Save their Step 2 roles',
+    check('USER_GUIDE gives Apply, Edit clocks and Save their clock roles',
           '**Apply** already stored the default clocks' in guide
           and '**Edit clocks** opens them for changing' in guide
           and '**Save** stores what you see and marks it as yours.' in guide)
@@ -921,7 +921,7 @@ def _function_code(app_src, name):
 
 
 def _row_count(h):
-    """Parent rows in the throwaway database — Step 2 must never add a second."""
+    """Parent rows in the throwaway database — the clock step must never add a second."""
     conn = h._connect()
     try:
         return conn.execute("SELECT COUNT(*) AS n FROM results").fetchone()['n']
@@ -4310,7 +4310,7 @@ class ApplyHarness:
         self._saved = {k: getattr(webapp, k) for k in ('get_db_connection', 'get_database_path')}
         webapp.get_db_connection = self._connect
         webapp.get_database_path = lambda: self.db
-        # The real table, not a stub: Step 2 writes the dTreturn and mean caches
+        # The real table, not a stub: the clocks write the dTreturn and mean caches
         # onto every clock row, so a short CREATE here would hide a broken insert.
         webapp.ensure_cycle_periods_table()
         return self
@@ -4440,7 +4440,7 @@ def test_apply_stores_the_transition_on_a_defrost_sheet():
               source == 'auto', str(source))
         check('and the row is not marked as a failed detection',
               (failed or 0) == 0, str(failed))
-        check('the stamp on its own writes no cycle_periods row (Step 2 does)',
+        check('the stamp on its own writes no cycle_periods row (the clock step does)',
               h.period_count(rowid) == 0, str(h.period_count(rowid)))
         check('the kind helper reads E as defrost and an unlisted letter as nothing',
               (webapp._guideline_kind_from_test_cond('E'),
@@ -4603,7 +4603,7 @@ def test_apply_is_wired_into_the_one_insert_path():
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Apply writes the **default** guideline clocks.
+# Apply writes the **default** guideline clocks.
 #
 # The clocks appear at Extract instead of only after Edit clocks + Save, so
 # Guideline Windows and Period Statistics can see D/H/eq/eval straight away.
@@ -5279,7 +5279,7 @@ def test_period_stats_continuous_shows_h_and_invents_no_d():
 def test_period_stats_two_off_spans_union_into_off():
     """A parent cut through standby: S at the start, heating, S again to the end.
 
-    Cycle Extract stores **two** ``off`` rows (§2.1.1). Off must be the union of
+    Cycle Extract stores **two** ``off`` rows. Off must be the union of
     both, not the first one only, and the pieces show as Off1 / Off2.
     """
     with PeriodStatsHarness() as h:
@@ -5680,7 +5680,7 @@ def test_deviations_template_scrolls_inside_a_box_and_freezes_duration():
 
 
 # ---------------------------------------------------------------------------
-# Hide / remove (§2.8 hide list, analyst 2026-09-19).
+# Hide / remove: the hide list.
 #
 # Period Statistics drops **T_mean avgs** for good and puts the split spans
 # (D1 / D2, Off1 / Off2, On1 / On2) behind one checkbox that is off on every
@@ -5926,7 +5926,7 @@ def test_hide_deviations_copy_says_what_the_page_is():
 
 
 # ---------------------------------------------------------------------------
-# Mean-band colour (§2.8, locked 2026-09-19).
+# Mean-band colour.
 #
 # Period Statistics colours the **mean** it already shows: green inside the
 # draft mean band, red outside, two colours and no yellow. The map is locked
@@ -6304,7 +6304,7 @@ def test_colour_changed_nothing_it_was_told_to_leave_alone():
           webapp.GUIDELINE_SCORE_CACHE_VERSION == 1,
           str(webapp.GUIDELINE_SCORE_CACHE_VERSION))
     check('Guideline Windows did not gain the H+D Q column',
-          'h_d_q' not in src and 'hd_q_pct' not in src, 'leftover A was started')
+          'h_d_q' not in src and 'hd_q_pct' not in src, 'the H+D Q column was started')
     check('the two band files were not retuned',
           json.load(open(os.path.join(REPO, 'flask_app', 'config',
                                       'interval_deviations.json'), encoding='utf-8'))
