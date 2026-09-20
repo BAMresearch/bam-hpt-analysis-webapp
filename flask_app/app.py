@@ -2298,7 +2298,7 @@ def analysis_wbuh_fields(means: dict) -> dict:
     return out
 
 
-def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None):
+def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None):
 
     try:
         rowid = None
@@ -2414,6 +2414,28 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
                     (avg_t_mean_log, t_mean_from_avgs, avg_dt_ln, rowid)
                 )
             write_optional_means(cursor, df_filtered, rowid)
+            # Cycle Extract owns pelec_transition_time: stamp it here, on the one
+            # path that writes a parent row, so Apply no longer depends on
+            # dTreturn Insights for that number. The stamp itself writes times
+            # only; the decision it returns (kind, veto verdict, interior event)
+            # is what the clock step below reuses, so the veto runs once.
+            decision = None
+            try:
+                decision = store_pelec_transition_on_insert(cursor, df_filtered, rowid, file_name)
+            except Exception as exc:
+                print(f"[pelec_transition] rowid={rowid}: not stored ({exc})")
+            # Step 2 (§2.2.1): the same path writes the **default** guideline
+            # clocks, so D/H/eq/eval exist at Extract instead of only after
+            # Edit clocks + Save. They are stamped 'guideline'/auto — Save is
+            # still what marks the analyst's confirmation — and a row that
+            # already carries guideline clocks is left exactly as it is.
+            try:
+                written = store_default_guideline_clocks_on_insert(
+                    cursor, df_filtered, rowid, file_name, decision)
+                if written and clocked_out is not None:
+                    clocked_out.append(int(rowid))
+            except Exception as exc:
+                print(f"[guideline_clocks] rowid={rowid}: default clocks not stored ({exc})")
 
         # De-duplicate notices while preserving order
         seen = set()
@@ -2644,7 +2666,16 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
         
         if df_filtered is not None:
             print(f"DataFrame shape: {df_filtered.shape}")
+            # Step 2 writes cycle_periods rows on this path, so the table (and
+            # its cache columns) must exist before the insert transaction opens
+            # — ensure_* uses its own connection and would otherwise queue
+            # behind our own write.
+            try:
+                ensure_cycle_periods_table()
+            except Exception as exc:
+                print(f"[guideline_clocks] cycle_periods table not ready ({exc})")
             conn = get_db_connection()
+            clocked = []
             try:
                 print("Calling calculate_and_insert...")
                 cur = conn.cursor()
@@ -2653,6 +2684,7 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
                     cur, df_filtered, file_name, data_set, start_time, end_time,
                     update_existing=update_existing, old_start_time=old_start_time,
                     old_end_time=old_end_time, notices_out=local_notices,
+                    clocked_out=clocked,
                 )
                 tagged = [_tag_notice_with_file(file_name, n) for n in local_notices]
                 if notices_out is not None:
@@ -2674,8 +2706,9 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
                         (file_name, data_set, int(float(start_time)), int(float(end_time))),
                     )
                     r = cur.fetchone()
-                    return int(r["rowid"]) if r else None
-                return True  # Success
+                    outcome = int(r["rowid"]) if r else None
+                else:
+                    outcome = True  # Success
             except Exception as e:
                 print(f"Error in calculate_and_insert: {e}")
                 import traceback
@@ -2683,6 +2716,22 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
                 return None if return_rowid else False  # Error
             finally:
                 conn.close()
+
+            # The clocks are committed and the connection is closed: score the
+            # parents that just got default clocks, reusing the window Apply
+            # already holds so no workbook is re-read. Scoring is a cache — a
+            # failure here leaves the clocks alone and the row simply shows as
+            # missing scores (Compute missing scores can fill it later). It must
+            # never turn a successful Apply into an error.
+            if clocked:
+                try:
+                    _scored, _score_failed = _store_scores_for_parents(
+                        clocked, {_sheet_cache_key(file_name, data_set): df_filtered})
+                    for _f, _ds, _why in _score_failed:
+                        print(f"[guideline_clocks] scores not cached for {_f}: {_why}")
+                except Exception as exc:
+                    print(f"[guideline_clocks] scores not cached ({exc}) — clocks are stored")
+            return outcome
         else:
             print(f"Failed to process file {file_name} - file not found or no data in time range")
             return None if return_rowid else False  # File not found or no data
@@ -7968,6 +8017,12 @@ CYCLE_PERIODS_CONFIG_DEFAULTS = {
     'eq_min': 60.0,
     'eval_min': 70.0,
     'defrost_indicator_columns': [],
+    # End of a defrost (§2.2.1): dT_HP must cross up through this many kelvin and
+    # hold there for this many seconds. D2.1 v0.6 gives the 0.2 K but no hold
+    # duration (its 30 s is the maximum H sampling interval, not a defrost-end
+    # timer), so the hold is a tool choice: a one-sample flicker must not win.
+    'dt_hp_recover_k': 0.2,
+    'dt_hp_hold_s': 60.0,
 }
 _cycle_periods_cfg_cache = None
 _cycle_periods_cfg_mtime = -1.0
@@ -7992,7 +8047,7 @@ def load_cycle_periods_config() -> dict:
             cfg.update({k: v for k, v in raw.items() if k in CYCLE_PERIODS_CONFIG_DEFAULTS})
         except Exception as exc:
             print(f"[cycle_periods] cannot read {path}: {exc}")
-    for key in ('buffer_min', 'eq_min', 'eval_min'):
+    for key in ('buffer_min', 'eq_min', 'eval_min', 'dt_hp_recover_k', 'dt_hp_hold_s'):
         try:
             cfg[key] = max(0.0, float(cfg[key]))
         except (TypeError, ValueError):
@@ -8737,6 +8792,186 @@ def _detect_pelec_drop(pelec_series, time_series):
     return None
 
 
+# --- End of a defrost: dT_HP recovery, not the power ramp (§2.2.1) ----------
+# The power ramp is a hint. The stamp is the last time the heat pump's own
+# temperature lift comes back and stays: dT_HP = T_sup - T_return_emu, with
+# `Ts Buh` preferred over `T_supply` exactly as every other Tsup check does.
+# This is NOT dTreturn (T_return_emu - T_return_calc).
+
+def _dt_hp_series(df_slice):
+    """(values, times) of dT_HP over one parent window, or (None, None).
+
+    ``Ts Buh`` when the sheet has it, else ``T_supply``, minus ``T_return_emu``.
+    A sheet without both series simply has no dT_HP rule — the caller then keeps
+    the power time rather than failing.
+    """
+    if df_slice is None or getattr(df_slice, 'empty', True):
+        return None, None
+    if 'time_elapsed' not in df_slice.columns or 'T_return_emu' not in df_slice.columns:
+        return None, None
+    tsup_col = get_tsup_series_column(df_slice)
+    if tsup_col is None:
+        return None, None
+    t_sup = pd.to_numeric(df_slice[tsup_col], errors='coerce')
+    t_ret = pd.to_numeric(df_slice['T_return_emu'], errors='coerce')
+    t_ela = pd.to_numeric(df_slice['time_elapsed'], errors='coerce')
+    dt = (t_sup - t_ret)
+    keep = dt.notna() & t_ela.notna()
+    if int(keep.sum()) < 3:
+        return None, None
+    return dt[keep].to_numpy(dtype=float), t_ela[keep].to_numpy(dtype=float)
+
+
+def _sustained_power_end(pelec, p_time, after_t, sustain_s):
+    """End of the first stretch where power stays at its heating level.
+
+    Bounds the defrost-end search inside the parent window: once the compressor
+    has run at the heating level for longer than the D/S buffer, the window is
+    unambiguously in H, so a later dT_HP recovery belongs to a **second** D/S
+    span (§2.1.1), not to the defrost this window opened in. Returns None when
+    the power never settles that long.
+    """
+    if pelec is None or p_time is None or len(pelec) < 10 or sustain_s <= 0:
+        return None
+    p = np.asarray(pelec, dtype=float)
+    t = np.asarray(p_time, dtype=float)
+    finite = p[np.isfinite(p)]
+    if finite.size < 10:
+        return None
+    base = float(np.nanpercentile(finite, 5))
+    peak = float(np.nanpercentile(finite, 90))
+    span = peak - base
+    if not np.isfinite(span) or span <= 0:
+        return None
+    high_thr = base + 0.6 * span
+    run_start = None
+    for i in range(len(p)):
+        if not np.isfinite(p[i]) or not np.isfinite(t[i]) or t[i] < float(after_t):
+            continue
+        if p[i] >= high_thr:
+            if run_start is None:
+                run_start = t[i]
+            elif t[i] - run_start >= float(sustain_s):
+                return float(t[i])
+        else:
+            run_start = None
+    return None
+
+
+def _dt_hp_accepted_holds(dt_values, dt_times, after_t, until_t, recover_k, hold_s):
+    """Upward crossings of ``recover_k`` that actually **hold**, in time order.
+
+    A crossing counts only when dT_HP stays at or above ``recover_k`` for
+    ``hold_s`` seconds from the crossing and never goes negative inside that
+    hold, and only when the trace runs far enough to show the hold. A brief
+    overshoot followed by a deeper dip is therefore not an end of defrost, and
+    the caller takes the **last** accepted crossing.
+    """
+    out = []
+    if dt_values is None or dt_times is None:
+        return out
+    v = np.asarray(dt_values, dtype=float)
+    t = np.asarray(dt_times, dtype=float)
+    n = min(len(v), len(t))
+    if n < 2:
+        return out
+    t_last = float(t[n - 1])
+    was_below = True   # before the first sample we are below the threshold
+    for i in range(n):
+        if not (np.isfinite(v[i]) and np.isfinite(t[i])):
+            continue
+        below = bool(v[i] < float(recover_k))
+        if t[i] < float(after_t):
+            was_below = below
+            continue
+        if t[i] > float(until_t):
+            break
+        if was_below and not below:
+            if t_last - float(t[i]) >= float(hold_s) and _dt_hp_hold_ok(v, t, i, recover_k, hold_s):
+                out.append(float(t[i]))
+        was_below = below
+    return out
+
+
+def _dt_hp_hold_ok(v, t, i, recover_k, hold_s, below=False):
+    """True when dT_HP stays on one side of ``recover_k`` for ``hold_s`` from ``i``.
+
+    ``below=False`` is the recovery side (dT stays **>=** the threshold) that
+    ends a defrost. ``below=True`` is the low side the kind question needs (dT
+    stays **<** the threshold). One helper and one ``hold_s``, so the 60 s is
+    never written a second time.
+    """
+    t0 = float(t[i])
+    for j in range(i, len(v)):
+        if not np.isfinite(t[j]):
+            continue
+        if t[j] - t0 > float(hold_s):
+            return True
+        if np.isfinite(v[j]) and (v[j] >= float(recover_k)) == bool(below):
+            return False
+    return True
+
+
+def _defrost_end_from_dt_hp(df_slice, pelec, p_time, window_start, window_end, power_time):
+    """(time, note) for the end of a defrost the parent window opens in.
+
+    The power ramp is a hint. From the defrost **start** — here the window start,
+    because the window already opens inside D — collect the dT_HP crossings that
+    hold and take the **last** one. If the power rose before any crossing has
+    held, we wait rather than stamp the early ramp; if the ramp detector sits
+    after a crossing that already held, the hold caps it. A sheet without the
+    temperature series keeps the power time.
+    """
+    cfg = load_cycle_periods_config()
+    recover_k = float(cfg['dt_hp_recover_k'])
+    hold_s = float(cfg['dt_hp_hold_s'])
+    dt_v, dt_t = _dt_hp_series(df_slice)
+    if dt_v is None:
+        return power_time, 'power ramp-up (no dT_HP series on this sheet)'
+
+    settled = _sustained_power_end(
+        pelec, p_time,
+        power_time if power_time is not None else window_start,
+        _guideline_lengths()['buffer_s'],
+    )
+    until_t = settled if settled is not None else window_end
+    holds = _dt_hp_accepted_holds(dt_v, dt_t, window_start, until_t, recover_k, hold_s)
+    if not holds:
+        return None, (f'waiting — dT_HP never held at {recover_k:g} K for {hold_s:g} s '
+                      f'after the defrost start')
+    end = holds[-1]
+    if power_time is not None and end < power_time:
+        return end, (f'dT_HP held at {recover_k:g} K for {hold_s:g} s — caps the later power ramp-up')
+    if len(holds) > 1:
+        return end, (f'last of {len(holds)} dT_HP recoveries that held {hold_s:g} s '
+                     f'at {recover_k:g} K')
+    return end, f'dT_HP held at {recover_k:g} K for {hold_s:g} s'
+
+
+def _detect_pelec_transition(df_slice, pelec, p_time, kind, begins_in,
+                             window_start, window_end):
+    """(time, note) — the interior power event of one parent window.
+
+    Power is the detector everywhere (§2.2): the ramp-up when the window opens
+    in D/S, the drop when it opens in H. On a **defrost** window that opens in
+    D/S the ramp is only a hint and the dT_HP hold decides (§2.2.1). On–off
+    windows, and any window that opens in H, use power alone — the 0.2 K rule is
+    not a way to find a defrost *start*. A continuous cycle has no interior
+    event at all, so the caller must not ask for one.
+    """
+    if pelec is None or p_time is None or len(pelec) < 10:
+        return None, 'no power data for this window'
+    if begins_in == 'ds':
+        t_power = _detect_pelec_rampup(pelec, p_time)
+        if kind == 'defrost':
+            return _defrost_end_from_dt_hp(
+                df_slice, pelec, p_time, window_start, window_end, t_power)
+        note = 'power ramp-up' if t_power is not None else 'no power ramp-up found'
+        return t_power, note
+    t_power = _detect_pelec_drop(pelec, p_time)
+    return t_power, ('power drop' if t_power is not None else 'no power drop found')
+
+
 def _classify_entry(notes, test_cond):
     """Classify a single entry based on Notes and test_cond.
 
@@ -8930,16 +9165,201 @@ def _normalise_guideline_kind(value):
     return None
 
 
+# --- guideline kind: demote a cycling hint with no trace in the window ---
+GUIDELINE_KIND_VETO_KEEP_SOURCES = ('analyst', 'saved periods')
+
+
+def _dt_hp_low_hold_start(dt_values, dt_times, recover_k, hold_s):
+    """First downward crossing of ``recover_k`` that **holds**, else None.
+
+    The mirror of ``_dt_hp_accepted_holds``, for the **kind** question rather
+    than the clock stamp: a defrost happened inside this parent window only when
+    dT_HP stayed **below** the threshold for the same ``hold_s``. One sample
+    under the threshold is a flicker, not a defrost. A window that already opens
+    inside a defrost counts from its first sample.
+    """
+    if dt_values is None or dt_times is None:
+        return None
+    v = np.asarray(dt_values, dtype=float)
+    t = np.asarray(dt_times, dtype=float)
+    n = min(len(v), len(t))
+    if n < 2:
+        return None
+    t_last = float(t[n - 1])
+    was_below = False   # the window may open inside the defrost
+    for i in range(n):
+        if not (np.isfinite(v[i]) and np.isfinite(t[i])):
+            continue
+        below = bool(v[i] < float(recover_k))
+        if below and not was_below:
+            if (t_last - float(t[i]) >= float(hold_s)
+                    and _dt_hp_hold_ok(v, t, i, recover_k, hold_s, below=True)):
+                return float(t[i])
+        was_below = below
+    return None
+
+
+def _guideline_kind_trace(kind, df_slice, pelec, p_time, begins_in=None):
+    """Is the trace of ``kind`` present in this parent window? True/False/None.
+
+    ``None`` means the series that would answer it is missing, so the caller
+    must not demote: "cannot tell" is not "continuous".
+    """
+    cfg = load_cycle_periods_config()
+    if kind == 'defrost':
+        dt_v, dt_t = _dt_hp_series(df_slice)
+        if dt_v is None:
+            return None
+        return _dt_hp_low_hold_start(
+            dt_v, dt_t, float(cfg['dt_hp_recover_k']), float(cfg['dt_hp_hold_s'])) is not None
+    if kind == 'on_off':
+        if pelec is None or p_time is None or len(pelec) < 10:
+            return None
+        if _detect_pelec_drop(pelec, p_time) is not None:
+            return True
+        # A window that opens inside S has its stop before the window starts;
+        # there the restart is what proves the compressor was off.
+        if begins_in != 'h' and _detect_pelec_rampup(pelec, p_time) is not None:
+            return True
+        return False
+    return None
+
+
+def _guideline_kind_veto(kind, kind_source, df_slice, pelec, p_time,
+                         begins_in=None, stored_trans=None):
+    """(kind, source, trace) — demote a cycling **hint** with no trace here.
+
+    The one place the rule lives: **Apply** (``store_pelec_transition_on_insert``)
+    and **Edit clocks** (``_guideline_proposals_for_file``) both call this, so a
+    row cannot be read one way on insert and another way in the clock table.
+
+    Never demotes when the kind came from the analyst, from a defrost-indicator
+    column, or from clocks already saved with a D/S span, nor when a finite
+    transition time is already stored or typed — each of those is already a
+    trace. A hint from the letter, from a stored ``cycle_type`` or from the
+    file-level default is checked against the window.
+
+    ``trace`` is ``True`` (the condition is in this window), ``False`` (it is
+    not — ``kind`` comes back as ``continuous``) or ``None`` (no series to tell;
+    ``kind`` is kept and the caller must not stamp a clock from it).
+    """
+    if kind not in ('defrost', 'on_off'):
+        return kind, kind_source, None
+    src = str(kind_source or '')
+    if src in GUIDELINE_KIND_VETO_KEEP_SOURCES:
+        return kind, kind_source, True
+    if kind == 'defrost' and src.startswith('indicator column'):
+        return kind, kind_source, True
+    try:
+        if stored_trans is not None and np.isfinite(float(stored_trans)):
+            return kind, kind_source, True
+    except (TypeError, ValueError):
+        pass
+
+    trace = _guideline_kind_trace(kind, df_slice, pelec, p_time, begins_in)
+    if trace is not False:
+        return kind, kind_source, trace
+
+    cfg = load_cycle_periods_config()
+    if kind == 'defrost':
+        why = (f"no sustained dT_HP < {float(cfg['dt_hp_recover_k']):g} K "
+               f"for {float(cfg['dt_hp_hold_s']):g} s")
+    else:
+        why = 'no compressor stop in this window'
+    return 'continuous', f'{kind_source} — {why}, treated as continuous', False
+
+
+def _filter_defrost_suggestions_with_dt_hp(df_full, suggestions, test_cond):
+    """Post-filter on Suggest: a defrost letter keeps only windows that defrosted.
+
+    Suggest stays **drop→drop** (§2.7). ``_detect_cycle_boundaries_drop_to_drop``
+    — Min gap, the shoulder rule, the true-off merge — is still the only finder;
+    this runs on its result and can only remove windows, never move or add one.
+
+    What it removes is the power wiggle that looks like a drop but never
+    defrosted. §2.2.1 already says what "a defrost happened in this parent" means:
+    dT_HP = T_sup − T_return_emu staying **below** ``dt_hp_recover_k`` for
+    ``dt_hp_hold_s``. The same ``_dt_hp_series`` / ``_dt_hp_low_hold_start`` the
+    kind veto calls, so the 0.2 K / 60 s are never written a second time, and a
+    one-sample flicker is not a defrost here either.
+
+    Three ways a window is kept regardless:
+
+    * the letter is not a defrost letter — C/D is a power stop, and an empty or
+      unlisted letter must never be read as defrost, so **no** dT filter runs;
+    * dT_HP cannot be read in that window — "cannot tell" is not "no defrost";
+    * the filter would empty the list — the unfiltered drop→drop list comes back,
+      because a noisy Suggest beats an empty one on a real defrost file whose
+      temperature columns we failed to see. That fallback is logged.
+    """
+    if not suggestions:
+        return suggestions
+    if _guideline_kind_from_test_cond(test_cond) != 'defrost':
+        return suggestions
+    if df_full is None or getattr(df_full, 'empty', True) or 'time_elapsed' not in df_full.columns:
+        return suggestions
+
+    cfg = load_cycle_periods_config()
+    recover_k = float(cfg['dt_hp_recover_k'])
+    hold_s = float(cfg['dt_hp_hold_s'])
+    t_all = pd.to_numeric(df_full['time_elapsed'], errors='coerce')
+
+    kept, dropped = [], []
+    for item in suggestions:
+        st, et = float(item[0]), float(item[1])
+        dt_v, dt_t = _dt_hp_series(df_full[(t_all >= st) & (t_all <= et)])
+        if dt_v is None:
+            kept.append(item)          # no readable dT_HP here: cannot tell
+            continue
+        if _dt_hp_low_hold_start(dt_v, dt_t, recover_k, hold_s) is not None:
+            kept.append(item)
+            continue
+        dropped.append((st, et))
+
+    if not dropped:
+        return suggestions
+    why = f"no sustained dT_HP < {recover_k:g} K for {hold_s:g} s"
+    if not kept:
+        print(f"[suggest] {test_cond}: all {len(dropped)} drop→drop window(s) show {why} "
+              f"- keeping the unfiltered list rather than suggesting nothing")
+        return suggestions
+    print(f"[suggest] {test_cond}: dropped {len(dropped)} of {len(suggestions)} "
+          f"drop→drop window(s) with {why}: "
+          + ', '.join(f"{a:.0f}-{b:.0f} s" for a, b in dropped))
+    return kept
+
+
+def _guideline_kind_from_test_cond(test_cond):
+    """``defrost`` / ``on_off`` from the test-condition letter, else None.
+
+    The same letters dTreturn Insights already uses: A/B/E/F (and the BUH
+    variants) are defrost, C/D and ``C70min`` are on–off. G, an empty cell and
+    any letter we do not know fall through — a letter must never be read as
+    ``continuous``, and it never outranks a stored kind (see the fill order in
+    ``_resolve_guideline_kind``). Notes ``drop`` / ``ramp`` play no part.
+    """
+    tc = str(test_cond or '').strip()
+    if not tc:
+        return None
+    up = tc.upper()
+    if up in {c.upper() for c in DEFROST_TEST_CONDS}:
+        return 'defrost'
+    if up in {c.upper() for c in ON_OFF_TEST_CONDS}:
+        return 'on_off'
+    return None
+
+
 def _resolve_guideline_kind(row_kind, stored_cycle_type, indicator_flag, indicator_col,
-                            saved_types, default_kind):
+                            saved_types, default_kind, test_cond=None):
     """(kind, source) in the fill order below.
 
     Analyst choice on the row, stored ``cycle_type``, defrost-indicator column,
-    clocks already saved for the entry, then the **file-level default** — which
-    therefore never overwrites a kind already set on a row. Anything left over is
-    ``unknown``: in particular ``cycle_type='other'`` means "could not classify",
-    not ``continuous``. Kind is never taken from a test-condition letter or from
-    the dataset name.
+    clocks already saved for the entry, the **test-condition letter** as a
+    helper, then the **file-level default** — which therefore never overwrites a
+    kind already set on a row. Anything left over is ``unknown``: in particular
+    ``cycle_type='other'`` means "could not classify", not ``continuous``. Kind
+    is never taken from the dataset name, and the letter never yields
+    ``continuous``.
     """
     kind = _normalise_guideline_kind(row_kind)
     if kind:
@@ -8958,6 +9378,9 @@ def _resolve_guideline_kind(row_kind, stored_cycle_type, indicator_flag, indicat
         return 'on_off', 'saved periods'
     if 'heating' in saved_types:
         return 'continuous', 'saved periods'
+    kind = _guideline_kind_from_test_cond(test_cond)
+    if kind:
+        return kind, f'test condition {str(test_cond).strip()}'
     default_kind = _normalise_guideline_kind(default_kind)
     if default_kind:
         return default_kind, 'file-level default'
@@ -9096,6 +9519,248 @@ def _begins_in_from_marker(marker: str):
     if marker in ('defrost_end', 'on_start'):
         return 'h'
     return None
+
+
+PELEC_TRANSITION_COLUMNS = {
+    'pelec_transition_time': 'REAL',
+    'pelec_transition_source': 'TEXT',
+    'pelec_detect_failed': 'INTEGER',
+}
+
+
+def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
+    """Detect and store ``pelec_transition_time`` as the parent row is written.
+
+    Cycle Extract owns this field (§2.2.1), so **Apply** must not leave it empty
+    until someone opens dTreturn Insights. Only the time is stored: no guideline
+    clocks, no ``cycle_periods`` row, no second ``results`` row.
+
+    Kind can only come from what the row already carries — a stored
+    ``cycle_type``, a defrost-indicator column on the sheet, then the
+    test-condition letter (from the row, else inferred from the file name, which
+    is what the review modal fills that cell from). ``continuous`` has no
+    interior event. ``unknown`` still gets the power event: the 0.2 K hold is a
+    defrost rule, and guessing it on an unclassified row would be worse than the
+    power time.
+
+    A time the analyst owns is never replaced — ``pelec_transition_source``
+    ``'manual'``, or a stored time whose source is not ``'auto'`` — so a
+    recalculate keeps it. Failure stores ``NULL`` plus ``pelec_detect_failed=1``,
+    never ``0``, and never raises: Apply has to succeed either way.
+
+    Returns the **decision** for this window — kind, the veto verdict,
+    ``begins_in`` and the interior event, plus the power series it read — or
+    ``None`` where nothing was decided (an analyst-owned time, no readable
+    power, a window the veto cannot judge). The clock step
+    ``store_default_guideline_clocks_on_insert`` takes that dict rather than
+    deciding a second time, so a row cannot be read one way for the time and
+    another way for the clocks.
+    """
+    if rowid is None or df_window is None or getattr(df_window, 'empty', True):
+        return
+    if 'time_elapsed' not in df_window.columns:
+        return
+
+    rec = cursor.execute("SELECT * FROM results WHERE rowid=?", (rowid,)).fetchone()
+    row = dict(rec) if rec is not None else {}
+    missing = [c for c in PELEC_TRANSITION_COLUMNS if c not in row]
+    for col in missing:
+        # A database made before these columns existed: add them here rather than
+        # through a second connection, which would block on this open transaction.
+        try:
+            cursor.execute(f'ALTER TABLE results ADD COLUMN "{col}" {PELEC_TRANSITION_COLUMNS[col]}')
+        except sqlite3.OperationalError:
+            return
+
+    stored = _guideline_num(row.get('pelec_transition_time'))
+    source = str(row.get('pelec_transition_source') or '').strip().lower()
+    if source == 'manual':
+        return
+    if stored is not None and source != 'auto':
+        # A time with no 'auto' stamp came from somewhere else; leave it alone.
+        return
+
+    cfg = load_cycle_periods_config()
+    flag, ind_col = (None, None)
+    if row.get('cycle_type') not in GUIDELINE_KIND_FROM_CYCLE_TYPE:
+        flag, ind_col = _defrost_indicator_state(df_window, cfg.get('defrost_indicator_columns'))
+    test_cond = row.get('test_cond') or row.get('dev_test_condition')
+    if not test_cond:
+        test_cond = (infer_metadata_from_filename(file_name) or {}).get('test_cond')
+    saved_types = ()
+    try:
+        saved_types = {r[0] for r in cursor.execute(
+            "SELECT DISTINCT period_type FROM cycle_periods WHERE entry_rowid=? "
+            "AND detection_method=?", (rowid, GUIDELINE_DETECTION_METHOD)).fetchall()}
+    except sqlite3.OperationalError:
+        pass   # no cycle_periods table yet — a new row has no saved clocks anyway
+    kind, kind_source = _resolve_guideline_kind(
+        None, row.get('cycle_type'), flag, ind_col, saved_types, None, test_cond=test_cond)
+    if kind == 'continuous':
+        return   # H is the parent window; there is no interior event to stamp
+
+    t_all = pd.to_numeric(df_window['time_elapsed'], errors='coerce')
+    if not bool(t_all.notna().any()):
+        return
+    window_start = float(t_all.min())
+    window_end = float(t_all.max())
+
+    pcol = _find_uncorrected_pelec_column(df_window)
+    pelec, p_time = None, None
+    if pcol is not None:
+        values = pd.to_numeric(df_window[pcol], errors='coerce').dropna()
+        if len(values) >= 10:
+            pelec, p_time = values, t_all.loc[values.index]
+    if pelec is None:
+        # Nothing was attempted, so this is not a failed detection: leave the
+        # time and the flag alone rather than telling dTreturn Insights to stop
+        # offering this row.
+        print(f"[pelec_transition] rowid={rowid}: no usable {PELEC_COL} in the window")
+        return
+
+    begins_in = _begins_in_from_marker(row.get('cycle_start_marker'))
+    if begins_in is None:
+        opens_low = _cycle_opens_low(pelec.values) if pelec is not None else None
+        begins_in = 'h' if opens_low is False else 'ds'
+
+    # The letter (or a stored cycle_type, or the file default) is only a hint:
+    # demote it to continuous when this window carries no trace of the condition.
+    kind, kind_source, trace = _guideline_kind_veto(
+        kind, kind_source, df_window, pelec, p_time, begins_in)
+    if trace is None and kind in ('defrost', 'on_off'):
+        # The veto could not judge this cycling hint (no dT_HP series on a
+        # defrost letter, no readable power on an on-off one). "Cannot tell" is
+        # not "continuous" and it is not a failed detection either: nothing was
+        # attempted, so the time, the source and the flag are all left alone and
+        # no decision goes to the clock step. An `unknown` kind is a different
+        # case and still gets the power event stamped below.
+        print(f"[pelec_transition] rowid={rowid} kind={kind} ({kind_source}) "
+              f"- cannot tell from this window, nothing stamped")
+        return
+    if kind == 'continuous':
+        # H is the whole parent window, so there is no interior event to stamp.
+        # Nothing was there to find, so this is not a failed detection either.
+        cursor.execute(
+            "UPDATE results SET pelec_transition_time=NULL, pelec_transition_source='auto', "
+            "pelec_detect_failed=NULL WHERE rowid=?", (rowid,))
+        print(f"[pelec_transition] rowid={rowid} kind=continuous ({kind_source}) "
+              f"- no interior event, time left empty")
+        # A demoted cycle still earns clocks: H is the parent window, eq/eval
+        # run from its start and there is no D/S (§2.2.1).
+        return {'row': row, 'kind': 'continuous', 'kind_source': kind_source,
+                'begins_in': None, 'trans': None, 'trace': trace,
+                'pelec': pelec, 'p_time': p_time,
+                'window_start': window_start, 'window_end': window_end}
+
+    trans, note = _detect_pelec_transition(
+        df_window, pelec, p_time, kind, begins_in, window_start, window_end)
+    if trans is not None and not np.isfinite(float(trans)):
+        trans, note = None, 'transition time is not a finite number'
+
+    if trans is None:
+        cursor.execute(
+            "UPDATE results SET pelec_transition_time=NULL, pelec_transition_source='auto', "
+            "pelec_detect_failed=1 WHERE rowid=?", (rowid,))
+    else:
+        cursor.execute(
+            "UPDATE results SET pelec_transition_time=?, pelec_transition_source='auto', "
+            "pelec_detect_failed=0 WHERE rowid=?", (float(trans), rowid))
+    print(f"[pelec_transition] rowid={rowid} kind={kind} ({kind_source}) "
+          f"opens_in={begins_in} t={trans} — {note}")
+    return {'row': row, 'kind': kind, 'kind_source': kind_source,
+            'begins_in': begins_in, 'trans': trans, 'trace': trace,
+            'pelec': pelec, 'p_time': p_time,
+            'window_start': window_start, 'window_end': window_end}
+
+
+def store_default_guideline_clocks_on_insert(cursor, df_window, rowid, file_name, decision=None):
+    """Write the **default** guideline clocks as the parent row is written (Step 2).
+
+    Apply already settles the kind, the veto and ``pelec_transition_time``
+    (``store_pelec_transition_on_insert``); this turns that one decision into the
+    D/S + H (+ equilibrium / evaluation) rows of ``cycle_periods``, so a freshly
+    extracted cycle is readable without the analyst opening **Edit clocks**
+    first. Same lengths (``_guideline_lengths``) and the same grammar
+    (``_build_guideline_clocks``) Edit clocks uses — this is not a second clock
+    rule, and no second ``results`` row is created.
+
+    What it writes is a **default**, not a confirmation: ``detection_method`` is
+    ``GUIDELINE_DETECTION_METHOD`` and ``pelec_transition_source`` stays the
+    ``'auto'`` stamp Apply just made. **Save** on Edit clocks is still what marks
+    the analyst's ``'manual'``.
+
+    Skipped, with Apply succeeding either way:
+
+    * kind ``unknown`` — §2.2.1 forbids inventing one;
+    * the veto could not tell (``trace is None``: no T series on a defrost hint,
+      no readable Pelec on an on–off hint) — the decision is ``None`` there;
+    * guideline clocks already exist for this parent, or the analyst owns the
+      transition time (``'manual'``) — a recalculate is a **skip**, never a
+      rewrite. **Clear clocks** then Apply, or **Edit clocks** then **Save**, is
+      how the analyst redoes them;
+    * nothing usable came out of ``_build_guideline_clocks`` (no interior event,
+      or the buffer swallows the window).
+
+    ``df_window`` is the sheet slice Apply already holds, so the Q/P/COP and
+    dTreturn caches on the new rows cost no extra workbook read. Returns the
+    number of rows written (0 when the row is skipped).
+    """
+    if rowid is None or decision is None:
+        return 0
+    kind = decision.get('kind')
+    if kind not in GUIDELINE_KINDS:
+        print(f"[guideline_clocks] rowid={rowid}: kind is {kind} — "
+              f"no default clocks (choose one on Edit clocks)")
+        return 0
+
+    row = decision.get('row') or {}
+    if str(row.get('pelec_transition_source') or '').strip().lower() == 'manual':
+        return 0
+
+    try:
+        saved = _saved_guideline_periods_map(cursor, [rowid]).get(int(rowid)) or []
+    except sqlite3.OperationalError:
+        # No cycle_periods table on this database yet: the parent row is written
+        # either way and the clocks can still be filled from Cycle Extract.
+        print(f"[guideline_clocks] rowid={rowid}: no cycle_periods table — clocks skipped")
+        return 0
+    if saved:
+        print(f"[guideline_clocks] rowid={rowid}: {len(saved)} guideline period(s) already "
+              f"stored — left as they are (Clear clocks, or Edit clocks + Save, to redo)")
+        return 0
+
+    stf = _guideline_num(row.get('start_time'))
+    etf = _guideline_num(row.get('end_time'))
+    if stf is None or etf is None or not (etf > stf):
+        return 0
+
+    lengths = _guideline_lengths()
+    buffer_s = _guideline_buffer_s()
+    begins_in = decision.get('begins_in')
+    trans = decision.get('trans')
+
+    # A further drop inside the same window turns D/S into two spans (§2.1.1),
+    # exactly as on Edit clocks. Only the trace after the first D/S end is
+    # searched, so the rise that opened the window is not read as the next drop.
+    next_drop = None
+    if kind != 'continuous' and begins_in == 'ds' and trans is not None:
+        next_drop = _detect_next_drop_after(
+            decision.get('pelec'), decision.get('p_time'),
+            min(float(trans) + lengths['buffer_s'], etf))
+
+    clocks = _build_guideline_clocks(stf, etf, kind, begins_in, trans, lengths,
+                                     next_drop=next_drop)
+    periods = _clean_guideline_periods(clocks['periods'], stf, etf)
+    if not periods:
+        why = '; '.join(clocks['notes']) or 'nothing to write'
+        print(f"[guideline_clocks] rowid={rowid} kind={kind}: no usable periods — {why}")
+        return 0
+
+    n = _persist_guideline_clocks(cursor, rowid, kind, begins_in, trans, periods,
+                                  buffer_s, df_window, transition_source='auto')
+    print(f"[guideline_clocks] rowid={rowid} kind={kind}: {n} default period(s) written as "
+          f"{GUIDELINE_DETECTION_METHOD}/auto — Edit clocks to change them, Save to confirm")
+    return n
 
 
 def _marker_from_begins_in(begins_in: str, kind: str) -> str:
@@ -9673,11 +10338,19 @@ def api_cycle_extract_suggest():
         if not file_name:
             return jsonify({'success': False, 'message': 'file_name required'})
 
+        # The letter is only used to decide whether the dT_HP post-filter applies;
+        # the review modal fills the same cell from the file name (see Apply).
+        test_cond = payload.get('test_cond')
+        if test_cond is None or str(test_cond).strip() == '':
+            test_cond = (infer_metadata_from_filename(file_name) or {}).get('test_cond')
+
         df_full = _read_excel_sheet(file_name, data_set)
         if df_full is None:
             return jsonify({'success': False, 'message': f'Cannot read {file_name}'})
 
         sugg = _detect_cycle_boundaries_drop_to_drop(df_full, min_gap_s=min_gap_s)
+        # Same drop→drop list, minus the windows an A/B/E/F file never defrosted in.
+        sugg = _filter_defrost_suggestions_with_dt_hp(df_full, sugg, test_cond)
         conn = get_db_connection()
         try:
             conn.execute("DELETE FROM cycle_extraction_suggestions WHERE file_name=? AND (data_set IS ? OR data_set=?)",
@@ -9697,6 +10370,7 @@ def api_cycle_extract_suggest():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)})
+
 
 
 @app.route('/api/cycle_extract/load_data', methods=['POST'])
@@ -9946,7 +10620,7 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
     try:
         entries = [dict(r) for r in conn.execute(
             "SELECT rowid, data_set, start_time, end_time, cycle_type, cycle_start_marker, "
-            "pelec_transition_time, pelec_transition_source "
+            "dev_test_condition, pelec_transition_time, pelec_transition_source "
             "FROM results WHERE file_name=? ORDER BY data_set ASC, start_time ASC",
             (file_name,)
         ).fetchall()]
@@ -9977,7 +10651,8 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
         df_slice, pelec, p_time = _guideline_pelec_for_window(sheets[ds_key], stf, etf)
 
         # --- kind: analyst, stored cycle_type, indicator column,
-        # already-saved clocks, then the file-level default. ---
+        # already-saved clocks, the test-condition letter, then the
+        # file-level default. A hint is checked against the window below. ---
         flag, ind_col = (None, None)
         if _normalise_guideline_kind(ov.get('kind')) is None \
                 and e.get('cycle_type') not in GUIDELINE_KIND_FROM_CYCLE_TYPE:
@@ -9985,13 +10660,17 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
         kind, kind_source = _resolve_guideline_kind(
             ov.get('kind'), e.get('cycle_type'), flag, ind_col,
             {p['period_type'] for p in saved}, default_kind,
+            test_cond=e.get('dev_test_condition'),
         )
+
+        try:
+            trans_override = float(ov['transition_time'])
+        except (KeyError, TypeError, ValueError):
+            trans_override = None
 
         # --- where the window opens: D/S or H (continuous has neither) ---
         begins_override = str(ov.get('begins_in') or '').strip().lower()
-        if kind == 'continuous':
-            begins_in, begins_source = None, 'not used — the parent window is H'
-        elif begins_override in ('ds', 'h'):
+        if begins_override in ('ds', 'h'):
             begins_in, begins_source = begins_override, 'analyst'
         elif _begins_in_from_marker(e.get('cycle_start_marker')):
             begins_in = _begins_in_from_marker(e.get('cycle_start_marker'))
@@ -10004,24 +10683,30 @@ def _guideline_proposals_for_file(file_name, want_rowids=None, overrides=None, d
                 begins_in = 'ds' if opens_low else 'h'
                 begins_source = 'power level at cycle start'
 
+        # --- robustness (§2.2.1): a cycling hint with no trace of the condition
+        # in this window is continuous. Same helper Apply uses. ---
+        kind, kind_source, _trace = _guideline_kind_veto(
+            kind, kind_source, df_slice, pelec, p_time, begins_in,
+            stored_trans=(trans_override if trans_override is not None
+                          else _guideline_num(e.get('pelec_transition_time'))))
+
+        if kind == 'continuous':
+            begins_in, begins_source = None, 'not used — the parent window is H'
+
         # --- interior power event (drop or rise). Not a kind classifier. ---
-        try:
-            trans_override = float(ov['transition_time'])
-        except (KeyError, TypeError, ValueError):
-            trans_override = None
         if kind == 'continuous':
             trans, trans_source = None, 'not required — no D/S on a continuous cycle'
         elif trans_override is not None:
             trans, trans_source = trans_override, 'analyst'
-        elif e.get('pelec_transition_time') is not None:
+        elif _guideline_num(e.get('pelec_transition_time')) is not None:
             trans = float(e['pelec_transition_time'])
             trans_source = e.get('pelec_transition_source') or 'auto'
-        elif pelec is not None:
-            detector = _detect_pelec_rampup if begins_in == 'ds' else _detect_pelec_drop
-            trans = detector(pelec, p_time)
-            trans_source = 'detected now' if trans is not None else 'detection failed'
         else:
-            trans, trans_source = None, 'no power data for this window'
+            # Same rule Apply uses: power everywhere, plus the dT_HP hold on a
+            # defrost window that opens in D/S (§2.2.1).
+            trans, note = _detect_pelec_transition(
+                df_slice, pelec, p_time, kind, begins_in, stf, etf)
+            trans_source = f'detected now — {note}' if trans is not None else f'detection failed — {note}'
         if trans is not None and not np.isfinite(trans):
             trans, trans_source = None, 'transition time is not a finite number'
 
@@ -10158,31 +10843,50 @@ def _clean_guideline_periods(periods_in, cycle_start=None, cycle_end=None):
     return out
 
 
-def _persist_guideline_clocks(conn, rid, kind, begins_in, trans, periods, buffer_s, df_full):
+def _persist_guideline_clocks(conn, rid, kind, begins_in, trans, periods, buffer_s, df_full,
+                              transition_source='manual'):
     """Write one entry's clocks. No second results row — the parent stays whole.
 
-    Marks ``pelec_transition_source='manual'`` (the analyst confirmed this split,
-    and 'manual' is what keeps Rebuild all from overwriting it) and replaces the
-    entry's ``cycle_periods`` rows for the configured buffer. A ``continuous``
-    cycle has no interior transition and no D/S, so it stores neither a
-    transition time nor a start marker.
+    ``transition_source`` is what separates the two callers. **Save** (the
+    default, ``'manual'``) means the analyst confirmed this split: it stamps the
+    transition time as ``'manual'`` — which is also what keeps Rebuild all from
+    overwriting it — and replaces every ``auto_pelec`` / ``manual`` / guideline
+    row of the configured buffer. **Apply** passes ``'auto'``: the time and the
+    detect flag were already written by ``store_pelec_transition_on_insert`` and
+    must keep their ``'auto'`` stamp, because a default is not a confirmation;
+    only the start marker is filled in, and only guideline rows of this buffer
+    are cleared — the caller has already established there are none — so an
+    Apply never throws away the old pipeline's ``auto_pelec`` rows.
+
+    A ``continuous`` cycle has no interior transition and no D/S, so it stores
+    neither a transition time nor a start marker.
     """
     if kind == 'continuous':
         trans, marker = None, None
     else:
         marker = _marker_from_begins_in(begins_in, kind)
-    conn.execute(
-        "UPDATE results SET pelec_transition_time=?, pelec_transition_source='manual', "
-        "pelec_detect_failed=0, cycle_start_marker=COALESCE(cycle_start_marker, ?) WHERE rowid=?",
-        (trans, marker, rid)
-    )
-    # Replace only this buffer's rows, so the other buffer_s variants and
-    # the Period Statistics pivot keep exactly one D/S and one H row.
-    conn.execute(
-        "DELETE FROM cycle_periods WHERE entry_rowid=? AND buffer_s=? "
-        "AND detection_method IN ('auto_pelec', 'manual', ?)",
-        (rid, buffer_s, GUIDELINE_DETECTION_METHOD)
-    )
+    if transition_source == 'manual':
+        conn.execute(
+            "UPDATE results SET pelec_transition_time=?, pelec_transition_source='manual', "
+            "pelec_detect_failed=0, cycle_start_marker=COALESCE(cycle_start_marker, ?) WHERE rowid=?",
+            (trans, marker, rid)
+        )
+        # Replace only this buffer's rows, so the other buffer_s variants and
+        # the Period Statistics pivot keep exactly one D/S and one H row.
+        conn.execute(
+            "DELETE FROM cycle_periods WHERE entry_rowid=? AND buffer_s=? "
+            "AND detection_method IN ('auto_pelec', 'manual', ?)",
+            (rid, buffer_s, GUIDELINE_DETECTION_METHOD)
+        )
+    else:
+        conn.execute(
+            "UPDATE results SET cycle_start_marker=COALESCE(cycle_start_marker, ?) WHERE rowid=?",
+            (marker, rid)
+        )
+        conn.execute(
+            "DELETE FROM cycle_periods WHERE entry_rowid=? AND buffer_s=? AND detection_method=?",
+            (rid, buffer_s, GUIDELINE_DETECTION_METHOD)
+        )
     for p in periods:
         _insert_cycle_period_row(conn, rid, p, df_full, GUIDELINE_DETECTION_METHOD, buffer_s)
     return len(periods)
@@ -10585,6 +11289,14 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     ('s_mean_db_k', 'S_mean_DB_K'), ('s_mean_wb_k', 'S_mean_WB_K'),
     ('s_mean_flow_pct', 'S_mean_flow_pct_of_set'),
     ('eval_delta_cop', 'eval_dCOP_pct'),
+    # The two slice COPs behind that %, and the seconds each slice covers, so
+    # the export can be checked without recomputing. Not on-screen columns.
+    ('delta_cop_first', 'eval_dCOP_COP_first'),
+    ('delta_cop_last', 'eval_dCOP_COP_last'),
+    ('delta_cop_first_start', 'eval_dCOP_first_start_s'),
+    ('delta_cop_first_end', 'eval_dCOP_first_end_s'),
+    ('delta_cop_last_start', 'eval_dCOP_last_start_s'),
+    ('delta_cop_last_end', 'eval_dCOP_last_end_s'),
     ('note', 'note'),
 ]
 
@@ -11214,6 +11926,16 @@ GUIDELINE_SCORE_CACHE_VERSION = 1
 # The row fields that need the sheet. Everything else on a Guideline Windows row
 # — identity, kind, clock times, parent Tsup/Q/P/COP — is read from ``results``
 # and ``cycle_periods`` on every load and is never cached.
+# What one ΔCOP % was made of: the two slice COPs and the seconds each slice
+# was read over. Stored beside the % so the analyst can check
+# (last − first) / first by hand instead of recomputing it. Hover and CSV only —
+# these never become table columns.
+GUIDELINE_DELTA_COP_AUDIT_KEYS = (
+    'delta_cop_first', 'delta_cop_last',
+    'delta_cop_first_start', 'delta_cop_first_end',
+    'delta_cop_last_start', 'delta_cop_last_end',
+)
+
 GUIDELINE_SCORE_VALUE_KEYS = (
     'eval_tsup', 'eval_q', 'eval_p', 'eval_cop',
     'h_dtreturn_pct', 'eq_dtreturn_pct', 'eval_dtreturn_pct',
@@ -11226,7 +11948,7 @@ GUIDELINE_SCORE_VALUE_KEYS = (
     'd_mean_db_k', 'd_mean_wb_k',
     's_mean_db_k', 's_mean_wb_k', 's_mean_flow_pct',
     'eval_delta_cop',
-)
+) + GUIDELINE_DELTA_COP_AUDIT_KEYS
 # The hover text beside those numbers. Stored with them, so an n/a cell keeps
 # saying *why* it is empty after a restart instead of turning into a bare blank.
 GUIDELINE_SCORE_REASON_KEYS = (
@@ -11522,6 +12244,9 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         'd_mean_db_k': None, 'd_mean_wb_k': None,
         's_mean_db_k': None, 's_mean_wb_k': None, 's_mean_flow_pct': None,
         'eval_delta_cop': None,
+        # The audit trail of that one %: both slice COPs and the seconds they
+        # were read over. Hover and CSV read them; the table has no column.
+        **{k: None for k in GUIDELINE_DELTA_COP_AUDIT_KEYS},
         'dtreturn_reasons': {}, 'db_reasons': {}, 'wb_reasons': {}, 'flow_reasons': {},
         'd_reasons': {}, 's_reasons': {},
         'h_mean_reasons': _mean_dev_reason_defaults('H'),
@@ -11567,6 +12292,24 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         or any(s is not None and e is not None for s, e in dt_windows.values())
         or _spans_from_row(row, 'd') or _spans_from_row(row, 's'))
     return row, ev, dt_windows, wants_scores
+
+
+def _apply_delta_cop_audit(row, delta_cop) -> None:
+    """Put the two slice COPs and their windows on a scored row.
+
+    Only a row that has a % carries them: an n/a ΔCOP is explained by
+    ``delta_cop_reason`` alone, and half an audit trail beside "n/a" would read
+    like a number that was almost there. ``_interval_delta_cop`` is not touched —
+    these are the values it already returns.
+    """
+    if row.get('eval_delta_cop') is None:
+        return
+    row['delta_cop_first'] = _guideline_num(delta_cop.get('cop_first'))
+    row['delta_cop_last'] = _guideline_num(delta_cop.get('cop_last'))
+    for side in ('first', 'last'):
+        window = delta_cop.get(f'{side}_window') or (None, None)
+        row[f'delta_cop_{side}_start'] = _guideline_num(window[0])
+        row[f'delta_cop_{side}_end'] = _guideline_num(window[1])
 
 
 def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
@@ -11673,6 +12416,7 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                                             ev['end_time'], interval_cfg, sheets)
             row['eval_delta_cop'] = _guideline_num(delta_cop.get('value_pct'))
             row['delta_cop_reason'] = delta_cop.get('reason') or ''
+            _apply_delta_cop_audit(row, delta_cop)
             stf, etf = float(ev['start_time']), float(ev['end_time'])
             # Recompute the evaluation four from scratch. The base row opened
             # `eval_tsup` on the evaluation period's stored mean, which must not
@@ -12786,10 +13530,26 @@ def _pivot_period_stats(periods: list, cycle_type: str, start_marker: str) -> di
         out[f'{prefix}_dtreturn_n_valid'] = nv if nv > 0 else None
 
     if cycle_type == 'on_off_cycle':
-        off_p = next((p for p in periods if p.get('period_type') == 'off'), None)
-        on_p = next((p for p in periods if p.get('period_type') == 'on'), None)
-        _slot('Off', off_p)
-        _slot('On', on_p)
+        offs = [p for p in periods if p.get('period_type') == 'off']
+        ons = [p for p in periods if p.get('period_type') == 'on']
+        # §2.1.1: a parent cut through standby stores **two** ``off`` spans, the
+        # same way a parent cut through defrost stores two ``defrost`` rows.
+        # Union them into Off (weighted mean, min/max dT, summed duration) and
+        # show the pieces as Off1 / Off2. A single span stays a plain Off.
+        if len(offs) >= 2:
+            _slot_weighted('Off', offs)
+            _slot('Off1', offs[0])
+            _slot('Off2', offs[-1])
+        elif offs:
+            _slot('Off', offs[0])
+        # One ``on`` span is the normal case (heating between the two S pieces).
+        # Two are unioned the same way rather than silently dropping the second.
+        if len(ons) >= 2:
+            _slot_weighted('On', ons)
+            _slot('On1', ons[0])
+            _slot('On2', ons[-1])
+        elif ons:
+            _slot('On', ons[0])
         return out
 
     defs = [p for p in periods if p.get('period_type') == 'defrost']
@@ -12807,7 +13567,6 @@ def _pivot_period_stats(periods: list, cycle_type: str, start_marker: str) -> di
             _slot(f'D{i}', dp)
         _slot('H', heat)
     return out
-
 
 @app.route('/api/pipeline/run', methods=['POST'])
 def api_pipeline_run():
@@ -14551,7 +15310,6 @@ PERIOD_STAT_DISPLAY_METRICS = (
     ('avg_t_wb', 'T_wb'),
     ('avg_ts_buh', 'Ts Buh'),
     ('avg_t_mean_log', 'T_mean'),
-    ('t_mean_from_avgs', 'T_mean avgs'),
     ('avg_q_corr_wbuh', 'QCorrwBUH'),
     ('avg_p_corr_wbuh', 'PCorrwBUH'),
     ('avg_cop_corr_wbuh', 'COPCorrwBUH'),
@@ -14563,8 +15321,333 @@ PERIOD_STAT_DISPLAY_METRICS = (
 )
 
 
+# --- Period Statistics: mean-band colour + batched period loading ---
+
+PERIOD_STATS_FREEZE_COLUMNS = 12
+
+_PERIOD_STAT_H_GROUP_RE = re.compile(r'^(?:H|On\d*)$')
+
+_PERIOD_STAT_D_GROUP_RE = re.compile(r'^D\d*$')
+
+_PERIOD_STAT_S_GROUP_RE = re.compile(r'^(?:S|Off\d*)$')
+
+_PERIOD_STAT_SPLIT_GROUP_RE = re.compile(r'^(?:D|Off|On)\d+$')
+
+PERIOD_STAT_IN_BAND_CLASS = 'pstat-in-band'
+
+PERIOD_STAT_OUT_BAND_CLASS = 'pstat-out-band'
+
+PERIOD_STAT_COLOUR_METRICS = {
+    'H': {'avg_t_db': 'db', 'avg_t_wb': 'wb', 'dtreturn_avg': 'dtreturn',
+          'avg_volume_flow': 'flow', 'avg_mass_flow': 'flow'},
+    'D': {'avg_t_db': 'db', 'avg_t_wb': 'wb'},
+    'S': {'avg_t_db': 'db', 'avg_t_wb': 'wb',
+          'avg_volume_flow': 'flow', 'avg_mass_flow': 'flow'},
+    'parent': {'avg_ts_buh': 'tsup', 'avg_t_mean_log': 'tmean',
+               'avg_q_corr_wbuh': 'q'},
+}
+
+PERIOD_STAT_COLOUR_AGAINST = {
+    'db': 'the dry-bulb set',
+    'wb': 'the wet-bulb set',
+    'dtreturn': '0 K',
+    'tsup': 'the supply set',
+    'tmean': 'the Table 3 mean water temperature',
+    'flow': 'the flow set',
+    'q': 'Qset',
+}
+
+PERIOD_STAT_COLOUR_UNITS = {
+    'db': 'K', 'wb': 'K', 'dtreturn': 'K', 'tsup': 'K', 'tmean': 'K',
+    'flow': '% of set', 'q': '% of set',
+}
+
+PERIOD_STAT_COLOUR_NO_SETPOINT = {
+    'db': 'no outdoor setpoint for this test condition',
+    'wb': 'no outdoor setpoint for this test condition',
+    'tsup': 'no supply setpoint for this test condition',
+    'tmean': 'no Table 3 mean water temperature for this test condition',
+    'flow': 'no flow set point is configured for this unit',
+    'q': 'no Qset — Pdesign is not configured for this unit',
+}
+
+PERIOD_STATS_PERIOD_COLUMNS = (
+    "period_type, start_time, end_time, buffer_s, "
+    "dtreturn_n_valid, dtreturn_min, dtreturn_max, dtreturn_avg, "
+    "avg_t_db, avg_t_wb, avg_ts_buh, avg_q_corr_wbuh, avg_p_corr_wbuh, avg_cop_corr_wbuh, "
+    "avg_volume_flow, avg_mass_flow, avg_t_mean_log, t_mean_from_avgs"
+)
+
+PERIOD_STATS_PIVOT_TYPES = ('defrost', 'heating', 'off', 'on')
+
+def _period_stat_colour_row(group):
+    """Which row of the locked colour map a column group reads, or None.
+
+    ``On`` follows **H** and ``Off`` follows **S**, the way the draft table
+    pairs them. The split pieces D1 / D2 / Off1 / Off2 (and On1 / On2) read the
+    row of the interval they are a piece of, so the checkbox that reveals them
+    reveals the same colours.
+    """
+    g = str(group or '').strip()
+    if g in ('D+H', 'Off+On'):
+        return 'parent'
+    if _PERIOD_STAT_H_GROUP_RE.match(g):
+        return 'H'
+    if _PERIOD_STAT_D_GROUP_RE.match(g):
+        return 'D'
+    if _PERIOD_STAT_S_GROUP_RE.match(g):
+        return 'S'
+    return None
+
+def _period_stat_colour_quantity(group, metric_key):
+    """The quantity one cell is coloured against, or None when it stays plain."""
+    row = _period_stat_colour_row(group)
+    if row is None:
+        return None
+    return PERIOD_STAT_COLOUR_METRICS[row].get(str(metric_key or ''))
+
+def _period_stat_is_split_group(prefix) -> bool:
+    """True for a split-span column group.
+
+    The page hides these behind one **Show split spans** checkbox, default off
+    on every load. They are still pivoted and still written to the CSV -- the
+    checkbox is display only and writes no settings file.
+    """
+    return bool(_PERIOD_STAT_SPLIT_GROUP_RE.match(str(prefix or '')))
+
+def _period_stat_colour_bands(interval_cfg=None, parent_cfg=None) -> dict:
+    """``{map row: {quantity: half-width}}`` read from the two JSON files.
+
+    The interval rows come from ``interval_deviations.json`` ``mean_*``; the
+    parent row from ``permissible_deviations.json``. The scatter / parent mean
+    DB 0.6 K is deliberately absent: H+D mean DB is a draft ``—``, so D+H T_db
+    stays uncoloured.
+    """
+    cfg = interval_cfg if interval_cfg is not None else load_interval_deviations_config()
+    ivs = (cfg or {}).get('intervals') or {}
+    parent = parent_cfg if parent_cfg is not None else load_permissible_deviations()
+
+    def _parent_half(name):
+        try:
+            half = float((parent or {}).get(name))
+        except (TypeError, ValueError):
+            return None
+        return half if np.isfinite(half) and half > 0 else None
+
+    return {
+        'H': {q: _mean_dev_half(ivs.get('H'), q)
+              for q in ('db', 'wb', 'dtreturn', 'flow')},
+        'D': {q: _mean_dev_half(ivs.get('D'), q) for q in ('db', 'wb')},
+        'S': {q: _mean_dev_half(ivs.get('S'), q) for q in ('db', 'wb', 'flow')},
+        'parent': {'tsup': _parent_half('mean_tsup_k'),
+                   'tmean': _parent_half('mean_tmean_k'),
+                   'q': _parent_half('mean_q_band_pct')},
+    }
+
+def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
+    """What one parent's means are coloured against. SQLite + config only.
+
+    The same helpers Deviations and Guideline Windows already use, so a cell is
+    green here exactly when the signed deviation on those pages is inside the
+    band. No Plotdaten file is opened and no score cache is read.
+
+    ``cache`` keys the answer on the unit and the test condition, so a page of
+    a few hundred parents costs one design-parameter lookup per unit, not one
+    per row. A lookup that raises (an old database with no ``hp_design``, an
+    unreadable profile) leaves that setpoint missing, which means uncoloured —
+    never red and never 0.
+    """
+    entry = _entry_with_hp_id(entry or {})
+    file_name = entry.get('file_name')
+    hp_id = entry.get('hp_id')
+    tc = entry.get('dev_test_condition')
+    if tc is None or str(tc).strip() == '':
+        tc = entry.get('test_cond')
+    key = (file_name, str(hp_id), entry.get('profile_id'), entry.get('condition_set_id'),
+           entry.get('climate'), entry.get('application'), str(tc),
+           entry.get('flow_config'), entry.get('dev_db_setpoint'),
+           entry.get('dev_flow_setpoint'), entry.get('dev_flow_set_type'))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    def _safe(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+
+    db_set = _safe(_entry_db_setpoint, entry, file_name)
+    flow = _safe(_entry_flow_set, entry, hp_id, file_name) or (None, None, '')
+    pdesign = _safe(get_pdesign_for_hp, hp_id, conn,
+                    file_name=file_name, profile_id=entry.get('profile_id'))
+    _ua, q_set = compute_ua_and_qset(pdesign, db_set)
+    out = {
+        'db': db_set,
+        # Same wet-bulb convention as the parent table and the interval means.
+        'wb': (db_set - 1.0) if db_set is not None else None,
+        'tsup': _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
+        'tmean': _safe(_tmean_setpoint_from_entry, entry, tc),
+        'q_set': q_set,
+        'flow_set_type': flow[0],
+        'flow_set': flow[1],
+        'variable_flow': bool(_safe(_entry_is_variable_flow, entry)),
+    }
+    if cache is not None:
+        cache[key] = out
+    return out
+
+def _period_stat_row_colours(pivot, setpoints, bands) -> dict:
+    """``{column key: {cls, title}}`` for the cells of one row that say something.
+
+    Only the keys the locked map touches end up here, so the template adds a
+    class or a ``title`` to those cells and leaves every other number exactly
+    as it was.
+    """
+    out = {}
+    for key, value in (pivot or {}).items():
+        group, sep, metric = str(key).partition('_')
+        if not sep:
+            continue
+        cls, title = _period_stat_cell_colour(group, metric, value, setpoints, bands)
+        if cls or title:
+            out[key] = {'cls': cls, 'title': title}
+    return out
+
+def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
+    """``(css class, hover)`` for one mean cell. Pure — no database, no config.
+
+    ``('', '')`` is a plain cell with no new hover: a metric the map does not
+    colour, a draft cell that has no band, or a missing mean. A cell whose
+    reason is worth saying — variable flow, a fixed-flow row on the mean water
+    temperature, no setpoint — comes back uncoloured **with** that hover. Red
+    is only ever a mean that exists and sits outside its band.
+    """
+    quantity = _period_stat_colour_quantity(group, metric_key)
+    if quantity is None:
+        return ('', '')
+    band = ((bands or {}).get(_period_stat_colour_row(group)) or {}).get(quantity)
+    if band is None:
+        return ('', '')
+    sp = setpoints or {}
+    unit = PERIOD_STAT_COLOUR_UNITS[quantity]
+
+    if quantity == 'flow':
+        # Fixed flow only, and only the column that matches the stored set type.
+        if sp.get('variable_flow'):
+            return ('', 'variable-flow test — there is no flow band')
+        flow_type = sp.get('flow_set_type')
+        if not flow_type or sp.get('flow_set') is None:
+            return ('', PERIOD_STAT_COLOUR_NO_SETPOINT['flow'])
+        if flow_type != ('volume' if metric_key == 'avg_volume_flow' else 'mass'):
+            return ('', f'the configured flow set is {flow_type} flow')
+    if quantity == 'tmean' and not sp.get('variable_flow'):
+        # Fixed-flow tests sit above the Table 3 mean at part load by physics;
+        # they are judged on Tsup instead (same rule as the parent Deviations).
+        return ('', 'fixed-flow test — the mean water temperature is not scored')
+
+    val = _guideline_num(value)
+    if val is None:
+        return ('', '')
+
+    if quantity == 'dtreturn':
+        # dTreturn = T_return_emu − T_return_calc is already a deviation.
+        dev = val
+    elif quantity in ('flow', 'q'):
+        ref = _guideline_num(sp.get('flow_set') if quantity == 'flow' else sp.get('q_set'))
+        if ref is None or ref == 0:
+            return ('', PERIOD_STAT_COLOUR_NO_SETPOINT[quantity])
+        dev = 100.0 * (val - ref) / ref
+    else:
+        ref = _guideline_num(sp.get(quantity))
+        if ref is None:
+            return ('', PERIOD_STAT_COLOUR_NO_SETPOINT[quantity])
+        dev = val - ref
+
+    inside = abs(dev) <= float(band)
+    title = ('%+.2f %s from %s, draft mean band ±%g %s — %s'
+             % (dev, unit, PERIOD_STAT_COLOUR_AGAINST[quantity],
+                float(band), unit, 'inside' if inside else 'outside'))
+    return ((PERIOD_STAT_IN_BAND_CLASS if inside else PERIOD_STAT_OUT_BAND_CLASS),
+            title)
+
+def _period_stats_family(period_types) -> str:
+    """``on_off`` / ``defrost`` / ``continuous`` from saved period types.
+
+    The kind tabs follow the periods that are stored, not Notes ``drop`` /
+    ``ramp`` and not ``results.cycle_type``: a parent the old classifier left at
+    ``other`` belongs on Defrost as soon as guideline ``defrost`` clocks exist.
+    ``equilibrium`` / ``evaluation`` say nothing about the kind here — they are
+    not columns on this page (Guideline Windows has them).
+    """
+    types = set(period_types or ())
+    if types & {'off', 'on'}:
+        return 'on_off'
+    if 'defrost' in types:
+        return 'defrost'
+    if 'heating' in types:
+        return 'continuous'
+    return ''
+
+def _period_stats_family_from_cycle_type(cycle_type) -> str:
+    """Family of a legacy ``auto_pelec`` parent. ``other`` has no splits."""
+    if cycle_type == 'on_off_cycle':
+        return 'on_off'
+    if cycle_type == 'defrost_cycle':
+        return 'defrost'
+    return ''
+
+def _period_statistics_at_buffer(periods, buffer_s) -> list:
+    """The stored periods of one parent that sit at one ``buffer_s``. NULL is not 0."""
+    out = []
+    for p in periods or ():
+        b = p.get('buffer_s')
+        if b is not None and int(b) == int(buffer_s):
+            out.append(p)
+    return out
+
+PERIOD_STATS_ENTRY_COLUMNS = (
+    "rowid, file_name, data_set, HP_ID, test_cond, dev_test_condition, "
+    "cycle_type, cycle_start_marker, pelec_transition_time, pelec_transition_source, "
+    "start_time, end_time, display_order, flow_config, COP_dataset, "
+    "avg_t_db, avg_t_wb, avg_t_sup_buh, avg_t_supply, Ts_buh, "
+    "avg_t_mean_log, t_mean_from_avgs, avg_dt_ln, "
+    "QCorrwBUH, PCorrwBUH, COPCorrwBUH, "
+    "avg_heating_capacity_corr, avg_power_input_corr, cop_corr, "
+    "avg_mass_flow, avg_volume_flow, "
+    "dtreturn_cache_min, dtreturn_cache_max, dtreturn_cache_avg, dtreturn_cache_n_valid"
+)
+
+PERIOD_STATS_LEGACY_METHOD = 'auto_pelec'
+
+
+def _period_statistics_periods_by_entry(conn, method: str, buffers=None) -> dict:
+    """Stored sub-periods of one engine for the whole page, keyed by parent rowid.
+
+    **One** SQL, not one per listed parent: a few hundred entries used to mean a
+    few hundred round trips to ``cycle_periods``, which is most of what made the
+    page feel slow. Nothing is derived here either -- the pivot below reads
+    exactly the rows Cycle Extract wrote.
+
+    ``buffers`` filters in SQL the way the old per-parent ``buffer_s=?`` did: a
+    row whose ``buffer_s`` is NULL matches no buffer, not 0.
+    """
+    sql = (f"SELECT entry_rowid, {PERIOD_STATS_PERIOD_COLUMNS} FROM cycle_periods "
+           "WHERE detection_method=?")
+    params = [method]
+    if buffers:
+        buffers = [int(b) for b in buffers]
+        sql += " AND buffer_s IN (%s)" % ','.join('?' * len(buffers))
+        params.extend(buffers)
+    by_entry = {}
+    for p in conn.execute(sql + " ORDER BY entry_rowid, start_time", params):
+        if p['period_type'] not in PERIOD_STATS_PIVOT_TYPES:
+            continue
+        by_entry.setdefault(int(p['entry_rowid']), []).append(dict(p))
+    return by_entry
+
 def _period_stat_prefixes_in_rows(rows: list, cycle_kind: str) -> list:
-    known = {'Off', 'On', 'Off+On', 'D', 'D1', 'D2', 'H', 'D+H'}
+    known = {'Off', 'Off1', 'Off2', 'On', 'On1', 'On2', 'Off+On',
+             'D', 'D1', 'D2', 'H', 'D+H'}
     found = set()
     for row in rows:
         for k in row.keys():
@@ -14574,70 +15657,107 @@ def _period_stat_prefixes_in_rows(rows: list, cycle_kind: str) -> list:
             if pref in known or (pref.startswith('D') and pref[1:].isdigit()):
                 found.add(pref)
     if cycle_kind == 'on_off':
-        return [p for p in ('Off', 'On', 'Off+On') if p in found]
+        order = ['Off', 'Off1', 'On', 'Off2', 'Off+On']
+        extra = sorted(p for p in found
+                       if p not in order and (p.startswith('Off') or p.startswith('On')))
+        return [p for p in order if p in found] + extra
     if cycle_kind == 'defrost':
         order = ['D', 'D1', 'H', 'D2', 'D+H']
         extra = sorted(p for p in found if p not in order and (p.startswith('D') or p == 'H'))
         return [p for p in order if p in found] + extra
     # Unified view: all cycle families on one page
-    order = ['Off', 'On', 'Off+On', 'D', 'D1', 'H', 'D2', 'D+H']
+    order = ['Off', 'Off1', 'On', 'Off2', 'Off+On', 'D', 'D1', 'H', 'D2', 'D+H']
     extra = sorted(p for p in found if p not in order)
     return [p for p in order if p in found] + extra
-
 
 def _period_stat_columns(cycle_kind: str, rows: list) -> list:
     prefixes = _period_stat_prefixes_in_rows(rows, cycle_kind)
     cols = []
     for pref in prefixes:
+        split = _period_stat_is_split_group(pref)
         for mk, mlbl in PERIOD_STAT_DISPLAY_METRICS:
-            cols.append({'key': f'{pref}_{mk}', 'label': f'{pref} {mlbl}', 'group': pref})
+            cols.append({'key': f'{pref}_{mk}', 'label': f'{pref} {mlbl}',
+                         'group': pref, 'split': split})
     return cols
 
+def _load_period_statistics_rows(cycle_kind: str) -> list:
+    """One table row per cycle entry, pivoted from the saved guideline clocks.
 
-def _load_period_statistics_rows_for_type(cycle_type: str, buffer_s: int) -> list:
-    """Load pivoted period-stat rows for one cycle_type."""
-    if cycle_type == 'on_off_cycle':
-        buf = 0
-    else:
-        buf = buffer_s if buffer_s in BUFFER_OPTIONS else SETTLING_BUFFER_S
+    The page derives nothing. It reads the ``cycle_periods`` rows Cycle Extract
+    wrote (Apply or Save) at ``_guideline_buffer_s()`` and pivots the means
+    already cached on them. A parent is listed because it *has* those periods,
+    not because ``results.cycle_type`` happens to be ``defrost_cycle`` /
+    ``on_off_cycle``.
+
+    One engine per parent. Guideline clocks win. A parent carrying no guideline
+    row at all falls back to the legacy ``auto_pelec`` cache under the old rule
+    (defrost at ``SETTLING_BUFFER_S``, on–off cut at the transition) so BAM
+    databases filled by dTreturn Insights do not go blank. A parent whose
+    guideline clocks sit at another ``buffer_s`` — ``buffer_min`` was changed
+    after they were saved — keeps its row with empty period cells (n/a, never
+    0) until they are saved again; ``auto_pelec`` is not mixed in to fill them.
+    """
+    ensure_cycle_periods_table()
+    init_deviation_columns()
+    buffer_s = _guideline_buffer_s()
+    legacy_buffers = {'defrost': SETTLING_BUFFER_S, 'on_off': 0}
 
     conn = get_db_connection()
     try:
         entries = conn.execute(
-            "SELECT rowid, file_name, data_set, HP_ID, test_cond, dev_test_condition, "
-            "cycle_type, cycle_start_marker, pelec_transition_time, pelec_transition_source, "
-            "start_time, end_time, display_order, flow_config, COP_dataset, "
-            "avg_t_db, avg_t_wb, avg_t_sup_buh, avg_t_supply, Ts_buh, "
-            "avg_t_mean_log, t_mean_from_avgs, avg_dt_ln, "
-            "QCorrwBUH, PCorrwBUH, COPCorrwBUH, "
-            "avg_heating_capacity_corr, avg_power_input_corr, cop_corr, "
-            "avg_mass_flow, avg_volume_flow, "
-            "dtreturn_cache_min, dtreturn_cache_max, dtreturn_cache_avg, dtreturn_cache_n_valid "
-            "FROM results WHERE cycle_type=? "
+            f"SELECT {PERIOD_STATS_ENTRY_COLUMNS} FROM results "
+            "WHERE EXISTS (SELECT 1 FROM cycle_periods cp "
+            "              WHERE cp.entry_rowid=results.rowid AND cp.detection_method=?) "
+            "   OR cycle_type IN ('defrost_cycle', 'on_off_cycle') "
             "ORDER BY display_order ASC, rowid ASC",
-            (cycle_type,)
+            (GUIDELINE_DETECTION_METHOD,)
         ).fetchall()
         entries = [dict(e) for e in entries]
         entry_idents = unit_config.disambiguate_labels(
             [unit_config.unit_key_and_label(e) for e in entries]
         )
+        # Both engines read in one SQL each and keyed by parent here, instead of
+        # a query per listed row.
+        saved_by_entry = _period_statistics_periods_by_entry(
+            conn, GUIDELINE_DETECTION_METHOD)
+        legacy_by_entry = _period_statistics_periods_by_entry(
+            conn, PERIOD_STATS_LEGACY_METHOD,
+            sorted({SETTLING_BUFFER_S, *legacy_buffers.values()}))
+        # Mean-band colour (§2.8): the two JSON files once, and one setpoint
+        # lookup per unit x test condition rather than per listed parent.
+        colour_bands = _period_stat_colour_bands()
+        setpoint_cache = {}
         out = []
         for i, e in enumerate(entries):
             rid = int(e['rowid'])
-            periods = conn.execute(
-                "SELECT period_type, start_time, end_time, "
-                "dtreturn_n_valid, dtreturn_min, dtreturn_max, dtreturn_avg, "
-                "avg_t_db, avg_t_wb, avg_ts_buh, avg_q_corr_wbuh, avg_p_corr_wbuh, avg_cop_corr_wbuh, "
-                "avg_volume_flow, avg_mass_flow, avg_t_mean_log, t_mean_from_avgs "
-                "FROM cycle_periods WHERE entry_rowid=? AND buffer_s=? ORDER BY start_time",
-                (rid, buf)
-            ).fetchall()
-            periods = [dict(p) for p in periods]
-            pivot = _pivot_period_stats(periods, e['cycle_type'], e.get('cycle_start_marker') or '')
             ct = e.get('cycle_type') or ''
-            if ct == 'defrost_cycle':
+            saved = saved_by_entry.get(rid) or []
+            if saved:
+                method = GUIDELINE_DETECTION_METHOD
+                periods = _period_statistics_at_buffer(saved, buffer_s)
+                family = _period_stats_family(p['period_type'] for p in (periods or saved))
+            else:
+                method = PERIOD_STATS_LEGACY_METHOD
+                family = _period_stats_family_from_cycle_type(ct)
+                periods = _period_statistics_at_buffer(
+                    legacy_by_entry.get(rid), legacy_buffers.get(family, SETTLING_BUFFER_S)
+                ) if family else []
+            if not family:
+                continue
+            if cycle_kind == 'defrost' and family != 'defrost':
+                continue
+            if cycle_kind == 'on_off' and family != 'on_off':
+                continue
+
+            pivot = _pivot_period_stats(
+                periods,
+                'on_off_cycle' if family == 'on_off' else 'defrost_cycle',
+                e.get('cycle_start_marker') or ''
+            )
+            # Continuous cycles have no D and no S: H only, the rest stays n/a.
+            if family == 'defrost':
                 _apply_full_cycle_slot(pivot, 'D+H', e)
-            elif ct == 'on_off_cycle':
+            elif family == 'on_off':
                 _apply_full_cycle_slot(pivot, 'Off+On', e)
             ident = entry_idents[i]
             tc = e.get('dev_test_condition')
@@ -14651,7 +15771,8 @@ def _load_period_statistics_rows_for_type(cycle_type: str, buffer_s: int) -> lis
                 'unit_key': ident['unit_key'],
                 'test_condition': tc,
                 'cycle_type': ct,
-                'cycle_family': 'on-off' if ct == 'on_off_cycle' else ('defrost' if ct == 'defrost_cycle' else ct),
+                'cycle_family': 'on-off' if family == 'on_off' else family,
+                'period_method': method,
                 'cycle_start_marker': e.get('cycle_start_marker'),
                 'pelec_transition_time': e.get('pelec_transition_time'),
                 'transition_source': e.get('pelec_transition_source') or 'auto',
@@ -14663,25 +15784,15 @@ def _load_period_statistics_rows_for_type(cycle_type: str, buffer_s: int) -> lis
                 'display_order': e.get('display_order') or rid,
             }
             row.update(pivot)
+            # The colour rides beside the numbers, never instead of them: the
+            # cell still prints the mean, and a cell the map does not touch
+            # gets no entry here at all.
+            row['colours'] = _period_stat_row_colours(
+                pivot, _period_stat_setpoints(e, conn, setpoint_cache), colour_bands)
             out.append(row)
         return out
     finally:
         conn.close()
-
-
-def _load_period_statistics_rows(cycle_kind: str, buffer_s: int) -> list:
-    """One table row per cycle entry with pivoted sub-period mean columns."""
-    ensure_cycle_periods_table()
-    init_deviation_columns()
-    if cycle_kind == 'all':
-        rows = _load_period_statistics_rows_for_type('defrost_cycle', buffer_s)
-        rows.extend(_load_period_statistics_rows_for_type('on_off_cycle', 0))
-        rows.sort(key=lambda r: (r.get('display_order') or 0, r['rowid']))
-        return rows
-    if cycle_kind == 'on_off':
-        return _load_period_statistics_rows_for_type('on_off_cycle', 0)
-    return _load_period_statistics_rows_for_type('defrost_cycle', buffer_s)
-
 
 @app.route('/period_statistics')
 def period_statistics():
@@ -14691,40 +15802,39 @@ def period_statistics():
     cycle_kind = (request.args.get('kind') or 'all').strip().lower()
     if cycle_kind not in ('defrost', 'on_off', 'all'):
         cycle_kind = 'all'
-    try:
-        buffer_s = int(request.args.get('buffer_s', SETTLING_BUFFER_S))
-    except Exception:
-        buffer_s = SETTLING_BUFFER_S
-    if buffer_s not in BUFFER_OPTIONS:
-        buffer_s = SETTLING_BUFFER_S
 
-    rows = _load_period_statistics_rows(cycle_kind, buffer_s)
+    # One clock, one buffer: whatever Cycle Extract saved at buffer_min. No
+    # what-if buffer on this page (BUFFER_OPTIONS stays with dTreturn Insights).
+    lengths = _guideline_lengths()
+    rows = _load_period_statistics_rows(cycle_kind)
     stat_columns = _period_stat_columns(cycle_kind, rows)
     stat_groups = _period_stat_prefixes_in_rows(rows, cycle_kind)
+    # D1 / D2 / Off1 / Off2 (and On1 / On2) are still pivoted and still in the
+    # CSV; the template puts them behind one checkbox that is off on load.
+    split_groups = [g for g in stat_groups if _period_stat_is_split_group(g)]
 
-    conn = get_db_connection()
-    try:
-        units = _list_analysis_units(conn)
-        hp_ids = [u['label'] for u in units]
-        tc_rows = conn.execute(
-            "SELECT DISTINCT COALESCE(NULLIF(TRIM(CAST(dev_test_condition AS TEXT)), ''), "
-            "                        NULLIF(TRIM(CAST(test_cond AS TEXT)), '')) AS tc FROM results"
-        ).fetchall()
-        test_conditions = sorted(str(r['tc']) for r in tc_rows if r['tc'] is not None and str(r['tc']).strip() != '')
-    finally:
-        conn.close()
+    # The few dropdowns above the table (Guideline Windows pattern) are built
+    # from the rows the page actually shows, so they need no extra query and
+    # never offer a value that would hide every row.
+    filter_options = {
+        key: sorted({str(r.get(key)).strip() for r in rows
+                     if r.get(key) is not None and str(r.get(key)).strip() != ''})
+        for key in ('hp_id', 'test_condition', 'cop_dataset')
+    }
 
     return render_template(
         'period_statistics.html',
         cycle_kind=cycle_kind,
-        buffer_s=buffer_s,
-        buffer_options=BUFFER_OPTIONS,
+        buffer_min=lengths['buffer_min'],
+        buffer_s=_guideline_buffer_s(),
         rows=rows,
         stat_columns=stat_columns,
         stat_groups=stat_groups,
-        hp_ids=hp_ids,
-        test_conditions=test_conditions,
+        split_groups=split_groups,
+        filter_options=filter_options,
+        pstat_freeze_cols=PERIOD_STATS_FREEZE_COLUMNS,
     )
+
 
 
 def _reservoir_add(reservoir, seen_count, value, k, rnd):

@@ -24,9 +24,11 @@ and ±2 K dTreturn; S ±2 K DB/WB, ±2.5 % flow, ±1 K dTreturn). Parent Deviati
 keeps the full-cycle −2…+2 K dTreturn band.
 """
 import contextlib
+import csv
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -771,6 +773,50 @@ def test_cycle_extract_show_and_layers_can_use_saved_clocks():
           'function proposalDiffersFromSaved' in html and '&ne; saved' in html)
 
 
+def test_cycle_extract_clock_buttons_say_edit_clocks():
+    """Wording only: the two Cycle Extract clock buttons carry the agreed names.
+
+    The API route, the JS ids and the per-row **Save clocks** button are
+    untouched - only what the analyst reads changes.
+    """
+    html = open(os.path.join(REPO, 'flask_app', 'templates', 'cycle_extract.html'),
+                encoding='utf-8').read()
+    check('the button says Edit clocks', 'Edit clocks' in html)
+    check('the batch button says Save all clocks', 'Save all clocks' in html)
+    check('the old Propose label is gone', 'Propose guideline clocks' not in html)
+    check('the old Save all proposed label is gone', 'Save all proposed' not in html)
+    check('the per-row Save clocks button keeps its name', 'Save clocks' in html)
+    check('the JS ids and the route are unchanged',
+          'id="proposeClocksBtn"' in html and 'id="saveAllClocksBtn"' in html
+          and '/api/cycle_extract/propose_periods' in html
+          and 'function tickedProposedRowids' in html)
+    check('the copy says Edit clocks writes nothing',
+          'It writes <b>nothing</b>' in html and 'it writes nothing' in html.lower())
+    check('the copy says a stored power-transition time is reused',
+          '<b>reused</b>, never overwritten' in html)
+    check('the copy says saved clocks draw without the button',
+          'no click needed' in html)
+
+    guide = open(os.path.join(REPO, 'docs', 'USER_GUIDE.md'), encoding='utf-8').read()
+    check('USER_GUIDE uses the new labels',
+          '**Edit clocks**' in guide and '**Save all clocks**' in guide
+          and 'Propose guideline clocks' not in guide and 'Save all proposed' not in guide)
+    check('USER_GUIDE gives Apply, Edit clocks and Save their Step 2 roles',
+          '**Apply** already stored the default clocks' in guide
+          and '**Edit clocks** opens them for changing' in guide
+          and '**Save** stores what you see and marks it as yours.' in guide)
+    check('USER_GUIDE says Apply writes the default clocks and Save confirms them',
+          '**Apply also stores default D / H / equilibrium / evaluation clocks**' in guide
+          and 'and **Save** to confirm them' in guide)
+    check('USER_GUIDE says a window it cannot classify still gets no clocks',
+          'gets **no clocks at all**' in guide)
+
+    quick = open(os.path.join(REPO, 'docs', 'ANALYST_QUICK_GUIDE.md'), encoding='utf-8').read()
+    check('ANALYST_QUICK_GUIDE uses the new labels',
+          '**Edit clocks**' in quick and '**Save all clocks**' in quick
+          and 'Propose guideline clocks' not in quick and 'Save all proposed' not in quick)
+
+
 def test_clock_layers_changed_nothing_outside_cycle_extract():
     """Saved-clock show/layers are Cycle Extract only - the neighbours are checked again here."""
     parent = webapp.load_permissible_deviations()
@@ -872,6 +918,15 @@ def _function_code(app_src, name):
         body = body[:min(stops)]
     parts = body.split('"""')
     return parts[0] + ''.join(parts[2:]) if len(parts) >= 3 else body
+
+
+def _row_count(h):
+    """Parent rows in the throwaway database — Step 2 must never add a second."""
+    conn = h._connect()
+    try:
+        return conn.execute("SELECT COUNT(*) AS n FROM results").fetchone()['n']
+    finally:
+        conn.close()
 
 
 def _period_ids(h, rowid):
@@ -1179,7 +1234,7 @@ def test_cycle_extract_has_the_database_batch_controls():
     check('the clear control exists and is not the green save',
           'id="dbClearClocksBtn"' in html and 'Clear saved guideline clocks' in html
           and 'btn-outline-danger btn-sm mr-3" type="button"' in html)
-    check('the fill is not the green Save all proposed button either',
+    check('the fill is not the green Save all clocks button either',
           'id="dbFillClocksBtn" class="btn btn-outline-primary' in html)
     check('neither control is Guideline Windows',
           'gwLoadAll' not in html and 'guideline_windows' not in html)
@@ -1213,8 +1268,8 @@ def test_cycle_extract_has_the_database_batch_controls():
           'd.n_unsaved' in confirm and 'd.n_saved' in confirm and 'd.n_files' in confirm)
     check('it says this is not the Guideline Windows page',
           'not</b> the <b>Guideline Windows</b> page' in confirm)
-    check('nothing to write points at Save all proposed and at Clear',
-          'Nothing to write' in confirm and 'Save all proposed' in confirm
+    check('nothing to write points at Save all clocks and at Clear',
+          'Nothing to write' in confirm and 'Save all clocks' in confirm
           and 'Clear saved guideline clocks' in confirm)
     check('the confirm carries Treat unknown rows as',
           'dbClockKindRow' in confirm and 'dbClockKindSelect' in confirm
@@ -2405,6 +2460,126 @@ def test_gw_delta_cop_is_from_eval_not_from_h():
               f"H {h_delta}, eval {row['eval_delta_cop']}")
 
 
+# ---------------------------------------------------------------------------
+# The audit trail behind the eval ΔCOP %: the two evaluation slices it was made
+# of travel with it — on hover and in the CSV, never as new columns. An n/a
+# keeps its reason and gains nothing.
+# ---------------------------------------------------------------------------
+
+GW_DELTA_COP_AUDIT = ('delta_cop_first', 'delta_cop_last',
+                      'delta_cop_first_start', 'delta_cop_first_end',
+                      'delta_cop_last_start', 'delta_cop_last_end')
+
+
+def _gw_csv_row(h, rowid):
+    """{header: cell} of one exported Guideline Windows row."""
+    h.compute_scores()
+    with contextlib.redirect_stdout(io.StringIO()):
+        resp = h.client.post('/api/guideline_windows/export', json={'rowids': [rowid]})
+    lines = resp.data.decode('utf-8-sig').splitlines()
+    return dict(zip(next(csv.reader([lines[0]])), next(csv.reader([lines[1]]))))
+
+
+def test_gw_delta_cop_slices_are_on_the_row_and_in_the_csv():
+    slice_s = webapp.load_interval_deviations_config()['delta_cop_slice_min'] * 60.0
+    step = _pd_q_step_for(6.0)
+    with WindowsHarness(sheet=_pd_sheet(q_step=step)) as h:
+        _defrost_entry(h)
+        row = h.one_row(1)
+        check('the two slice COPs are on the row, finite',
+              all(isinstance(row.get(k), float) for k in ('delta_cop_first', 'delta_cop_last')),
+              str([row.get(k) for k in ('delta_cop_first', 'delta_cop_last')]))
+        want_first = [PD_EVAL[0], PD_EVAL[0] + slice_s]
+        want_last = [PD_EVAL[1] - slice_s, PD_EVAL[1]]
+        got_first = [row.get('delta_cop_first_start'), row.get('delta_cop_first_end')]
+        got_last = [row.get('delta_cop_last_start'), row.get('delta_cop_last_end')]
+        check('the first slice is the first five minutes of the saved evaluation window',
+              got_first == want_first, f'{got_first} vs {want_first}')
+        check('the last slice is its last five minutes',
+              got_last == want_last, f'{got_last} vs {want_last}')
+        recomputed = (100.0 * (row['delta_cop_last'] - row['delta_cop_first'])
+                      / row['delta_cop_first'])
+        check('the shown % is still (last - first) / first of those two COPs',
+              abs(row['eval_delta_cop'] - recomputed) < 1e-9,
+              f"{row['eval_delta_cop']} vs {recomputed}")
+
+        cells = _gw_csv_row(h, 1)
+        headers = ('eval_dCOP_COP_first', 'eval_dCOP_COP_last',
+                   'eval_dCOP_first_start_s', 'eval_dCOP_first_end_s',
+                   'eval_dCOP_last_start_s', 'eval_dCOP_last_end_s')
+        check('the CSV carries both COPs and both windows next to the %',
+              all(k in cells and cells[k] != '' for k in headers),
+              str({k: cells.get(k) for k in headers}))
+        check('the CSV COPs are the row COPs',
+              abs(float(cells['eval_dCOP_COP_first']) - row['delta_cop_first']) < 1e-9
+              and abs(float(cells['eval_dCOP_COP_last']) - row['delta_cop_last']) < 1e-9,
+              str([cells['eval_dCOP_COP_first'], cells['eval_dCOP_COP_last']]))
+        check('the CSV slice times are the evaluation edges in seconds',
+              [float(cells['eval_dCOP_first_start_s']),
+               float(cells['eval_dCOP_first_end_s'])] == want_first
+              and [float(cells['eval_dCOP_last_start_s']),
+                   float(cells['eval_dCOP_last_end_s'])] == want_last,
+              str([cells[k] for k in headers[2:]]))
+        head = _gw_html()
+        head = head[head.index('<thead'):head.index('</thead>')]
+        check('the two slice COPs stayed off the on-screen column set',
+              'delta_cop' not in head and 'COP first' not in head and 'COP last' not in head,
+              'a ΔCOP slice reached the table header')
+
+
+def test_gw_delta_cop_na_rows_keep_the_reason_and_gain_no_slices():
+    with WindowsHarness(sheet=_pd_sheet()) as h:
+        h.add_entry(1, 0.0, 12000.0, tsup=38.0, q=5.0, p=2.0, cop=2.5)
+        h.add_period(1, 'off', 0.0, 1200.0)
+        h.add_period(1, 'on', 1200.0, 12000.0)
+        h.add_entry(2, 0.0, 6000.0, tsup=41.0, q=6.5, p=2.6, cop=2.5)
+        h.add_period(2, 'defrost', 0.0, 1200.0)
+        h.add_period(2, 'heating', 1200.0, 6000.0)
+        h.add_period(2, 'equilibrium', 1200.0, 4800.0)
+        # A stored evaluation window under 2 x 5 min: no slice can be cut.
+        h.add_entry(3, 0.0, 12000.0, tsup=40.0, q=6.0, p=2.5, cop=2.4)
+        h.add_period(3, 'defrost', 0.0, 1200.0)
+        h.add_period(3, 'heating', 1200.0, 12000.0)
+        h.add_period(3, 'equilibrium', 1200.0, 4800.0)
+        h.add_period(3, 'evaluation', 4800.0, 5100.0)
+        _, d = h.load([1, 2, 3])
+        rows = {r['rowid']: r for r in d.get('rows', [])}
+
+        for rid, what in ((1, 'on-off'), (2, 'short H'), (3, 'a 5 min evaluation window')):
+            row = rows[rid]
+            check(f'{what}: ΔCOP is n/a, never 0', row.get('eval_delta_cop') is None,
+                  str(row.get('eval_delta_cop')))
+            check(f'{what}: the two slice COPs and their times stay empty, never 0',
+                  all(row.get(k) is None for k in GW_DELTA_COP_AUDIT),
+                  str({k: row.get(k) for k in GW_DELTA_COP_AUDIT}))
+            check(f'{what}: the cell still says why', bool(row.get('delta_cop_reason')),
+                  str(row.get('delta_cop_reason')))
+
+        cells = _gw_csv_row(h, 3)
+        check('the CSV leaves the slice fields blank on an n/a row',
+              all(cells[k] == '' for k in
+                  ('eval_dCOP_pct', 'eval_dCOP_COP_first', 'eval_dCOP_COP_last',
+                   'eval_dCOP_first_start_s', 'eval_dCOP_last_end_s')),
+              str({k: cells.get(k) for k in ('eval_dCOP_pct', 'eval_dCOP_COP_first')}))
+
+
+def test_gw_delta_cop_hover_names_both_slice_cops():
+    gw_html = _gw_html()
+    body = gw_html[gw_html.index('function gwDeltaTitle'):gw_html.index('function gwApplyMeta')]
+    check('the ΔCOP hover reads both slice COPs off the row',
+          'delta_cop_first' in body and 'delta_cop_last' in body, '')
+    check('it names both slice windows',
+          all(k in body for k in ('delta_cop_first_start', 'delta_cop_first_end',
+                                  'delta_cop_last_start', 'delta_cop_last_end')), '')
+    check('it names the slice length and the 2.5 % limit',
+          'delta_cop_slice_min' in body and 'delta_cop_pct' in body, '')
+    check('a % cell gets that title, an n/a keeps its reason',
+          'return gwCell(text, cls, gwDeltaTitle(r));' in gw_html
+          and 'if (v === null || v === undefined) { return gwNa(reason); }' in gw_html, '')
+    check('the row is handed to the cell builder',
+          'gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason, r)' in gw_html, '')
+
+
 def test_gw_db_wb_on_saved_defrost_ignore_a_d_only_excursion():
     with WindowsHarness(sheet=_pd_sheet(db_in_d=5.0, db_in_h=0.0, wb_in_d=5.0, wb_in_h=0.0)) as h:
         _defrost_entry(h)
@@ -2629,7 +2804,8 @@ def test_cycle_extract_period_layers_stay_off_and_have_no_tsup_band():
     check('USER_GUIDE keeps Period layers off by default',
           'Period layers are **off by default**' in guide)
     check('USER_GUIDE says show also works for saved clocks',
-          '**saved** clocks' in guide and 'or a proposal' in guide)
+          '**saved** clocks' in guide
+          and 'no click on **Edit clocks** needed' in guide)
     check('USER_GUIDE says the layers fall back to the saved bands',
           'otherwise the **saved** bands' in guide)
     check('USER_GUIDE does not put a Tsup band on Cycle Extract',
@@ -2874,7 +3050,12 @@ def test_gw_html_json_csv_have_no_tsup_percent_fields():
           and 'intervalDeviationsTable' not in dev_html)
     check('parent dTreturn columns are unchanged',
           'dev_dtreturn_outside_count' in dev_html and 'dev_dtreturn_percentage' in dev_html)
-    check('parent Tsup % is unchanged', 'dev_tsup_percentage' in dev_html or 'Tsup %' in dev_html)
+    # Flipped with the hide/remove slice: the four parent **individual** Tsup
+    # columns are off the table for good (draft individual liquid-sink outlet is
+    # n/a). The mean check stays, here and on the plot.
+    check('parent individual Tsup % is gone from the template',
+          'dev_tsup_percentage' not in dev_html and 'Tsup %' not in dev_html,
+          'an individual Tsup column is back')
 
 
 # ---------------------------------------------------------------------------
@@ -4074,6 +4255,2286 @@ def test_gw_ui_changed_nothing_it_was_told_to_leave_alone():
         check('adding # and COP dataset opened no sheet', h.sheet_reads == [], str(h.sheet_reads))
 
 
+# ---------------------------------------------------------------------------
+# Cycle Extract Step 1: Apply stores pelec_transition_time.
+#
+# The stamp for the **end** of a defrost is not the power ramp but the last
+# dT_HP = Tsup - Treturn recovery that holds above 0.2 K for 60 s. On-off and a
+# window that opens in H are power only. Nothing here writes a guideline clock.
+# Synthetic traces and a throwaway SQLite only - no lab file, no analyst
+# database. Times are seconds of `time_elapsed`, temperatures in degC.
+# ---------------------------------------------------------------------------
+
+APPLY_FILE = 'synthetic_apply_E_file.xlsx'      # the E makes it a defrost letter
+UNLISTED_COND = 'X'                             # a letter the tool does not list
+
+
+def _apply_sheet(power_low_until, dt_steps, end=12000.0, step=10.0, t_return=30.0):
+    """One parent window: idle power until ``power_low_until``, then heating.
+
+    ``dt_steps`` is [(from_time, dT_HP)] - the supply temperature is written as
+    ``t_return + dT`` so the sheet carries real ``Ts Buh`` / ``T_return_emu``
+    series rather than a pre-computed difference.
+    """
+    t = np.arange(0.0, end + step, step)
+    if isinstance(power_low_until, (list, tuple)):
+        low = np.zeros(len(t), dtype=bool)
+        for a, b in power_low_until:
+            low |= (t >= a) & (t < b)
+    else:
+        low = t < power_low_until
+    dt = np.full(len(t), dt_steps[0][1], dtype=float)
+    for start, value in dt_steps:
+        dt[t >= start] = value
+    return pd.DataFrame({
+        'time_elapsed': t,
+        'Electric Power Input (without correction)': np.where(low, 0.2, 3.0),
+        'T_return_emu': np.full(len(t), t_return),
+        'Ts Buh': t_return + dt,
+    })
+
+
+class ApplyHarness:
+    """A throwaway ``results`` row plus the cursor the insert path would use."""
+
+    def __enter__(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='pelec_on_apply_')
+        self.db = os.path.join(self.tmpdir, 'test.db')
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE results (file_name TEXT, data_set REAL, start_time REAL, "
+                     "end_time REAL, cycle_type TEXT, cycle_start_marker TEXT, test_cond TEXT, "
+                     "dev_test_condition TEXT, pelec_transition_time REAL, "
+                     "pelec_transition_source TEXT, pelec_detect_failed INTEGER)")
+        conn.commit()
+        conn.close()
+        self._saved = {k: getattr(webapp, k) for k in ('get_db_connection', 'get_database_path')}
+        webapp.get_db_connection = self._connect
+        webapp.get_database_path = lambda: self.db
+        # The real table, not a stub: Step 2 writes the dTreturn and mean caches
+        # onto every clock row, so a short CREATE here would hide a broken insert.
+        webapp.ensure_cycle_periods_table()
+        return self
+
+    def __exit__(self, *exc_info):
+        for k, v in self._saved.items():
+            setattr(webapp, k, v)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        return False
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def add_row(self, file_name=APPLY_FILE, **cols):
+        conn = self._connect()
+        try:
+            values = {'file_name': file_name, 'data_set': 1.0,
+                      'start_time': 0.0, 'end_time': 12000.0}
+            values.update(cols)
+            keys = list(values)
+            conn.execute(f"INSERT INTO results ({','.join(keys)}) "
+                         f"VALUES ({','.join('?' * len(keys))})", [values[k] for k in keys])
+            rowid = conn.execute("SELECT last_insert_rowid() AS r").fetchone()['r']
+            conn.commit()
+            return int(rowid)
+        finally:
+            conn.close()
+
+    def add_saved_period(self, rowid, period_type, start, end):
+        conn = self._connect()
+        try:
+            conn.execute("INSERT INTO cycle_periods (entry_rowid, period_type, start_time, "
+                         "end_time, detection_method, buffer_s) VALUES (?,?,?,?,?,?)",
+                         (rowid, period_type, start, end, webapp.GUIDELINE_DETECTION_METHOD, 600))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def stamp(self, rowid, sheet, file_name=APPLY_FILE):
+        """Run the insert-path helper exactly as ``calculate_and_insert`` does."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            with contextlib.redirect_stdout(io.StringIO()):
+                webapp.store_pelec_transition_on_insert(cur, sheet, rowid, file_name)
+            conn.commit()
+        finally:
+            conn.close()
+        return self.transition_of(rowid)
+
+    def transition_of(self, rowid):
+        conn = self._connect()
+        try:
+            r = conn.execute("SELECT pelec_transition_time, pelec_transition_source, "
+                             "pelec_detect_failed FROM results WHERE rowid=?", (rowid,)).fetchone()
+            return (r['pelec_transition_time'], r['pelec_transition_source'],
+                    r['pelec_detect_failed'])
+        finally:
+            conn.close()
+
+    def period_count(self, rowid):
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT COUNT(*) AS n FROM cycle_periods WHERE entry_rowid=?",
+                                (rowid,)).fetchone()['n']
+        finally:
+            conn.close()
+
+    def apply(self, rowid, sheet, file_name=APPLY_FILE):
+        """Both insert-path helpers, in the order ``calculate_and_insert`` runs them."""
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            with contextlib.redirect_stdout(io.StringIO()):
+                decision = webapp.store_pelec_transition_on_insert(cur, sheet, rowid, file_name)
+                written = webapp.store_default_guideline_clocks_on_insert(
+                    cur, sheet, rowid, file_name, decision)
+            conn.commit()
+        finally:
+            conn.close()
+        return written
+
+    def clocks(self, rowid, method=None):
+        """[(period_type, start, end)] in start order, optionally one method only."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT period_type, start_time, end_time, detection_method FROM cycle_periods "
+                "WHERE entry_rowid=? ORDER BY start_time ASC, id ASC", (rowid,)).fetchall()
+        finally:
+            conn.close()
+        return [(r['period_type'], r['start_time'], r['end_time']) for r in rows
+                if method is None or r['detection_method'] == method]
+
+    def methods(self, rowid):
+        conn = self._connect()
+        try:
+            return sorted({r[0] for r in conn.execute(
+                "SELECT DISTINCT detection_method FROM cycle_periods WHERE entry_rowid=?",
+                (rowid,)).fetchall()})
+        finally:
+            conn.close()
+
+    def has_saved(self, rowid):
+        """What the whole-database batch's ``skip_saved`` asks about this row."""
+        conn = self._connect()
+        try:
+            return bool(webapp._saved_guideline_periods_map(conn, [rowid]).get(int(rowid)))
+        finally:
+            conn.close()
+
+
+def test_apply_stores_the_transition_on_a_defrost_sheet():
+    """1. The stamp itself stores the time and writes no guideline period."""
+    # Power idles to 600 s, dT_HP is -3 K through the defrost and +5 K after it.
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row()
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('Apply stores a finite transition time',
+              trans is not None and np.isfinite(trans), str(trans))
+        check('the stamp is the dT_HP recovery, not the smoothed power dip',
+              trans == 600.0, str(trans))
+        check("Apply is not the analyst dragging the handle: source is 'auto'",
+              source == 'auto', str(source))
+        check('and the row is not marked as a failed detection',
+              (failed or 0) == 0, str(failed))
+        check('the stamp on its own writes no cycle_periods row (Step 2 does)',
+              h.period_count(rowid) == 0, str(h.period_count(rowid)))
+        check('the kind helper reads E as defrost and an unlisted letter as nothing',
+              (webapp._guideline_kind_from_test_cond('E'),
+               webapp._guideline_kind_from_test_cond('C70min'),
+               webapp._guideline_kind_from_test_cond(UNLISTED_COND),
+               webapp._guideline_kind_from_test_cond('')) == ('defrost', 'on_off', None, None))
+
+
+def test_apply_defrost_takes_the_last_dt_recovery_that_holds():
+    """2. A brief overshoot then a deep second dip is still D."""
+    # Power blips on 400-600 s and settles from 900 s. dT_HP pokes above 0.2 K
+    # for 30 s at 400 s (shorter than the 60 s hold), falls negative again, and
+    # only holds from 1000 s.
+    sheet = _apply_sheet([(0.0, 400.0), (600.0, 900.0)],
+                         [(0.0, -3.0), (400.0, 1.0), (430.0, -2.0), (1000.0, 5.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row()
+        trans, source, failed = h.stamp(rowid, sheet)
+        power = webapp._detect_pelec_rampup(
+            sheet['Electric Power Input (without correction)'], sheet['time_elapsed'])
+        check('the stamp is the last hold, not the first flicker', trans == 1000.0, str(trans))
+        check('and not the earlier power ramp-up',
+              power is not None and trans > power, f'power={power} stored={trans}')
+        check('a two-recovery defrost is still a successful detection',
+              source == 'auto' and (failed or 0) == 0, f'{source} {failed}')
+        holds = webapp._dt_hp_accepted_holds(
+            (sheet['Ts Buh'] - sheet['T_return_emu']).to_numpy(float),
+            sheet['time_elapsed'].to_numpy(float), 0.0, 12000.0, 0.2, 60.0)
+        check('the 30 s flicker is not an accepted crossing', holds == [1000.0], str(holds))
+
+
+def test_apply_defrost_caps_a_late_power_ramp_to_the_hold():
+    """3. The ramp detector after a hold is capped to that hold."""
+    # dT_HP recovers at 300 s and holds; the compressor only ramps at 900 s.
+    sheet = _apply_sheet(900.0, [(0.0, -3.0), (300.0, 5.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row()
+        trans, _source, _failed = h.stamp(rowid, sheet)
+        power = webapp._detect_pelec_rampup(
+            sheet['Electric Power Input (without correction)'], sheet['time_elapsed'])
+        check('the stored end is not after the hold', trans == 300.0, str(trans))
+        check('the later power ramp-up was capped, not used',
+              power is not None and trans < power, f'power={power} stored={trans}')
+
+
+def test_apply_on_off_is_power_only():
+    """4. The 0.2 K hold is a defrost rule; on-off uses the power event."""
+    # dT_HP never recovers on this synthetic trace, so a dT rule would find
+    # nothing. An on-off row must still get the power ramp-up.
+    sheet = _apply_sheet(600.0, [(0.0, -3.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='C')
+        trans, source, failed = h.stamp(rowid, sheet)
+        power = webapp._detect_pelec_rampup(
+            sheet['Electric Power Input (without correction)'], sheet['time_elapsed'])
+        check('an on-off row takes the power time', trans == power and trans is not None,
+              f'power={power} stored={trans}')
+        check('and it is an auto stamp, not a failure',
+              source == 'auto' and (failed or 0) == 0, f'{source} {failed}')
+
+        # The same trace read as a defrost has no recovery that holds, so the
+        # power ramp is deliberately *not* used: we wait rather than stamp.
+        rowid2 = h.add_row(test_cond='E')
+        trans2, source2, failed2 = h.stamp(rowid2, sheet)
+        check('a defrost with no dT_HP hold waits instead of using the ramp',
+              trans2 is None and failed2 == 1, f'{trans2} {failed2}')
+        check('a failed detection is n/a, never 0', trans2 is None, str(trans2))
+        check('and it is still recorded as an auto attempt', source2 == 'auto', str(source2))
+
+
+def test_apply_continuous_and_unknown_letter_do_not_crash():
+    """5. Continuous stores nothing; an unknown letter is not invented into one."""
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        # Saved heating-only clocks make this a continuous cycle on a recalculate.
+        cont = h.add_row(test_cond=UNLISTED_COND)
+        h.add_saved_period(cont, 'heating', 0.0, 12000.0)
+        trans, source, failed = h.stamp(cont, sheet)
+        check('a continuous cycle keeps no transition time', trans is None, str(trans))
+        check('and is not marked as a failed detection',
+              source is None and failed is None, f'{source} {failed}')
+
+        # A letter the tool does not list, with nothing else: kind stays unknown,
+        # which is not continuous and not defrost - the power event is stored
+        # and nothing crashes.
+        unknown = h.add_row(test_cond=UNLISTED_COND)
+        t_unknown, src_unknown, _f = h.stamp(unknown, sheet)
+        check('an unknown letter neither crashes nor becomes continuous',
+              t_unknown is None or np.isfinite(t_unknown), str(t_unknown))
+        check('whatever it found is an auto stamp', src_unknown == 'auto', str(src_unknown))
+        check('a letter is never mapped to continuous',
+              webapp._guideline_kind_from_test_cond(UNLISTED_COND) is None
+              and webapp._resolve_guideline_kind(
+                  None, None, None, None, set(), None,
+                  test_cond=UNLISTED_COND)[0] == 'unknown')
+
+
+def test_apply_never_overwrites_a_manual_time():
+    """6. A time the analyst set survives Apply and any recalculate."""
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        manual = h.add_row(pelec_transition_time=1234.0, pelec_transition_source='manual')
+        trans, source, _failed = h.stamp(manual, sheet)
+        check('a manual transition is left exactly as it was',
+              trans == 1234.0 and source == 'manual', f'{trans} ({source})')
+
+        # A stored time with no 'auto' stamp is of unknown provenance - also kept.
+        legacy = h.add_row(pelec_transition_time=2345.0)
+        t_legacy, _s, _f = h.stamp(legacy, sheet)
+        check('a stored time with no source is not replaced either',
+              t_legacy == 2345.0, str(t_legacy))
+
+        # An earlier auto stamp is what a recalculate is allowed to refresh.
+        auto = h.add_row(pelec_transition_time=999.0, pelec_transition_source='auto')
+        t_auto, _s2, _f2 = h.stamp(auto, sheet)
+        check('an earlier auto stamp is refreshed on a recalculate',
+              t_auto == 600.0, str(t_auto))
+
+
+def test_apply_is_wired_into_the_one_insert_path():
+    """7. Both halves of Apply ride on the one insert path, in that order."""
+    app_src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    insert_body = _function_code(app_src, 'calculate_and_insert')
+    check('the row insert/update calls the stamp',
+          'store_pelec_transition_on_insert(' in insert_body)
+    check('and then the clock step, on the same path',
+          'store_default_guideline_clocks_on_insert(' in insert_body
+          and insert_body.index('store_pelec_transition_on_insert(')
+          < insert_body.index('store_default_guideline_clocks_on_insert('))
+    check('a clock failure cannot fail Apply', 'except Exception as exc' in insert_body)
+    stamp_body = _function_code(app_src, 'store_pelec_transition_on_insert')
+    check('the stamp inserts no cycle_periods row',
+          'INSERT INTO cycle_periods' not in stamp_body and 'auto_pelec' not in stamp_body)
+    check('and it writes no guideline detection_method',
+          "'guideline'" not in stamp_body and '_build_guideline_clocks' not in stamp_body)
+    check('it never stamps a manual transition', "== 'manual'" in stamp_body)
+    clock_body = _function_code(app_src, 'store_default_guideline_clocks_on_insert')
+    check('the clock step reuses the Edit clocks grammar',
+          '_build_guideline_clocks(' in clock_body and '_guideline_lengths()' in clock_body)
+    check('and the one persist helper, not a copy of the proposal loop',
+          '_persist_guideline_clocks(' in clock_body
+          and '_guideline_proposals_for_file' not in clock_body)
+    check('it opens no workbook of its own', '_read_excel_sheet' not in clock_body)
+    check("it never marks Apply clocks as the analyst's",
+          "transition_source='auto'" in clock_body and "'manual'" not in clock_body.replace(
+              "== 'manual'", ''))
+    persist_body = _function_code(app_src, '_persist_guideline_clocks')
+    check("Save still stamps 'manual' by default",
+          "transition_source='manual'" in persist_body
+          and "pelec_transition_source='manual'" in persist_body)
+    cfg = webapp.load_cycle_periods_config()
+    check('the dT_HP rule is configurable, defaulting to 0.2 K held for 60 s',
+          cfg['dt_hp_recover_k'] == 0.2 and cfg['dt_hp_hold_s'] == 60.0,
+          f"{cfg['dt_hp_recover_k']} / {cfg['dt_hp_hold_s']}")
+    check('the kind helper is not driven by Notes drop/ramp',
+          'drop' not in _function_code(app_src, '_guideline_kind_from_test_cond'))
+    guide = open(os.path.join(REPO, 'docs', 'USER_GUIDE.md'), encoding='utf-8').read()
+    check('USER_GUIDE says Apply stores the transition time',
+          'Apply also stores' in guide and 'last' in guide)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Apply writes the **default** guideline clocks.
+#
+# The clocks appear at Extract instead of only after Edit clocks + Save, so
+# Guideline Windows and Period Statistics can see D/H/eq/eval straight away.
+# They are a default, not a confirmation: detection_method 'guideline' with the
+# transition still stamped 'auto'. Save is what makes it 'manual'. A window the
+# tool cannot classify (unknown kind) and one it cannot judge (no series to
+# answer the veto) get no clocks at all, and Apply still succeeds. Nothing that
+# is already stored is rewritten. Synthetic traces and a throwaway SQLite only.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_writes_default_clocks_on_a_defrost_window():
+    """1. A defrost-shaped letter-A window: D + H + eq/eval, stamped auto."""
+    # Idle power until 600 s (the defrost), dT_HP -3 K through it and +5 K after.
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        written = h.apply(rowid, sheet)
+        trans, source, failed = h.transition_of(rowid)
+        got = h.clocks(rowid, webapp.GUIDELINE_DETECTION_METHOD)
+        check('Apply writes the default clocks itself', written == 4, str(written))
+        check('D is the defrost plus the buffer',
+              ('defrost', 0.0, 1200.0) in got, str(got))
+        check('H is the remainder of the parent window',
+              ('heating', 1200.0, 12000.0) in got, str(got))
+        check('equilibrium is the first eq_min of H',
+              ('equilibrium', 1200.0, 4800.0) in got, str(got))
+        check('evaluation follows it, and is not the tail of H',
+              ('evaluation', 4800.0, 9000.0) in got, str(got))
+        check('every row is stored as a guideline clock',
+              h.methods(rowid) == [webapp.GUIDELINE_DETECTION_METHOD], str(h.methods(rowid)))
+        check('the parent keeps its finite transition time',
+              trans == 600.0 and np.isfinite(trans), str(trans))
+        check("an Apply clock is not the analyst's: the source stays 'auto'",
+              source == 'auto', str(source))
+        check('and it is not a failed detection', (failed or 0) == 0, str(failed))
+        check('the parent results row is still the one full cycle',
+              _row_count(h) == 1, str(_row_count(h)))
+        check("the whole-database batch's skip_saved now sees this row as filled",
+              h.has_saved(rowid) is True)
+
+
+def test_apply_demoted_continuous_gets_h_and_eq_eval_but_no_d():
+    """2. Letter A with dT_HP stuck high is continuous: H + eq/eval, no D."""
+    sheet = _apply_sheet(600.0, [(0.0, 5.0)])       # never near 0.2 K on the low side
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        h.apply(rowid, sheet)
+        trans, _source, failed = h.transition_of(rowid)
+        got = h.clocks(rowid, webapp.GUIDELINE_DETECTION_METHOD)
+        types = sorted({t for t, _s, _e in got})
+        check('a demoted letter still gets clocks',
+              types == ['equilibrium', 'evaluation', 'heating'], str(types))
+        check('H is the whole parent window', ('heating', 0.0, 12000.0) in got, str(got))
+        check('eq/eval run from the parent start',
+              ('equilibrium', 0.0, 3600.0) in got and ('evaluation', 3600.0, 7800.0) in got,
+              str(got))
+        check('no D is invented from the letter',
+              not any(t == 'defrost' for t, _s, _e in got), str(got))
+        check('a continuous cycle keeps no transition time', trans is None, str(trans))
+        check('and finding nothing to stamp is not a failed detection',
+              failed != 1, str(failed))
+
+
+def test_apply_c_letter_without_a_stop_writes_continuous_clocks():
+    """3. Letter C with no power drop is continuous: no S span."""
+    sheet = _apply_sheet(0.0, [(0.0, 5.0)])         # power never leaves the on level
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='C')
+        h.apply(rowid, sheet)
+        got = h.clocks(rowid, webapp.GUIDELINE_DETECTION_METHOD)
+        types = sorted({t for t, _s, _e in got})
+        check('a C window with no compressor stop is continuous',
+              types == ['equilibrium', 'evaluation', 'heating'], str(types))
+        check('no S span is written', not any(t in ('off', 'on') for t, _s, _e in got), str(got))
+        check('H is the whole parent window', ('heating', 0.0, 12000.0) in got, str(got))
+
+
+def test_apply_without_a_temperature_series_writes_no_clocks():
+    """4. A defrost hint the veto cannot judge gets no clocks, and Apply survives."""
+    sheet = _no_t_series(_apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)]))
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        written = h.apply(rowid, sheet)
+        trans, _source, failed = h.transition_of(rowid)
+        check('cannot tell is not continuous: no guideline period is written',
+              written == 0 and h.period_count(rowid) == 0, str(h.period_count(rowid)))
+        check('and no transition time is invented either', trans is None, str(trans))
+        check('it is not recorded as a failed detection', failed is None, str(failed))
+        check('the parent row itself is still there', _row_count(h) == 1, str(_row_count(h)))
+
+
+def test_apply_does_not_rewrite_clocks_it_already_wrote():
+    """5. A recalculate of an already-clocked row is a skip, not a rewrite."""
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        h.apply(rowid, sheet)
+        first_ids, first_clocks = _period_ids(h, rowid), h.clocks(rowid)
+        again = h.apply(rowid, sheet)
+        check('the second Apply writes nothing', again == 0, str(again))
+        check('the stored rows are the same rows, not fresh ones',
+              _period_ids(h, rowid) == first_ids, str(_period_ids(h, rowid)))
+        check('and the clocks are unchanged', h.clocks(rowid) == first_clocks,
+              str(h.clocks(rowid)))
+
+
+def test_apply_leaves_a_row_the_analyst_saved_alone():
+    """6. Saved clocks and a manual time both survive a recalculate."""
+    sheet = _apply_sheet(600.0, [(0.0, -3.0), (600.0, 5.0)])
+    with ApplyHarness() as h:
+        # Clocks the analyst saved: a D span they moved to 0-900 s.
+        saved = h.add_row(test_cond='A')
+        h.add_saved_period(saved, 'defrost', 0.0, 900.0)
+        written = h.apply(saved, sheet)
+        check('Apply adds no clocks to a row that already has them', written == 0, str(written))
+        check("the analyst's span is exactly as they left it",
+              h.clocks(saved) == [('defrost', 0.0, 900.0)], str(h.clocks(saved)))
+
+        # A transition time the analyst typed: neither the time nor the clocks move.
+        manual = h.add_row(test_cond='A', pelec_transition_time=1234.0,
+                           pelec_transition_source='manual')
+        written_m = h.apply(manual, sheet)
+        trans, source, _failed = h.transition_of(manual)
+        check('a manual transition is left exactly as it was',
+              trans == 1234.0 and source == 'manual', f'{trans} ({source})')
+        check('and Apply writes no clocks over it',
+              written_m == 0 and h.period_count(manual) == 0, str(h.period_count(manual)))
+
+
+# ---------------------------------------------------------------------------
+# Cycle Extract: the test letter is a hint, the parent window is the fact.
+#
+# An A letter on a slice that never defrosted must not be given a D, and a C
+# letter with no compressor stop must not be given an S. The defrost question is
+# answered by dT_HP staying **below** 0.2 K for 60 s (a power wiggle is not a
+# defrost); the on-off question is answered by the power stop (0.2 K has nothing
+# to say about it). Synthetic traces and a throwaway SQLite only.
+# ---------------------------------------------------------------------------
+
+VETO_FILE = 'synthetic_veto_file.xlsx'
+
+#: Power dips to idle for 10 min in the middle of the window.
+DIP = [(6000.0, 6600.0)]
+#: dT_HP that never goes near the threshold - a heating-only slice.
+DT_HEATING = [(0.0, 5.0)]
+#: dT_HP low for the whole 10 min dip - a real defrost.
+DT_DEFROST = [(0.0, 5.0), (6000.0, -3.0), (6600.0, 5.0)]
+#: dT_HP low for one 10 s sample only - a flicker.
+DT_FLICKER = [(0.0, 5.0), (6000.0, -3.0), (6010.0, 5.0)]
+
+
+def _no_t_series(frame):
+    """The same window with no usable Tsup / Treturn - the veto cannot judge it."""
+    return frame.drop(columns=['Ts Buh', 'T_return_emu'])
+
+
+def _veto_harness(sheet, test_cond='A'):
+    """An ApiHarness over one parent window of ``sheet`` carrying ``test_cond``."""
+
+    class _H(ApiHarness):
+        ROWS = [(VETO_FILE, 1, 0.0, 12000.0, None, None, None, None)]
+        SHEET = staticmethod(lambda file_name=None, data_set=None, usecols=None: sheet)
+
+        def __enter__(self):
+            super().__enter__()
+            conn = self._connect()
+            try:
+                conn.execute("UPDATE results SET dev_test_condition=?", (test_cond,))
+                conn.commit()
+            finally:
+                conn.close()
+            return self
+
+    return _H()
+
+
+def _veto_entry(h, **payload):
+    """The single proposed entry of the veto harness."""
+    body = {'file_name': VETO_FILE}
+    body.update(payload)
+    _, d = h.post('/api/cycle_extract/propose_periods', body)
+    entries = (d or {}).get('entries', [])
+    return entries[0] if entries else {}
+
+
+def _ptypes_of(entry):
+    return sorted({p['period_type'] for p in entry.get('periods') or []})
+
+
+def _dt_of(sheet):
+    """(dT_HP values, times) of a synthetic Apply sheet."""
+    return ((sheet['Ts Buh'] - sheet['T_return_emu']).to_numpy(float),
+            sheet['time_elapsed'].to_numpy(float))
+
+
+def test_veto_a_letter_on_a_heating_only_window_is_continuous():
+    """1. dT_HP never drops, so the A letter cannot invent a defrost."""
+    sheet = _apply_sheet(DIP, DT_HEATING)      # power dips, temperatures do not
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('Apply stores no transition time for a window with no defrost',
+              trans is None, str(trans))
+        check('and that is not a failed detection - nothing was there to find',
+              failed != 1, str(failed))
+        check('the attempt is still recorded as auto', source == 'auto', str(source))
+        check('Apply still writes no cycle_periods row', h.period_count(rowid) == 0)
+
+    with _veto_harness(sheet) as h:
+        e = _veto_entry(h)
+        check('Edit clocks reads the same window as continuous',
+              e.get('kind') == 'continuous', str(e.get('kind')))
+        check('and says why on the kind source',
+              'treated as continuous' in str(e.get('kind_source')), str(e.get('kind_source')))
+        check('the clocks are H with equilibrium and evaluation, no D',
+              _ptypes_of(e) == ['equilibrium', 'evaluation', 'heating'], str(_ptypes_of(e)))
+        check('H is the whole parent window',
+              e.get('h_start') == 0.0 and e.get('h_end') == 12000.0,
+              f"{e.get('h_start')}-{e.get('h_end')}")
+        check('and no interior event is asked for', e.get('transition_time') is None,
+              str(e.get('transition_time')))
+
+
+def test_veto_a_letter_with_a_real_defrost_stays_defrost():
+    """2. dT_HP below 0.2 K for 10 min plus a power drop: the D is real."""
+    sheet = _apply_sheet(DIP, DT_DEFROST)
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('a window that really defrosted keeps a finite transition time',
+              trans is not None and np.isfinite(trans), str(trans))
+        check('stamped as auto, not as a failure',
+              source == 'auto' and (failed or 0) == 0, f'{source} {failed}')
+
+    with _veto_harness(sheet) as h:
+        e = _veto_entry(h)
+        check('Edit clocks keeps the defrost kind', e.get('kind') == 'defrost',
+              str(e.get('kind')))
+        check('the kind source is the letter, unqualified',
+              'treated as continuous' not in str(e.get('kind_source')),
+              str(e.get('kind_source')))
+        check('and the clocks carry a D span', 'defrost' in _ptypes_of(e), str(_ptypes_of(e)))
+
+
+def test_veto_a_single_low_sample_is_not_a_defrost():
+    """3. One sample under 0.2 K is a flicker - the same hold as the recovery."""
+    flicker = _apply_sheet(DIP, DT_FLICKER)
+    dt_v, dt_t = _dt_of(flicker)
+    check('a one-sample dip is not a low hold',
+          webapp._dt_hp_low_hold_start(dt_v, dt_t, 0.2, 60.0) is None,
+          str(webapp._dt_hp_low_hold_start(dt_v, dt_t, 0.2, 60.0)))
+    real_v, real_t = _dt_of(_apply_sheet(DIP, DT_DEFROST))
+    held = webapp._dt_hp_low_hold_start(real_v, real_t, 0.2, 60.0)
+    check('a 10 min low stretch is one', held == 6000.0, str(held))
+
+    with _veto_harness(flicker) as h:
+        e = _veto_entry(h)
+        check('a flicker under a power dip is still continuous',
+              e.get('kind') == 'continuous', str(e.get('kind')))
+        check('so no D is proposed', 'defrost' not in _ptypes_of(e), str(_ptypes_of(e)))
+
+
+def test_veto_c_letter_without_a_power_stop_is_continuous():
+    """4. Standby is a power stop; dT_HP has no say here."""
+    # Power never leaves its heating level, and dT_HP sits at 5 K throughout.
+    sheet = _apply_sheet(0.0, DT_HEATING)
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='C')
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('no compressor stop, so no S time is invented', trans is None, str(trans))
+        check('and it is not marked as a failed detection', failed != 1, str(failed))
+        check('the attempt is recorded as auto', source == 'auto', str(source))
+
+    with _veto_harness(sheet, test_cond='C') as h:
+        e = _veto_entry(h)
+        check('Edit clocks reads a C window with no stop as continuous',
+              e.get('kind') == 'continuous', str(e.get('kind')))
+        check('the reason names the missing stop, not the 0.2 K rule',
+              'compressor stop' in str(e.get('kind_source'))
+              and '0.2' not in str(e.get('kind_source')), str(e.get('kind_source')))
+        check('no S span is proposed', 'off' not in _ptypes_of(e), str(_ptypes_of(e)))
+
+    # The same trace read as a defrost letter is continuous for the other reason.
+    with _veto_harness(sheet, test_cond='A') as h:
+        e = _veto_entry(h)
+        check('and an A letter on that trace is continuous for the dT reason',
+              e.get('kind') == 'continuous' and 'dT_HP' in str(e.get('kind_source')),
+              str(e.get('kind_source')))
+
+
+def test_veto_c_letter_with_a_power_stop_stays_on_off():
+    """5. A compressor stop is the trace an on-off window needs."""
+    # Heating until 6000 s, then idle to the end of the window.
+    sheet = _apply_sheet([(6000.0, 12100.0)], DT_HEATING)
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='C')
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('an on-off window with a stop keeps its power time',
+              trans is not None and np.isfinite(trans), str(trans))
+        check('stamped as auto, not as a failure',
+              source == 'auto' and (failed or 0) == 0, f'{source} {failed}')
+
+    with _veto_harness(sheet, test_cond='C') as h:
+        e = _veto_entry(h)
+        check('Edit clocks keeps on-off', e.get('kind') == 'on_off', str(e.get('kind')))
+        check('and proposes an S span', 'off' in _ptypes_of(e), str(_ptypes_of(e)))
+        check('an on-off window still has no equilibrium or evaluation',
+              'equilibrium' not in _ptypes_of(e) and 'evaluation' not in _ptypes_of(e),
+              str(_ptypes_of(e)))
+
+
+def test_veto_never_promotes_an_empty_or_unlisted_letter():
+    """6. A power dip on a row with no usable letter is not a defrost."""
+    sheet = _apply_sheet(DIP, DT_DEFROST)   # a dip *and* a low dT hold
+    cases = (('', 'an empty test condition'),
+             (UNLISTED_COND, 'a letter the tool does not list'))
+    for cond, label in cases:
+        with _veto_harness(sheet, test_cond=cond) as h:
+            e = _veto_entry(h)
+            check(f'{label} stays unknown, never defrost',
+                  e.get('kind') == 'unknown', str(e.get('kind')))
+            check('and it is not promoted to continuous either',
+                  e.get('kind') != 'continuous', str(e.get('kind')))
+            e2 = _veto_entry(h, default_kind='defrost')
+            check(f'{label} takes the file-level default when one is set',
+                  e2.get('kind') == 'defrost', str(e2.get('kind')))
+
+
+def test_veto_leaves_an_analyst_or_indicator_kind_alone():
+    """7 + 8. A kind the analyst set, or an indicator column, is already a trace."""
+    sheet = _apply_sheet(DIP, DT_HEATING)   # no low dT hold anywhere
+    with _veto_harness(sheet) as h:
+        e = _veto_entry(h, overrides={'1': {'kind': 'defrost'}})
+        check('the analyst kind wins over the window', e.get('kind') == 'defrost',
+              str(e.get('kind')))
+        check('and it is not annotated as demoted',
+              'treated as continuous' not in str(e.get('kind_source')),
+              str(e.get('kind_source')))
+        check('a D span is proposed for it', 'defrost' in _ptypes_of(e), str(_ptypes_of(e)))
+
+    kind, source, trace = webapp._guideline_kind_veto(
+        'defrost', 'indicator column "defrost active"', sheet, None, None)
+    check('an indicator column True keeps defrost with no low dT hold',
+          (kind, trace) == ('defrost', True), f'{kind} {source} {trace}')
+    kind_s, _src, trace_s = webapp._guideline_kind_veto(
+        'defrost', 'saved periods', sheet, None, None)
+    check('saved D clocks are not demoted either',
+          (kind_s, trace_s) == ('defrost', True), f'{kind_s} {trace_s}')
+    kind_t, _src2, trace_t = webapp._guideline_kind_veto(
+        'defrost', 'test condition A', sheet, None, None, stored_trans=600.0)
+    check('a transition time already stored is a trace of its own',
+          (kind_t, trace_t) == ('defrost', True), f'{kind_t} {trace_t}')
+
+
+def test_veto_cannot_judge_a_window_without_a_temperature_series():
+    """9. No usable T series is "cannot tell", which is not continuous."""
+    sheet = _no_t_series(_apply_sheet(DIP, DT_HEATING))
+    kind, _source, trace = webapp._guideline_kind_veto(
+        'defrost', 'test condition A', sheet, None, None)
+    check('a defrost hint with no dT_HP series keeps its kind',
+          kind == 'defrost' and trace is None, f'{kind} {trace}')
+
+    with ApplyHarness() as h:
+        rowid = h.add_row(test_cond='A')
+        trans, source, failed = h.stamp(rowid, sheet)
+        check('Apply invents neither a D nor an H-only window',
+              trans is None and source is None, f'{trans} ({source})')
+        check('and it is not recorded as a failed detection', failed != 1, str(failed))
+
+    with _veto_harness(sheet) as h:
+        e = _veto_entry(h)
+        check('Edit clocks does not call it continuous', e.get('kind') == 'defrost',
+              str(e.get('kind')))
+
+
+def test_veto_is_one_helper_used_by_apply_and_edit_clocks():
+    """10. The rule exists once - both paths call the same helper."""
+    app_src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    apply_body = _function_code(app_src, 'store_pelec_transition_on_insert')
+    propose_body = _function_code(app_src, '_guideline_proposals_for_file')
+    check('Apply calls the shared veto', '_guideline_kind_veto(' in apply_body)
+    check('Edit clocks calls the same shared veto', '_guideline_kind_veto(' in propose_body)
+    veto_body = _function_code(app_src, '_guideline_kind_veto')
+    check('the veto itself holds no threshold literal',
+          '0.2' not in veto_body and '60' not in veto_body, veto_body[:80])
+    trace_body = _function_code(app_src, '_guideline_kind_trace')
+    check('the defrost question is dT_HP, not a power event',
+          '_dt_hp_low_hold_start(' in trace_body)
+    on_off_part = trace_body.split("if kind == 'on_off':")[-1]
+    check('the on-off question is the power event, not 0.2 K',
+          '_detect_pelec_drop(' in on_off_part and 'recover_k' not in on_off_part)
+    low_body = _function_code(app_src, '_dt_hp_low_hold_start')
+    check('the low hold reuses the hold helper rather than a second timer',
+          '_dt_hp_hold_ok(' in low_body and '60' not in low_body)
+    cfg = webapp.load_cycle_periods_config()
+    check('the 0.2 K / 60 s numbers are untouched',
+          cfg['dt_hp_recover_k'] == 0.2 and cfg['dt_hp_hold_s'] == 60.0,
+          f"{cfg['dt_hp_recover_k']} / {cfg['dt_hp_hold_s']}")
+    check('the veto adds no new kind',
+          webapp.GUIDELINE_KINDS == ('defrost', 'on_off', 'continuous'),
+          str(webapp.GUIDELINE_KINDS))
+    guide = open(os.path.join(REPO, 'docs', 'USER_GUIDE.md'), encoding='utf-8').read()
+    check('USER_GUIDE explains the demotion in the clock sections',
+          'treated as continuous' in guide, 'missing from USER_GUIDE.md')
+
+
+# ---------------------------------------------------------------------------
+# Period Statistics reads the saved guideline clocks.
+#
+# The page is a view of what Cycle Extract stored: detection_method='guideline'
+# at buffer_min (600 s) after D **and** after S. Notes `drop` / `ramp` and the
+# old `cycle_type` no longer decide whether a parent is listed. A parent with
+# only the old `auto_pelec` cache still shows under the old rule (defrost 600,
+# on-off 0), but the two engines are never mixed on one entry. Throwaway
+# SQLite, no sheet read, no lab file.
+# ---------------------------------------------------------------------------
+
+PSTAT_FILE = 'synthetic_period_stats.xlsx'
+
+
+class PeriodStatsHarness:
+    """Parent rows plus stored sub-periods; nothing is ever derived here."""
+
+    def __enter__(self):
+        self.tmpdir = tempfile.mkdtemp(prefix='period_stats_')
+        self.db = os.path.join(self.tmpdir, 'test.db')
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "CREATE TABLE results (file_name TEXT, data_set REAL, start_time REAL, end_time REAL, "
+            "display_order INTEGER, test_cond TEXT, profile_id TEXT, HP_ID TEXT, "
+            "cycle_type TEXT, cycle_start_marker TEXT, pelec_transition_time REAL, "
+            "pelec_transition_source TEXT, flow_config TEXT, COP_dataset TEXT, "
+            "avg_t_db REAL, avg_t_wb REAL, avg_t_sup_buh REAL, avg_t_supply REAL, Ts_buh REAL, "
+            "avg_t_mean_log REAL, t_mean_from_avgs REAL, avg_dt_ln REAL, "
+            "QCorrwBUH REAL, PCorrwBUH REAL, COPCorrwBUH REAL, "
+            "avg_heating_capacity_corr REAL, avg_power_input_corr REAL, cop_corr REAL, "
+            "avg_mass_flow REAL, avg_volume_flow REAL)")
+        conn.commit()
+        conn.close()
+
+        self._saved = {k: getattr(webapp, k) for k in
+                       ('get_db_connection', 'get_database_path', '_read_excel_sheet',
+                        'load_time_series_data')}
+        webapp.get_db_connection = self._connect
+        webapp.get_database_path = lambda: self.db
+        # Any sheet read from this page is a bug: the numbers are already cached.
+        webapp._read_excel_sheet = self._forbidden
+        webapp.load_time_series_data = self._forbidden
+        webapp.app.config['TESTING'] = False
+        webapp.app.config['PROPAGATE_EXCEPTIONS'] = False
+        self.client = webapp.app.test_client()
+        with contextlib.redirect_stdout(io.StringIO()):
+            webapp.ensure_cycle_periods_table()
+        self.buffer_s = webapp._guideline_buffer_s()
+        return self
+
+    def __exit__(self, *exc_info):
+        for k, v in self._saved.items():
+            setattr(webapp, k, v)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        return False
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _forbidden(self, *a, **kw):
+        raise AssertionError('Period Statistics must not open a sheet')
+
+    def add_entry(self, rowid, cycle_type=None, start=0.0, end=12000.0, q=6.0, p=2.5, cop=2.4,
+                  test_cond='E', order=None, **means):
+        """One parent row. ``means`` names further ``results`` columns directly
+        (``avg_t_db=7.9``), which is what the mean-band colour reads on D+H."""
+        cols = ['rowid', 'file_name', 'data_set', 'start_time', 'end_time',
+                'display_order', 'test_cond', 'profile_id', 'HP_ID', 'cycle_type',
+                'cycle_start_marker', 'QCorrwBUH', 'PCorrwBUH', 'COPCorrwBUH']
+        vals = [rowid, PSTAT_FILE, 1, start, end, order if order is not None else rowid,
+                test_cond, 'HPT_RRT1', '1', cycle_type, 'ds', q, p, cop]
+        for key, value in means.items():
+            cols.append(key)
+            vals.append(value)
+        conn = self._connect()
+        try:
+            conn.execute(
+                'INSERT INTO results (%s) VALUES (%s)'
+                % (', '.join(cols), ','.join('?' * len(cols))), vals)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_period(self, rowid, period_type, start, end, q=None, p=None, cop=None,
+                   method=None, buffer_s=None, dt_min=None, dt_max=None, **means):
+        """One stored sub-period with the caches `_insert_cycle_period_row` writes.
+
+        ``means`` names further cached ``cycle_periods`` columns by their own
+        name (``avg_t_db=7.9``, ``dtreturn_avg=0.1``) for the colour checks.
+        """
+        cols = ['entry_rowid', 'period_type', 'start_time', 'end_time',
+                'detection_method', 'buffer_s', 'avg_q_corr_wbuh', 'avg_p_corr_wbuh',
+                'avg_cop_corr_wbuh', 'dtreturn_min', 'dtreturn_max']
+        vals = [rowid, period_type, start, end,
+                method or webapp.GUIDELINE_DETECTION_METHOD,
+                self.buffer_s if buffer_s is None else buffer_s,
+                q, p, cop, dt_min, dt_max]
+        for key, value in means.items():
+            cols.append(key)
+            vals.append(value)
+        conn = self._connect()
+        try:
+            conn.execute(
+                'INSERT INTO cycle_periods (%s) VALUES (%s)'
+                % (', '.join(cols), ','.join('?' * len(cols))), vals)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def rows(self, kind='all'):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return webapp._load_period_statistics_rows(kind)
+
+    def one_row(self, rowid, kind='all'):
+        return next((r for r in self.rows(kind) if r['rowid'] == rowid), {})
+
+    def page(self, kind='all'):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.client.get('/period_statistics?kind=' + kind)
+
+
+def _guideline_defrost(h, rowid, cycle_type='defrost_cycle'):
+    """D 0…1200, H 1200…12000 as Apply / Save write them at buffer_min."""
+    h.add_entry(rowid, cycle_type=cycle_type)
+    h.add_period(rowid, 'defrost', 0.0, 1200.0, q=3.0, p=2.0, cop=1.5, dt_min=-4.0, dt_max=1.0)
+    h.add_period(rowid, 'heating', 1200.0, 12000.0, q=7.0, p=2.6, cop=2.7, dt_min=-0.5, dt_max=0.6)
+    # Eq/eval are stored too and stay off this page (Guideline Windows has them).
+    h.add_period(rowid, 'equilibrium', 1200.0, 4800.0, q=6.8, p=2.6, cop=2.6)
+    h.add_period(rowid, 'evaluation', 4800.0, 9000.0, q=7.2, p=2.6, cop=2.8)
+
+
+def test_period_stats_reads_the_saved_guideline_defrost():
+    with PeriodStatsHarness() as h:
+        _guideline_defrost(h, 1)
+        r = h.one_row(1, 'defrost')
+        check('the defrost parent is listed', bool(r), str(r.get('rowid')))
+        check('D comes from the guideline clock', r.get('D_avg_q_corr_wbuh') == 3.0,
+              str(r.get('D_avg_q_corr_wbuh')))
+        check('H comes from the guideline clock', r.get('H_avg_q_corr_wbuh') == 7.0,
+              str(r.get('H_avg_q_corr_wbuh')))
+        check('D duration is the saved span', r.get('D_duration_s') == 1200.0,
+              str(r.get('D_duration_s')))
+        check('H duration is the saved span', r.get('H_duration_s') == 10800.0,
+              str(r.get('H_duration_s')))
+        check('the engine used is the guideline one',
+              r.get('period_method') == webapp.GUIDELINE_DETECTION_METHOD,
+              str(r.get('period_method')))
+        check('D+H stays the full parent row', r.get('D+H_avg_q_corr_wbuh') == 6.0,
+              str(r.get('D+H_avg_q_corr_wbuh')))
+        check('no equilibrium or evaluation columns on this page',
+              not any(k.startswith(('equilibrium', 'evaluation', 'eq_', 'eval_')) for k in r),
+              str([k for k in r if 'eval' in k or 'equil' in k]))
+        check('the eq/eval clocks are not counted as splits here', r.get('n_periods') == 2,
+              str(r.get('n_periods')))
+
+
+def test_period_stats_on_off_uses_the_same_ten_minute_buffer():
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='on_off_cycle', test_cond='C', q=5.0)
+        # Guideline S + 10 min, exactly what Cycle Extract saves.
+        h.add_period(1, 'off', 0.0, 1200.0, q=0.4, p=0.1, cop=0.2)
+        h.add_period(1, 'on', 1200.0, 12000.0, q=6.5, p=2.4, cop=2.7)
+        # The old pipeline cut at the transition and cached the same parent at 0 s.
+        h.add_period(1, 'off', 0.0, 600.0, q=99.0, p=99.0, cop=99.0,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=0)
+        h.add_period(1, 'on', 600.0, 12000.0, q=99.0, p=99.0, cop=99.0,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=0)
+        r = h.one_row(1, 'on_off')
+        check('Off is read at the guideline buffer', r.get('Off_duration_s') == 1200.0,
+              str(r.get('Off_duration_s')))
+        check('On starts after the same buffer', r.get('On_duration_s') == 10800.0,
+              str(r.get('On_duration_s')))
+        check('the buffer=0 auto_pelec Off is not mixed in',
+              r.get('Off_avg_q_corr_wbuh') == 0.4, str(r.get('Off_avg_q_corr_wbuh')))
+        check('the buffer=0 auto_pelec On is not mixed in',
+              r.get('On_avg_q_corr_wbuh') == 6.5, str(r.get('On_avg_q_corr_wbuh')))
+        check('one engine only on that entry',
+              r.get('period_method') == webapp.GUIDELINE_DETECTION_METHOD,
+              str(r.get('period_method')))
+        check('two periods, not four', r.get('n_periods') == 2, str(r.get('n_periods')))
+
+
+def test_period_stats_lists_a_cycle_type_other_with_guideline_clocks():
+    with PeriodStatsHarness() as h:
+        _guideline_defrost(h, 1, cycle_type='other')
+        got_all = [r['rowid'] for r in h.rows('all')]
+        got_def = [r['rowid'] for r in h.rows('defrost')]
+        got_on = [r['rowid'] for r in h.rows('on_off')]
+        check("cycle_type 'other' with guideline D is on All", got_all == [1], str(got_all))
+        check("cycle_type 'other' with guideline D is on Defrost", got_def == [1], str(got_def))
+        check('it is not on On-Off', got_on == [], str(got_on))
+        r = h.one_row(1)
+        check('the tab follows the saved period types, not cycle_type',
+              r.get('cycle_family') == 'defrost' and r.get('cycle_type') == 'other',
+              f"{r.get('cycle_family')} / {r.get('cycle_type')}")
+        check('D is filled although Notes say nothing', r.get('D_avg_q_corr_wbuh') == 3.0,
+              str(r.get('D_avg_q_corr_wbuh')))
+
+
+def test_period_stats_without_any_clocks_is_na_not_zero():
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='defrost_cycle')
+        r = h.one_row(1)
+        check('the parent is still listed', bool(r), str(r.get('rowid')))
+        check('no splits means no periods', r.get('n_periods') == 0, str(r.get('n_periods')))
+        for key in ('D_avg_q_corr_wbuh', 'H_avg_q_corr_wbuh', 'D_duration_s', 'H_duration_s',
+                    'D_dtreturn_min', 'H_dtreturn_max'):
+            check(f'{key} is n/a, never 0', r.get(key) is None, repr(r.get(key)))
+        check('the full cycle is still the parent row', r.get('D+H_avg_q_corr_wbuh') == 6.0,
+              str(r.get('D+H_avg_q_corr_wbuh')))
+
+
+def test_period_stats_falls_back_to_the_old_cache_but_never_mixes():
+    with PeriodStatsHarness() as h:
+        # Old BAM row: auto_pelec only, defrost at 600 s.
+        h.add_entry(1, cycle_type='defrost_cycle')
+        h.add_period(1, 'defrost', 0.0, 600.0, q=2.0, p=1.9, cop=1.1,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=600)
+        h.add_period(1, 'heating', 600.0, 12000.0, q=6.9, p=2.5, cop=2.7,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=600)
+        # Old BAM row: auto_pelec on-off, cut at the transition (buffer 0).
+        h.add_entry(2, cycle_type='on_off_cycle', test_cond='C')
+        h.add_period(2, 'off', 0.0, 600.0, q=0.3, p=0.1, cop=0.2,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=0)
+        h.add_period(2, 'on', 600.0, 12000.0, q=6.4, p=2.4, cop=2.6,
+                     method=webapp.PERIOD_STATS_LEGACY_METHOD, buffer_s=0)
+        # Guideline clocks on row 1 must win over the legacy cache on the same row.
+        h.add_period(1, 'defrost', 0.0, 1200.0, q=3.0, p=2.0, cop=1.5)
+        h.add_period(1, 'heating', 1200.0, 12000.0, q=7.0, p=2.6, cop=2.7)
+
+        r1 = h.one_row(1)
+        check('guideline wins on a parent that has both',
+              r1.get('period_method') == webapp.GUIDELINE_DETECTION_METHOD,
+              str(r1.get('period_method')))
+        check('the legacy D is not unioned in', r1.get('D_avg_q_corr_wbuh') == 3.0,
+              str(r1.get('D_avg_q_corr_wbuh')))
+        check('the legacy D span is gone too', r1.get('D_duration_s') == 1200.0,
+              str(r1.get('D_duration_s')))
+        r2 = h.one_row(2)
+        check('a parent with only the old cache still shows Off/On',
+              r2.get('Off_avg_q_corr_wbuh') == 0.3 and r2.get('On_avg_q_corr_wbuh') == 6.4,
+              f"{r2.get('Off_avg_q_corr_wbuh')} / {r2.get('On_avg_q_corr_wbuh')}")
+        check('and says which engine that was',
+              r2.get('period_method') == webapp.PERIOD_STATS_LEGACY_METHOD,
+              str(r2.get('period_method')))
+
+
+def test_period_stats_continuous_shows_h_and_invents_no_d():
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='other')
+        h.add_period(1, 'heating', 0.0, 12000.0, q=6.6, p=2.5, cop=2.6)
+        r = h.one_row(1)
+        check('a continuous entry is on All', bool(r), str(r.get('rowid')))
+        check('H is filled', r.get('H_avg_q_corr_wbuh') == 6.6, str(r.get('H_avg_q_corr_wbuh')))
+        check('no D is invented', r.get('D_avg_q_corr_wbuh') is None and r.get('D_duration_s') is None,
+              f"{r.get('D_avg_q_corr_wbuh')} / {r.get('D_duration_s')}")
+        check('no Off is invented', r.get('Off_duration_s') is None, str(r.get('Off_duration_s')))
+        check('it is on neither kind tab',
+              [x['rowid'] for x in h.rows('defrost')] == [] and
+              [x['rowid'] for x in h.rows('on_off')] == [],
+              'continuous leaked into a kind tab')
+
+
+def test_period_stats_two_off_spans_union_into_off():
+    """A parent cut through standby: S at the start, heating, S again to the end.
+
+    Cycle Extract stores **two** ``off`` rows (§2.1.1). Off must be the union of
+    both, not the first one only, and the pieces show as Off1 / Off2.
+    """
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='on_off_cycle', test_cond='C', q=5.0)
+        h.add_period(1, 'off', 0.0, 1200.0, q=0.4, p=0.1, cop=0.2, dt_min=-3.0, dt_max=0.5)
+        h.add_period(1, 'on', 1200.0, 9600.0, q=6.5, p=2.4, cop=2.7, dt_min=-0.4, dt_max=0.6)
+        h.add_period(1, 'off', 9600.0, 12000.0, q=1.0, p=0.2, cop=0.4, dt_min=-5.0, dt_max=0.9)
+        r = h.one_row(1, 'on_off')
+        check('Off duration is both S spans summed, not the first only',
+              r.get('Off_duration_s') == 3600.0, str(r.get('Off_duration_s')))
+        check('Off1 is the opening S span', r.get('Off1_duration_s') == 1200.0,
+              str(r.get('Off1_duration_s')))
+        check('Off2 is the S span that runs to the parent end',
+              r.get('Off2_duration_s') == 2400.0, str(r.get('Off2_duration_s')))
+        check('On is the heating gap between them', r.get('On_duration_s') == 8400.0,
+              str(r.get('On_duration_s')))
+        # 0.4*1200 + 1.0*2400 = 2880 over 3600 s
+        check('Off Q is the duration-weighted mean of both spans',
+              abs((r.get('Off_avg_q_corr_wbuh') or 0) - 0.8) < 1e-9,
+              str(r.get('Off_avg_q_corr_wbuh')))
+        check('Off P is weighted too', abs((r.get('Off_avg_p_corr_wbuh') or 0) - (1/6)) < 1e-9,
+              str(r.get('Off_avg_p_corr_wbuh')))
+        check('Off COP is weighted too',
+              abs((r.get('Off_avg_cop_corr_wbuh') or 0) - (1.2/3.6)) < 1e-9,
+              str(r.get('Off_avg_cop_corr_wbuh')))
+        check('Off dT min is the lower of the two', r.get('Off_dtreturn_min') == -5.0,
+              str(r.get('Off_dtreturn_min')))
+        check('Off dT max is the higher of the two', r.get('Off_dtreturn_max') == 0.9,
+              str(r.get('Off_dtreturn_max')))
+        check('the pieces keep their own numbers',
+              r.get('Off1_avg_q_corr_wbuh') == 0.4 and r.get('Off2_avg_q_corr_wbuh') == 1.0,
+              f"{r.get('Off1_avg_q_corr_wbuh')} / {r.get('Off2_avg_q_corr_wbuh')}")
+        check('no On1 / On2 on a normal cut-through-S parent',
+              not any(k.startswith(('On1_', 'On2_')) for k in r),
+              str([k for k in r if k.startswith(('On1_', 'On2_'))]))
+        check('both off rows are counted', r.get('n_periods') == 3, str(r.get('n_periods')))
+        check('Off+On stays the full parent row', r.get('Off+On_avg_q_corr_wbuh') == 5.0,
+              str(r.get('Off+On_avg_q_corr_wbuh')))
+        groups = webapp._period_stat_prefixes_in_rows([r], 'on_off')
+        check('the group order is Off, Off1, On, Off2, Off+On',
+              groups == ['Off', 'Off1', 'On', 'Off2', 'Off+On'], str(groups))
+
+
+def test_period_stats_one_off_span_is_unchanged():
+    """The one-S parents that exist today must look exactly as they do today."""
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='on_off_cycle', test_cond='C', q=5.0)
+        h.add_period(1, 'off', 0.0, 1200.0, q=0.4, p=0.1, cop=0.2, dt_min=-3.0, dt_max=0.5)
+        h.add_period(1, 'on', 1200.0, 12000.0, q=6.5, p=2.4, cop=2.7)
+        r = h.one_row(1, 'on_off')
+        check('Off is the single saved span', r.get('Off_duration_s') == 1200.0,
+              str(r.get('Off_duration_s')))
+        check('Off keeps the stored numbers, not a weighted copy',
+              r.get('Off_avg_q_corr_wbuh') == 0.4, str(r.get('Off_avg_q_corr_wbuh')))
+        check('On is unchanged', r.get('On_duration_s') == 10800.0, str(r.get('On_duration_s')))
+        check('no Off1 / Off2 keys on a one-S parent',
+              not any(k.startswith(('Off1_', 'Off2_')) for k in r),
+              str([k for k in r if k.startswith(('Off1_', 'Off2_'))]))
+        groups = webapp._period_stat_prefixes_in_rows([r], 'on_off')
+        check('and no Off1 / Off2 column groups either',
+              groups == ['Off', 'On', 'Off+On'], str(groups))
+
+
+def test_period_stats_two_defrost_spans_still_union_into_d():
+    """No regression on the defrost branch this job mirrors."""
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='defrost_cycle', q=6.0)
+        h.add_period(1, 'defrost', 0.0, 1200.0, q=3.0, p=2.0, cop=1.5, dt_min=-4.0, dt_max=1.0)
+        h.add_period(1, 'heating', 1200.0, 9600.0, q=7.0, p=2.6, cop=2.7)
+        h.add_period(1, 'defrost', 9600.0, 12000.0, q=2.4, p=1.7, cop=1.2, dt_min=-6.0, dt_max=1.4)
+        r = h.one_row(1, 'defrost')
+        check('D duration is both spans summed', r.get('D_duration_s') == 3600.0,
+              str(r.get('D_duration_s')))
+        check('D1 is the opening span', r.get('D1_duration_s') == 1200.0,
+              str(r.get('D1_duration_s')))
+        check('D2 is the closing span', r.get('D2_duration_s') == 2400.0,
+              str(r.get('D2_duration_s')))
+        check('H is the gap only', r.get('H_duration_s') == 8400.0, str(r.get('H_duration_s')))
+        # 3.0*1200 + 2.4*2400 = 9360 over 3600 s
+        check('D Q is the duration-weighted mean',
+              abs((r.get('D_avg_q_corr_wbuh') or 0) - 2.6) < 1e-9,
+              str(r.get('D_avg_q_corr_wbuh')))
+        check('D dT min is the lower of the two', r.get('D_dtreturn_min') == -6.0,
+              str(r.get('D_dtreturn_min')))
+        check('D dT max is the higher of the two', r.get('D_dtreturn_max') == 1.4,
+              str(r.get('D_dtreturn_max')))
+        groups = webapp._period_stat_prefixes_in_rows([r], 'defrost')
+        check('the D group order is unchanged',
+              groups == ['D', 'D1', 'H', 'D2', 'D+H'], str(groups))
+
+
+def test_period_stats_page_has_no_buffer_what_if():
+    with PeriodStatsHarness() as h:
+        _guideline_defrost(h, 1)
+        resp = h.page('all')
+        body = resp.get_data(as_text=True)
+        check('the page renders', resp.status_code == 200, str(resp.status_code))
+        check('the Buffer (s) dropdown is gone',
+              'name="buffer_s"' not in body and 'Buffer (s)' not in body,
+              'buffer control still on the page')
+        check('no 900 / 1200 what-if offered',
+              '>900<' not in body and '>1200<' not in body, 'a what-if buffer is still offered')
+        check('the page points at the Cycle Extract clocks',
+              'Cycle Extract' in body, 'no pointer to the clock editor')
+        check('and says the buffer sits on D and on S',
+              'after D' in body and 'after S' in body, 'buffer wording missing')
+        check('the Notes drop/ramp line is gone from the page',
+              'drop</code> / <code>ramp' not in body, 'the Notes essay is back')
+        check('the toolbar no longer repeats the buffer sentence',
+              'not a choice on this page' not in body and '600 s)' not in body,
+              'the toolbar buffer line is back')
+        check('the guideline D row is on the page', 'defrost' in body, 'row missing')
+
+
+def test_period_stats_reads_only_the_store():
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    loader = _function_code(src, '_load_period_statistics_rows')
+    route = _function_code(src, 'period_statistics')
+    check('the loader derives no periods', '_generate_periods_for_entry' not in loader,
+          'the page would be a second derive')
+    check('the route derives no periods', '_generate_periods_for_entry' not in route, 'derive on a GET')
+    check('the loader filters on the detection method',
+          'GUIDELINE_DETECTION_METHOD' in loader, 'buffer_s only again')
+    check('the loader no longer selects parents by cycle_type alone',
+          'EXISTS' in loader, 'no join on the saved periods')
+    check('the route takes no buffer from the query string',
+          "request.args.get('buffer_s'" not in route, 'the what-if buffer is back')
+    check('BUFFER_OPTIONS is left to the dTreturn pipeline',
+          webapp.BUFFER_OPTIONS == [600, 900, 1200], str(webapp.BUFFER_OPTIONS))
+    check('the guideline buffer is buffer_min, not 0',
+          webapp._guideline_buffer_s() == 600, str(webapp._guideline_buffer_s()))
+    tpl = open(os.path.join(REPO, 'flask_app', 'templates', 'base.html'), encoding='utf-8').read()
+    check('dTreturn Insights is still in the nav', 'dtreturn_insights' in tpl,
+          'the old pipeline page was hidden')
+
+
+# ---------------------------------------------------------------------------
+# Wide-table chrome, and the Period Statistics load.
+#
+# Three pages, one pattern: an inner scroll box with visible xy bars, header
+# rows frozen with stacked `top` (cell level, never a sticky thead / tr) and the
+# identity columns frozen left. Period Statistics also stops doing one SQL per
+# parent and stops carrying a JSON copy of every row in the HTML. Templates are
+# read off disk; the load test uses the synthetic harness. No lab file.
+# ---------------------------------------------------------------------------
+
+
+def _template(name):
+    return open(os.path.join(REPO, 'flask_app', 'templates', name), encoding='utf-8').read()
+
+
+def _header_labels(html, row_start):
+    """The visible text of each `<th>` of one header row."""
+    row = html.split(row_start, 1)[1].split('</tr>', 1)[0]
+    cells = re.findall(r'<th[^>]*>(.*?)</th>', row, re.S)
+    return [re.sub(r'<[^>]+>', '', c).replace('&ndash;', '-').strip() for c in cells]
+
+
+class _SqlSpy:
+    """Counts the statements a loader sends, without changing what they do."""
+
+    def __init__(self, make):
+        self._make = make
+        self.sql = []
+
+    def __call__(self):
+        conn = self._make()
+        log = self.sql
+
+        class _Counted:
+            def execute(self, sql, *args, **kwargs):
+                log.append(sql)
+                return conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+        return _Counted()
+
+    def period_reads(self):
+        return [q for q in self.sql if 'FROM cycle_periods' in q]
+
+
+def _pstat_period_reads(n_parents):
+    """Load a page of `n_parents` defrost entries; return (n_reads, rows)."""
+    with PeriodStatsHarness() as h:
+        for rid in range(1, n_parents + 1):
+            _guideline_defrost(h, rid)
+        spy = _SqlSpy(h._connect)
+        webapp.get_db_connection = spy
+        try:
+            rows = h.rows('defrost')
+        finally:
+            webapp.get_db_connection = h._connect
+        return len(spy.period_reads()), rows
+
+
+def test_pstat_load_reads_the_periods_in_one_batch():
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('the per-parent period read is gone',
+          'def _period_statistics_periods(' not in src,
+          'the one-SQL-per-row helper is still there')
+    check('a batched read replaces it',
+          'def _period_statistics_periods_by_entry(' in src, 'no batched read')
+    loader = _function_code(src, '_load_period_statistics_rows')
+    check('the loader keys the periods in Python, not per row',
+          '_period_statistics_periods_by_entry(' in loader
+          and 'saved_by_entry' in loader and 'legacy_by_entry' in loader, loader[:400])
+
+    few, few_rows = _pstat_period_reads(3)
+    many, many_rows = _pstat_period_reads(30)
+    check('three parents cost a handful of period reads', few <= 4, str(few))
+    check('thirty parents cost exactly the same', many == few, '%s -> %s' % (few, many))
+    check('all thirty rows are listed', len(many_rows) == 30, str(len(many_rows)))
+
+    one = dict((k, v) for k, v in few_rows[0].items()
+               if k.startswith(('D_', 'H_', 'D+H_')))
+    check('the many-row pivot is the same D / H pivot',
+          all(dict((k, v) for k, v in r.items()
+                   if k.startswith(('D_', 'H_', 'D+H_'))) == one for r in many_rows),
+          str(one))
+    check('D still comes from the guideline clock', one.get('D_avg_q_corr_wbuh') == 3.0,
+          str(one.get('D_avg_q_corr_wbuh')))
+    check('H still comes from the guideline clock', one.get('H_avg_q_corr_wbuh') == 7.0,
+          str(one.get('H_avg_q_corr_wbuh')))
+    check('D+H still comes from the parent row', one.get('D+H_avg_q_corr_wbuh') == 6.0,
+          str(one.get('D+H_avg_q_corr_wbuh')))
+    check('D duration is still the saved span', one.get('D_duration_s') == 1200.0,
+          str(one.get('D_duration_s')))
+    check('H duration is still the saved span', one.get('H_duration_s') == 10800.0,
+          str(one.get('H_duration_s')))
+
+
+def test_pstat_template_is_a_scroll_box_with_dropdowns():
+    html = _template('period_statistics.html')
+    check('no JSON copy of the row on the <tr>', "data-row='" not in html,
+          'data-row is back on every row')
+    check('no per-column filter row',
+          'filter-row' not in html and 'placeholder="filter"' not in html,
+          'the per-column inputs are back')
+    check('only identity data-* is left on the row',
+          html.count('data-unit=') == 1 and html.count('data-test=') == 1
+          and html.count('data-cop=') == 1, 'identity data-* changed')
+
+    check('the table sits in an inner scroll box', 'pstat-table-scroll' in html)
+    box = html.split('.pstat-table-scroll {', 1)[1].split('}', 1)[0]
+    check('the box caps its width instead of growing with the table',
+          'max-width' in box, box)
+    check('it scrolls both ways inside the box',
+          'overflow-x: auto' in box and 'overflow-y: auto' in box, box)
+    check('the height is capped so the vertical bar exists', 'max-height' in box, box)
+    check('the bars are styled so they are usable',
+          '.pstat-table-scroll::-webkit-scrollbar { height:' in html
+          and 'scrollbar-color' in box, box)
+
+    check('the two header rows are stacked, not both at top: 0',
+          'tr.pstat-groups th {' in html
+          and 'top: var(--pstat-header-row-height' in html
+          and '.table th { background: #f8f9fa; position: sticky; top: 0;' not in html,
+          'the 2-row header still collapses onto top: 0')
+    check('the sticky is cell level, not a sticky thead or tr',
+          '#statsTable thead {' not in html and 'tr.pstat-groups {' not in html)
+
+    check('the freeze count is one number', webapp.PERIOD_STATS_FREEZE_COLUMNS == 12,
+          str(webapp.PERIOD_STATS_FREEZE_COLUMNS))
+    labels = _header_labels(html, '<tr class="pstat-metrics">')
+    check('rowid opens the table and clocks closes the frozen block',
+          labels[0] == 'rowid' and labels[11] == 'clocks', str(labels[:13]))
+    check('the header freezes rowid through clocks',
+          'pstat-freeze pstat-freeze-0">rowid' in html
+          and 'pstat-freeze pstat-freeze-11">clocks' in html, 'header freeze missing')
+    check('the rows freeze the same twelve columns',
+          'pstat-freeze-0">{{ r.rowid }}' in html
+          and 'pstat-freeze-11">{{ r.period_method' in html, 'row freeze missing')
+    check('the group row carries the frozen Entry block',
+          'pstat-freeze pstat-freeze-entry">Entry' in html)
+    check('the frozen block gets one left per column, not a style per cell',
+          "setProperty('--pstat-left-' + i" in html
+          and 'td.pstat-freeze-{{ i }} { left: var(--pstat-left-{{ i }}' in html)
+
+    for control in ('pstatFilterUnit', 'pstatFilterTest', 'pstatFilterCop'):
+        check(control + ' is a dropdown above the table',
+              '<select id="' + control + '"' in html)
+    check('there is a Clear filters control',
+          'Clear filters' in html and 'pstatClearFilters' in html)
+    filter_js = html.split('function pstatApplyFilters', 1)[1] \
+                    .split('function pstatClearFilters', 1)[0]
+    check('the filters only hide rows: no reload and no fetch',
+          'style.display' in filter_js and 'location' not in filter_js
+          and 'fetch(' not in filter_js, filter_js[:200])
+    check('the kind tabs stay',
+          all("kind='" + k + "'" in html for k in ('all', 'defrost', 'on_off')))
+    check('DataTables was not added', 'ataTable' not in html)
+
+    check('the intro still names the Cycle Extract clocks and both buffers',
+          'Cycle Extract' in html and 'after D' in html and 'after S' in html)
+    check('the intro still sends an empty row back to Cycle Extract',
+          'open that file on Cycle Extract' in html)
+    check('the Notes drop/ramp sentence is gone',
+          'drop</code> / <code>ramp' not in html, 'the Notes essay is back')
+    check('the toolbar buffer repeat is gone',
+          'not a choice on this page' not in html and 'cycle_periods.json' not in html,
+          'the toolbar repeat is back')
+
+
+def test_gw_template_help_is_short_and_the_entry_block_is_frozen():
+    html = _gw_html()
+    check('the database / cache essay is gone',
+          'Every number on this page comes out of the' not in html,
+          'the cache paragraph is still on the page')
+    check('the # essay is gone',
+          "is the entry's position in the open" not in html
+          and 'Download CSV</strong> writes the rows you can see' not in html,
+          'the # paragraph is still on the page')
+    check('one help paragraph is left, not three',
+          html.count('<p class="gw-help mb-2">') == 1,
+          str(html.count('<p class="gw-help mb-2">')))
+
+    first = html.split('<p class="gw-help mb-2">', 1)[1].split('</p>', 1)[0]
+    text = re.sub(r'<[^>]+>', '', first).replace('&mdash;', '-')
+    text = re.sub(r'\s+', ' ', text).strip()
+    sentences = [x for x in text.split('. ') if x.strip()]
+    check('the first paragraph is two or three sentences', 2 <= len(sentences) <= 3,
+          '%d: %s' % (len(sentences), text))
+    check('it still says the page is a read-only check of saved clocks',
+          'Read-only check' in text and 'saved' in text, text)
+    check('it still names the %, the mean deviations and eval dCOP',
+          '%' in text and 'mean deviations' in text and 'COP' in text, text)
+    check('it still sends unsaved proposals to Cycle Extract',
+          'Unsaved proposals do not appear here' in text
+          and 'save them on Cycle Extract first' in text, text)
+    check('what was dropped lives on the Compute button instead',
+          'never a 0 and never an old percentage' in html
+          and 'title="Every number on this page is read from the database' in html,
+          'the essentials are not on the button title')
+
+    check('the Entry block is ten columns wide', 'GW_FREEZE_COLS = 10' in html)
+    labels = _header_labels(html, '<tr class="gw-cols">')
+    check('# opens the table and Kind closes the frozen block',
+          labels[0] == '#' and labels[9] == 'Kind', str(labels[:11]))
+    check('the rows mark the frozen block',
+          "classList.add('gw-freeze', 'gw-freeze-' + c)" in html)
+    check('the header rows are marked the same way',
+          "cols.children[h].classList.add('gw-freeze', 'gw-freeze-' + h)" in html
+          and "groups.children[0].classList.add('gw-freeze', 'gw-freeze-entry')" in html)
+    check('the frozen block gets one left per column, not a style per cell',
+          "setProperty('--gw-left-' + i" in html
+          and '#gwTable td.gw-freeze-9 { left: var(--gw-left-9' in html)
+    check('the two header rows are stacked, not both at top: 0',
+          '#gwTable thead tr.gw-cols th {' in html
+          and 'top: var(--gw-header-row-height' in html,
+          'the header rows would collapse')
+    check('the existing scroll box was kept, not replaced by table-responsive',
+          'gw-table-scroll' in html
+          and 'table-responsive' not in html.split('id="gwTable"', 1)[0])
+
+
+def test_deviations_template_scrolls_inside_a_box_and_freezes_duration():
+    html = _template('deviations.html')
+    check('the main table sits in an inner scroll box',
+          'class="dev-table-scroll" id="deviationsTableScroll"' in html)
+    box = html.split('.dev-table-scroll {', 1)[1].split('}', 1)[0]
+    check('the box caps its width so the page stops growing sideways',
+          'max-width' in box, box)
+    check('it scrolls both ways inside the box',
+          'overflow-x: auto' in box and 'overflow-y: auto' in box, box)
+    check('the height is capped so the vertical bar exists', 'max-height' in box, box)
+    check('the bars are styled so they are usable',
+          '.dev-table-scroll::-webkit-scrollbar { height:' in html
+          and 'scrollbar-color' in box, box)
+
+    check('the column titles stay while scrolling down',
+          '#deviationsTable thead tr:first-child th {' in html
+          and 'top: var(--dev-header-row-height' in html,
+          'the two header rows still share top: 0')
+    check('the identity block is twelve columns wide', 'DEV_FREEZE_COLS = 12' in html)
+    labels = _header_labels(html, 'id="deviationsTable">')
+    check('File Name is inside the frozen block', labels[2] == 'File Name', str(labels[:4]))
+    check('the frozen block ends on Duration (s)', labels[11] == 'Duration (s)',
+          str(labels[:13]))
+    check('the cells are marked once and CSS gets one left per column',
+          "classList.add('dev-freeze', 'dev-freeze-' + c)" in html
+          and "setProperty('--dev-left-' + c" in html)
+
+    check('the badges were left alone',
+          all(c in html for c in ('badge-violation', 'badge-good', 'badge-warning')))
+    check('Calculate and Configure bands were left alone',
+          'Configure Deviation Bands' in html and 'update-dev-btn' in html)
+    check('the PD columns that stayed are all still there',
+          all(k in html for k in ('dev_db_percentage', 'dev_wb_percentage',
+                                  'dev_dtreturn_percentage',
+                                  'dev_flow_percentage')))
+    check('the Guideline Windows dropdowns were not copied here',
+          'gwFilter' not in html and 'gw-filters' not in html)
+    check('the per-column filter row this page already had is unchanged',
+          'class="column-filter"' in html and 'clearAllFilters()' in html)
+    check('DataTables was not added', 'ataTable' not in html)
+
+
+# ---------------------------------------------------------------------------
+# Hide / remove (§2.8 hide list, analyst 2026-09-19).
+#
+# Period Statistics drops **T_mean avgs** for good and puts the split spans
+# (D1 / D2, Off1 / Off2, On1 / On2) behind one checkbox that is off on every
+# load. Deviations **removes** the four parent individual Tsup columns, puts
+# the violation-count tail behind one checkbox, and loses two help boxes.
+# Both toggles are display only: the pivot, the Period Statistics CSV and the
+# stored ``dev_tsup_*`` columns are untouched, and neither writes a settings
+# file. Templates are read off disk; the pivot uses the synthetic harness.
+# ---------------------------------------------------------------------------
+
+
+def test_hide_pstat_drops_t_mean_avgs_and_keeps_t_mean():
+    keys = [k for k, _ in webapp.PERIOD_STAT_DISPLAY_METRICS]
+    labels = [lbl for _, lbl in webapp.PERIOD_STAT_DISPLAY_METRICS]
+    check('t_mean_from_avgs is off the display metrics',
+          't_mean_from_avgs' not in keys, str(keys))
+    check('and so is its label', 'T_mean avgs' not in labels, str(labels))
+    check('the logged T_mean stays',
+          'avg_t_mean_log' in keys and 'T_mean' in labels, str(labels))
+    check('dT min / avg / max stay',
+          all(k in keys for k in ('dtreturn_min', 'dtreturn_avg', 'dtreturn_max')),
+          str(keys))
+    check('the extra T / flow columns stay',
+          all(k in keys for k in ('avg_t_db', 'avg_t_wb', 'avg_ts_buh',
+                                  'avg_mass_flow', 'avg_volume_flow')), str(keys))
+
+    with PeriodStatsHarness() as h:
+        _guideline_defrost(h, 1)
+        rows = h.rows('defrost')
+        cols = webapp._period_stat_columns('defrost', rows)
+        ckeys = [c['key'] for c in cols]
+        check('no T_mean avgs column on any group',
+              not any(k.endswith('_t_mean_from_avgs') for k in ckeys),
+              str([k for k in ckeys if 'mean' in k]))
+        check('each group still carries T_mean',
+              'D_avg_t_mean_log' in ckeys and 'H_avg_t_mean_log' in ckeys,
+              str(ckeys[:6]))
+        body = h.page('defrost').get_data(as_text=True)
+        check('the rendered page has no T_mean avgs header',
+              'T_mean avgs' not in body and 't_mean_from_avgs' not in body,
+              'the mean-of-averages column is back on the page')
+
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('the insert still computes and stores the mean of averages',
+          "pst.get('t_mean_from_avgs')" in src, 'the SQLite write was removed')
+    check('the period read still selects it',
+          't_mean_from_avgs' in webapp.PERIOD_STATS_PERIOD_COLUMNS,
+          str(webapp.PERIOD_STATS_PERIOD_COLUMNS))
+
+
+def test_hide_pstat_split_spans_are_one_checkbox_not_a_dropped_pivot():
+    check('D1 / D2 / Off1 / Off2 / On1 / On2 are split groups',
+          all(webapp._period_stat_is_split_group(g)
+              for g in ('D1', 'D2', 'Off1', 'Off2', 'On1', 'On2')))
+    check('the unions and the full cycle are not',
+          not any(webapp._period_stat_is_split_group(g)
+                  for g in ('D', 'H', 'D+H', 'Off', 'On', 'Off+On')))
+
+    with PeriodStatsHarness() as h:
+        h.add_entry(1, cycle_type='defrost_cycle', q=6.0)
+        h.add_period(1, 'defrost', 0.0, 1200.0, q=3.0, p=2.0, cop=1.5)
+        h.add_period(1, 'heating', 1200.0, 9600.0, q=7.0, p=2.6, cop=2.7)
+        h.add_period(1, 'defrost', 9600.0, 12000.0, q=2.4, p=1.7, cop=1.2)
+        r = h.one_row(1, 'defrost')
+        check('the split spans are still pivoted',
+              r.get('D1_duration_s') == 1200.0 and r.get('D2_duration_s') == 2400.0,
+              '%s / %s' % (r.get('D1_duration_s'), r.get('D2_duration_s')))
+        cols = webapp._period_stat_columns('defrost', [r])
+        split = sorted({c['group'] for c in cols if c['split']})
+        kept = sorted({c['group'] for c in cols if not c['split']})
+        check('only the pieces are marked as split', split == ['D1', 'D2'], str(split))
+        check('D / H / D+H are never marked', kept == ['D', 'D+H', 'H'], str(kept))
+        body = h.page('defrost').get_data(as_text=True)
+        check('the split columns are rendered, only hidden',
+              'D1_duration_s' in body and 'D2_duration_s' in body,
+              'the split columns left the HTML')
+
+    html = _template('period_statistics.html')
+    check('one split-span checkbox, not two',
+          html.count('id="pstatShowSplitSpans"') == 1
+          and html.count('type="checkbox"') == 1,
+          str(html.count('type="checkbox"')))
+    check('there is no second T / flow checkbox',
+          'monitoring' not in html.lower() and 'Show extra' not in html,
+          'a second toggle appeared')
+    check('it is off on every load: the table renders hidden',
+          'table-bordered pstat-hide-split" id="statsTable"' in html
+          and 'box.checked = false' in html, 'the toggle would start on')
+    check('hiding is a class on the column group, not a dropped column',
+          '#statsTable.pstat-hide-split th.pstat-split' in html
+          and 'td.pstat-split { display: none; }' in html)
+    check('the group header and the cells carry the class',
+          'g in split_groups %} pstat-split' in html
+          and 'col.split %} pstat-split' in html)
+    check('the toggle writes no settings file',
+          'column_visibility' not in html and 'toggle_monitoring_columns' not in html
+          and 'localStorage' not in html, 'the toggle persists something')
+    toggle_js = html.split('function pstatApplySplitSpans', 1)[1][:500]
+    check('the freeze is remeasured after a toggle',
+          'pstatSyncFreeze();' in toggle_js, toggle_js[:200])
+    # The export walks `tr.cells` against the full label list, so a hidden cell
+    # is still written: the toggle must not reach into the CSV.
+    export_js = html.split("getElementById('exportCsvBtn')", 1)[1].split('});', 1)[0]
+    check('the CSV still writes every column',
+          'pstatLabels' in html and "map(attribute='label')" in html
+          and 'pstat-split' not in export_js and 'hide-split' not in export_js,
+          export_js[:200])
+
+
+def test_hide_deviations_removes_the_individual_tsup_columns():
+    html = _template('deviations.html')
+    for gone in ('dev_tsup_outside_count', 'dev_tsup_percentage',
+                 'dev_max_tsup_pos', 'dev_max_tsup_neg'):
+        check(gone + ' is off the Deviations table', gone not in html, gone + ' is back')
+    labels = _header_labels(html, 'id="deviationsTable">')
+    for gone in ('Tsup Violations', 'Tsup %', 'Max Tsup'):
+        check('no "%s" header' % gone,
+              not any(lbl.startswith(gone) for lbl in labels), str(labels))
+
+    check('Mean Tsup Dev (K) stays on the table',
+          'Mean Tsup Dev (K)' in labels, str(labels))
+    check('Mean Tsup +/- (K) stays in Configure',
+          'config_mean_tsup_k' in html and 'Mean Tsup' in html)
+    check('the Tsup mean plot stays',
+          'response.image_tsup' in html and 'Tsup (mean)' in html)
+    check('Q stays', 'mean_q_dev_kw' in html and 'mean_q_dev_pct' in html)
+    check('parent dTreturn columns stay',
+          'dev_dtreturn_outside_count' in html and 'dev_dtreturn_percentage' in html)
+
+    check('Supply Temp (Tsup) is off the Transient operation config',
+          'config_Tsup_value' not in html and 'Supply Temp (Tsup)' not in html)
+    check('the Tsup row of the % colouring table is gone',
+          'config_tsup_pct_red' not in html and 'config_tsup_pct_yellow' not in html
+          and 'config_tsup_violations_red' not in html)
+    check('Save posts the stored Tsup band back unchanged',
+          'DEV_STORED_TSUP' in html
+          and 'value: DEV_STORED_TSUP.value' in html
+          and 'tsup_pct_red: DEV_STORED_TSUP.pct_red' in html
+          and 'tsup_violations_red: DEV_STORED_TSUP.violations_red' in html,
+          'the form would blank the stored Tsup keys')
+    check('and Save no longer requires a Tsup input',
+          'isNaN(formData.Tsup.value)' not in html, 'validation still wants the input')
+
+    # Removing the columns from the page must not remove them from SQLite:
+    # `init_deviation_columns` still declares them and Calculate still writes
+    # them (the generic Manage Columns delete is not this).
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('init_deviation_columns still declares the dev_tsup_* columns',
+          all(("'%s'" % k) in src for k in
+              ('dev_tsup_outside_count', 'dev_tsup_percentage',
+               'dev_max_tsup_pos', 'dev_max_tsup_neg')),
+          'a dev_tsup_* column left the schema')
+    check('Calculate still writes them',
+          'dev_tsup_outside_count = ?' in src and 'dev_tsup_percentage = ?' in src
+          and 'dev_max_tsup_pos = ?' in src, 'the Calculate write was removed')
+    check('nothing drops a dev_tsup_* column',
+          not any(('DROP COLUMN ' + k) in src.upper()
+                  for k in ('DEV_TSUP_OUTSIDE_COUNT', 'DEV_TSUP_PERCENTAGE',
+                            'DEV_MAX_TSUP_POS', 'DEV_MAX_TSUP_NEG')),
+          'a dev_tsup_* column is dropped in code')
+
+
+def test_hide_deviations_tail_is_one_checkbox_and_actions_stays():
+    html = _template('deviations.html')
+    check('one extra-columns checkbox', html.count('id="devShowExtraColumns"') == 1)
+    check('it is off on every load: the table renders hidden',
+          'table-hover dev-hide-extra" id="deviationsTable"' in html
+          and 'extraBox.checked = false' in html, 'the toggle would start on')
+    check('hiding is a class, not a dropped column',
+          '#deviationsTable.dev-hide-extra th.dev-extra' in html
+          and 'td.dev-extra { display: none; }' in html)
+    check('the toggle writes no settings file',
+          'column_visibility' not in html and 'toggle_monitoring_columns' not in html
+          and 'localStorage' not in html, 'the toggle persists something')
+    check('the freeze is remeasured after a toggle',
+          'devSyncFreeze();' in html.split('function devApplyExtraColumns', 1)[1][:500])
+
+    header = html.split('id="deviationsTable">', 1)[1].split('</tr>', 1)[0]
+    cells = re.findall(r'(<th\b[^>]*>)(.*?)</th>', header, re.S)
+    labels = [re.sub(r'<[^>]+>', ' ', c).strip() for _, c in cells]
+    extra = [i for i, (tag, _) in enumerate(cells) if 'dev-extra' in tag]
+    check('the hidden block opens on Total Points',
+          labels[extra[0]].startswith('Total Points'), str(labels[extra[0]]))
+    check('and closes on Avg Timestep (s)',
+          labels[extra[-1]].startswith('Avg Timestep (s)'), str(labels[extra[-1]]))
+    check('the block is contiguous',
+          extra == list(range(extra[0], extra[-1] + 1)), str(extra))
+    check('Actions comes after it and stays visible',
+          labels[-1] == 'Actions' and 'dev-extra' not in cells[-1][0], str(labels[-4:]))
+    stay = ('#', 'File Name', 'Duration (s)', 'COPCorrwBUH', 'Cop Carnot Corr',
+            'Test Condition', 'Mean DB Dev (K)', 'Mean WB Dev (K)',
+            'Mean Tsup Dev (K)', 'Mean Tmean Dev (K)', 'Mean Q dev (kW)',
+            'Mean Q dev (%)', 'Mean flow dev (%)')
+    hidden_names = {labels[i] for i in extra}
+    check('nothing the analyst kept is hidden',
+          not any(name in hidden_names for name in stay),
+          str(sorted(hidden_names & set(stay))))
+    check('the frozen block is untouched: still twelve, still Duration (s)',
+          'DEV_FREEZE_COLS = 12' in html and labels[11] == 'Duration (s)',
+          str(labels[:13]))
+
+    # Header, filter row and body row stay the same width, and every remaining
+    # per-column filter still points at the column it filters: removing four
+    # columns from the middle renumbers everything after them.
+    filt = html.split('<tr class="filter-row">', 1)[1].split('</tr>', 1)[0]
+    fcells = re.findall(r'<th\b[^>]*>.*?</th>', filt, re.S)
+    body = html.split('id="deviationsTable">', 1)[1].split('<tbody>', 1)[1] \
+               .split('</tbody>', 1)[0]
+    tds = re.findall(r'(?m)^\s*<td\b[^>]*>', body)
+    check('header, filter row and body row are the same width',
+          len(cells) == len(fcells) == len(tds),
+          '%d / %d / %d' % (len(cells), len(fcells), len(tds)))
+    for i, cell in enumerate(fcells):
+        m = re.search(r'data-column="(\d+)"', cell)
+        if m and int(m.group(1)) != i:
+            check('filter %d points at its own column' % i, False,
+                  '%s on column %d (%s)' % (m.group(1), i, labels[i]))
+    check('every remaining filter points at its own column',
+          all(int(m.group(1)) == i
+              for i, cell in enumerate(fcells)
+              for m in [re.search(r'data-column="(\d+)"', cell)] if m),
+          'a filter is off by the removed columns')
+
+
+def test_hide_deviations_copy_says_what_the_page_is():
+    html = _template('deviations.html')
+    check('the Database Relationship box is gone',
+          'Database Relationship' not in html and 'Same Database' not in html
+          and 'Persistent Storage' not in html)
+    check('the wetbulb / RH paragraph is gone',
+          'T_outdoor (WB)' not in html and 'relative humidity data instead' not in html)
+    intro = html.split('Analyze temperature deviations from setpoints', 1)[1] \
+                .split('</p>', 1)[0]
+    text = re.sub(r'<[^>]+>', '', intro)
+    check('one extra sentence says this page is the full-cycle parent check',
+          'full-cycle parent' in text, text.strip())
+    check('and it sends interval scores to Guideline Windows',
+          'Guideline Windows' in text and 'interval' in text.lower(), text.strip())
+    check('Filtering Help may stay', 'Filtering Help' in html)
+    check('Calculate and Configure were not restyled',
+          'Calculate Statistics' in html and 'Configure Deviation Bands' in html
+          and 'update-dev-btn' in html)
+
+
+# ---------------------------------------------------------------------------
+# Mean-band colour (§2.8, locked 2026-09-19).
+#
+# Period Statistics colours the **mean** it already shows: green inside the
+# draft mean band, red outside, two colours and no yellow. The map is locked
+# per column group, and the one that is easy to get wrong is **Ts Buh**:
+# Interval H ``mean_tsup_k`` is the Guideline Windows *H mean Tsup* column, so
+# H / On Ts Buh stays plain and only D+H / Off+On Ts Buh is the H+D mean outlet
+# ±0.5 K. dT **avg** is coloured, dT min / max never are. A missing mean, a
+# missing setpoint and a variable-flow row all end uncoloured, never red.
+#
+# Guideline Windows hides its three mean-deviation groups behind one
+# display-only checkbox, off on every load; the individual %, the clock times
+# and eval ΔCOP are never hidden.
+#
+# The colour decision is a pure function, so these checks hand it numbers.
+# Nothing here reads a workbook or a lab file.
+# ---------------------------------------------------------------------------
+
+#: A fixed-flow unit with every setpoint known: volume flow set 1.0 m³/h,
+#: dry-bulb 7 °C (wet-bulb 6), supply 45 °C, Table 3 mean 40 °C, Qset 5 kW.
+COLOUR_SETPOINTS = {
+    'db': 7.0, 'wb': 6.0, 'tsup': 45.0, 'tmean': 40.0, 'q_set': 5.0,
+    'flow_set': 1.0, 'flow_set_type': 'volume', 'variable_flow': False,
+}
+
+
+def _colour(group, metric, value, setpoints=None, bands=None):
+    return webapp._period_stat_cell_colour(
+        group, metric, value,
+        COLOUR_SETPOINTS if setpoints is None else setpoints,
+        webapp._period_stat_colour_bands() if bands is None else bands)
+
+
+def _colour_cls(group, metric, value, setpoints=None):
+    return _colour(group, metric, value, setpoints)[0]
+
+
+IN = 'pstat-in-band'
+OUT = 'pstat-out-band'
+
+
+def test_colour_map_is_the_locked_table():
+    b = webapp._period_stat_colour_bands()
+    check('H mean DB is the interval 0.3 K, not the parent 0.6 K',
+          b['H']['db'] == 0.3, str(b['H']))
+    check('H mean WB is 0.4 K', b['H']['wb'] == 0.4, str(b['H']))
+    check('H dT avg is the interval mean inlet 0.3 K',
+          b['H']['dtreturn'] == 0.3, str(b['H']))
+    check('H flow is 1 % of set', b['H']['flow'] == 1.0, str(b['H']))
+    check('D mean DB is 1.5 K and WB 1.0 K',
+          b['D']['db'] == 1.5 and b['D']['wb'] == 1.0, str(b['D']))
+    check('S mean DB / WB are 0.6 K', b['S']['db'] == 0.6 and b['S']['wb'] == 0.6, str(b['S']))
+    check('S flow is 2.5 % of set', b['S']['flow'] == 2.5, str(b['S']))
+    check('the parent row is Ts Buh 0.5 K, T_mean 0.5 K, Q 5 %',
+          b['parent'] == {'tsup': 0.5, 'tmean': 0.5, 'q': 5.0}, str(b['parent']))
+    check('the parent row carries no DB band at all',
+          'db' not in b['parent'] and 'wb' not in b['parent'], str(b['parent']))
+
+    check('On reads the H row and Off reads the S row',
+          webapp._period_stat_colour_row('On') == 'H'
+          and webapp._period_stat_colour_row('Off') == 'S',
+          '%s / %s' % (webapp._period_stat_colour_row('On'),
+                       webapp._period_stat_colour_row('Off')))
+    check('the split pieces read their own interval',
+          [webapp._period_stat_colour_row(g) for g in ('D1', 'D2', 'Off1', 'Off2', 'On1', 'On2')]
+          == ['D', 'D', 'S', 'S', 'H', 'H'],
+          str([webapp._period_stat_colour_row(g) for g in ('D1', 'Off1', 'On1')]))
+    check('the full cycle is its own row',
+          webapp._period_stat_colour_row('D+H') == 'parent'
+          and webapp._period_stat_colour_row('Off+On') == 'parent')
+
+
+def test_colour_ts_buh_is_never_coloured_on_h_or_on():
+    check('H Ts Buh has no quantity in the map',
+          webapp._period_stat_colour_quantity('H', 'avg_ts_buh') is None)
+    check('On Ts Buh has no quantity in the map',
+          webapp._period_stat_colour_quantity('On', 'avg_ts_buh') is None)
+    check('D and S Ts Buh have none either',
+          webapp._period_stat_colour_quantity('D', 'avg_ts_buh') is None
+          and webapp._period_stat_colour_quantity('Off1', 'avg_ts_buh') is None)
+    for group in ('H', 'On', 'On1', 'D', 'D2', 'S', 'Off'):
+        check('%s Ts Buh stays a plain cell' % group,
+              _colour(group, 'avg_ts_buh', 48.0) == ('', ''),
+              str(_colour(group, 'avg_ts_buh', 48.0)))
+    check('the H interval mean Tsup key is still the Guideline Windows column',
+          webapp._mean_dev_half(
+              (webapp.load_interval_deviations_config().get('intervals') or {}).get('H'),
+              'tsup') == 0.5
+          and 'tsup' in webapp.MEAN_DEV_QUANTITIES['H'],
+          'interval_deviations.json H mean_tsup_k was changed')
+    check('and it is not what this page reads',
+          'tsup' not in webapp._period_stat_colour_bands()['H'],
+          str(webapp._period_stat_colour_bands()['H']))
+
+    # D+H is where the outlet mean does belong: H+D mean Tsup ±0.5 K.
+    check('D+H Ts Buh 0.4 K above set is green',
+          _colour_cls('D+H', 'avg_ts_buh', 45.4) == IN)
+    check('D+H Ts Buh 0.6 K above set is red',
+          _colour_cls('D+H', 'avg_ts_buh', 45.6) == OUT)
+    check('Off+On Ts Buh reads the same band',
+          _colour_cls('Off+On', 'avg_ts_buh', 45.6) == OUT)
+
+
+def test_colour_temperatures_use_their_own_interval_band():
+    check('H T_db 0.25 K off set is green', _colour_cls('H', 'avg_t_db', 7.25) == IN)
+    check('H T_db 0.35 K off set is red (0.3, not the parent 0.6)',
+          _colour_cls('H', 'avg_t_db', 7.35) == OUT,
+          str(_colour('H', 'avg_t_db', 7.35)))
+    check('the H hover names the band it was read against',
+          '±0.3 K' in _colour('H', 'avg_t_db', 7.35)[1],
+          _colour('H', 'avg_t_db', 7.35)[1])
+    check('On T_db follows H', _colour_cls('On', 'avg_t_db', 7.35) == OUT)
+    check('H T_wb uses 0.4 K',
+          _colour_cls('H', 'avg_t_wb', 6.35) == IN and _colour_cls('H', 'avg_t_wb', 6.45) == OUT)
+
+    check('D T_db 1.4 K off set is green', _colour_cls('D', 'avg_t_db', 8.4) == IN)
+    check('D T_db 1.6 K off set is red (1.5)', _colour_cls('D', 'avg_t_db', 8.6) == OUT)
+    check('D1 / D2 read the same D band when the checkbox reveals them',
+          _colour_cls('D1', 'avg_t_db', 8.4) == IN and _colour_cls('D2', 'avg_t_db', 8.6) == OUT)
+    check('D T_wb uses 1.0 K',
+          _colour_cls('D', 'avg_t_wb', 6.9) == IN and _colour_cls('D', 'avg_t_wb', 7.1) == OUT)
+
+    check('S T_db uses 0.6 K',
+          _colour_cls('S', 'avg_t_db', 7.5) == IN and _colour_cls('S', 'avg_t_db', 7.7) == OUT)
+    check('Off1 / Off2 read the same S band',
+          _colour_cls('Off1', 'avg_t_db', 7.5) == IN and _colour_cls('Off2', 'avg_t_db', 7.7) == OUT)
+
+    check('D+H T_db has no band at all (H+D mean DB is a draft dash)',
+          _colour('D+H', 'avg_t_db', 99.0) == ('', ''), str(_colour('D+H', 'avg_t_db', 99.0)))
+    check('the parent mean DB 0.6 K did not leak onto D+H',
+          webapp.load_permissible_deviations().get('mean_db_k') == 0.6
+          and _colour_cls('D+H', 'avg_t_db', 7.5) == '',
+          'scatter / parent mean DB reached this page')
+
+
+def test_colour_dt_avg_only_and_only_on_h():
+    check('H dT avg 0.25 K is green', _colour_cls('H', 'dtreturn_avg', 0.25) == IN)
+    check('H dT avg -0.35 K is red', _colour_cls('H', 'dtreturn_avg', -0.35) == OUT)
+    check('the hover says it is read against 0 K',
+          '0 K' in _colour('H', 'dtreturn_avg', -0.35)[1],
+          _colour('H', 'dtreturn_avg', -0.35)[1])
+    check('On dT avg follows H', _colour_cls('On', 'dtreturn_avg', -0.35) == OUT)
+    for group in ('H', 'On', 'D', 'S', 'Off', 'D+H', 'Off+On'):
+        check('%s dT min is never coloured' % group,
+              _colour(group, 'dtreturn_min', -4.0) == ('', ''))
+        check('%s dT max is never coloured' % group,
+              _colour(group, 'dtreturn_max', 4.0) == ('', ''))
+    for group in ('D', 'D1', 'S', 'Off', 'D+H', 'Off+On'):
+        check('%s dT avg is not coloured either' % group,
+              _colour(group, 'dtreturn_avg', -4.0) == ('', ''))
+
+
+def test_colour_flow_follows_the_stored_set_type():
+    check('S volume flow 2 % above set is green',
+          _colour_cls('S', 'avg_volume_flow', 1.02) == IN)
+    check('S volume flow 3 % above set is red (2.5 %)',
+          _colour_cls('S', 'avg_volume_flow', 1.03) == OUT,
+          str(_colour('S', 'avg_volume_flow', 1.03)))
+    check('H flow is the tighter 1 %',
+          _colour_cls('H', 'avg_volume_flow', 1.005) == IN
+          and _colour_cls('H', 'avg_volume_flow', 1.02) == OUT)
+    check('the flow hover is in per cent of set',
+          '% of set' in _colour('H', 'avg_volume_flow', 1.02)[1],
+          _colour('H', 'avg_volume_flow', 1.02)[1])
+
+    cls, why = _colour('S', 'avg_mass_flow', 1.03)
+    check('the column that does not match the stored set type stays plain',
+          cls == '' and 'volume flow' in why, '%r / %r' % (cls, why))
+    mass = dict(COLOUR_SETPOINTS, flow_set_type='mass')
+    check('with a mass set it is m_flow that is coloured',
+          _colour_cls('S', 'avg_mass_flow', 1.03, mass) == OUT
+          and _colour_cls('S', 'avg_volume_flow', 1.03, mass) == '',
+          str(_colour('S', 'avg_volume_flow', 1.03, mass)))
+
+    var = dict(COLOUR_SETPOINTS, variable_flow=True)
+    for metric in ('avg_volume_flow', 'avg_mass_flow'):
+        cls, why = _colour('H', metric, 1.03, var)
+        check('variable flow leaves %s uncoloured with a reason' % metric,
+              cls == '' and 'variable-flow' in why, '%r / %r' % (cls, why))
+    check('D has no flow band at all',
+          _colour('D', 'avg_volume_flow', 9.9) == ('', ''))
+
+    none_set = dict(COLOUR_SETPOINTS, flow_set=None, flow_set_type=None)
+    cls, why = _colour('S', 'avg_volume_flow', 1.03, none_set)
+    check('a missing flow set is uncoloured, not red',
+          cls == '' and 'no flow set' in why, '%r / %r' % (cls, why))
+
+
+def test_colour_parent_q_and_t_mean():
+    check('D+H Q 4 % above Qset is green',
+          _colour_cls('D+H', 'avg_q_corr_wbuh', 5.2) == IN)
+    check('D+H Q 6 % below Qset is red (5 %)',
+          _colour_cls('D+H', 'avg_q_corr_wbuh', 4.7) == OUT,
+          str(_colour('D+H', 'avg_q_corr_wbuh', 4.7)))
+    check('Q on the interval groups is not coloured',
+          all(_colour(g, 'avg_q_corr_wbuh', 4.7) == ('', '')
+              for g in ('H', 'On', 'D', 'D1', 'S', 'Off')))
+    no_q = dict(COLOUR_SETPOINTS, q_set=None)
+    cls, why = _colour('D+H', 'avg_q_corr_wbuh', 4.7, no_q)
+    check('no Qset is uncoloured, not red', cls == '' and 'Qset' in why, '%r / %r' % (cls, why))
+
+    cls, why = _colour('D+H', 'avg_t_mean_log', 40.4)
+    check('a fixed-flow parent leaves T_mean uncoloured with a reason',
+          cls == '' and 'fixed-flow' in why, '%r / %r' % (cls, why))
+    var = dict(COLOUR_SETPOINTS, variable_flow=True)
+    check('a variable-flow parent colours T_mean at 0.5 K',
+          _colour_cls('D+H', 'avg_t_mean_log', 40.4, var) == IN
+          and _colour_cls('D+H', 'avg_t_mean_log', 40.6, var) == OUT,
+          str(_colour('D+H', 'avg_t_mean_log', 40.6, var)))
+    check('T_mean on the interval groups is not coloured',
+          all(_colour(g, 'avg_t_mean_log', 40.6, var) == ('', '')
+              for g in ('H', 'On', 'D', 'S', 'Off')))
+
+
+def test_colour_missing_numbers_stay_plain():
+    for metric in ('avg_t_db', 'avg_volume_flow', 'dtreturn_avg'):
+        check('a missing mean is plain, never red (%s)' % metric,
+              _colour('H', metric, None) == ('', ''), str(_colour('H', metric, None)))
+    no_db = dict(COLOUR_SETPOINTS, db=None, wb=None)
+    cls, why = _colour('H', 'avg_t_db', 7.9, no_db)
+    check('a missing outdoor setpoint is uncoloured with a reason',
+          cls == '' and 'no outdoor setpoint' in why, '%r / %r' % (cls, why))
+    check('and it is not scored as 0', '0.00' not in why, why)
+    no_tsup = dict(COLOUR_SETPOINTS, tsup=None)
+    cls, why = _colour('D+H', 'avg_ts_buh', 48.0, no_tsup)
+    check('a missing supply setpoint is uncoloured with a reason',
+          cls == '' and 'no supply setpoint' in why, '%r / %r' % (cls, why))
+    check('duration, P and COP are never coloured',
+          all(_colour(g, m, 9.9) == ('', '')
+              for g in ('H', 'On', 'D', 'S', 'Off', 'D+H', 'Off+On')
+              for m in ('duration_s', 'avg_p_corr_wbuh', 'avg_cop_corr_wbuh')))
+    check('there is no third colour',
+          set(webapp._period_stat_colour_bands()) == {'H', 'D', 'S', 'parent'}
+          and IN != OUT)
+
+
+def test_colour_pstat_page_paints_the_cell_that_is_already_there():
+    fixed = dict(COLOUR_SETPOINTS)
+    saved = webapp._period_stat_setpoints
+    webapp._period_stat_setpoints = lambda entry, conn=None, cache=None: dict(fixed)
+    try:
+        with PeriodStatsHarness() as h:
+            # D+H: Ts Buh 48 °C (set 45 -> red), Q 6 kW (Qset 5 -> red).
+            h.add_entry(1, cycle_type='defrost_cycle', q=6.0, avg_t_sup_buh=48.0,
+                        avg_t_db=7.1, avg_t_mean_log=40.2)
+            h.add_period(1, 'defrost', 0.0, 1200.0, q=3.0, p=2.0, cop=1.5,
+                         avg_t_db=8.0, avg_ts_buh=30.0, dtreturn_min=-4.0)
+            h.add_period(1, 'heating', 1200.0, 12000.0, q=7.0, p=2.6, cop=2.7,
+                         avg_t_db=7.9, avg_ts_buh=48.0, dtreturn_avg=0.1,
+                         dtreturn_min=-4.0, dtreturn_max=4.0)
+            r = h.one_row(1, 'defrost')
+            c = r.get('colours') or {}
+            check('H T_db 0.9 K off set is red', (c.get('H_avg_t_db') or {}).get('cls') == OUT,
+                  str(c.get('H_avg_t_db')))
+            check('D T_db 1.0 K off set is green', (c.get('D_avg_t_db') or {}).get('cls') == IN,
+                  str(c.get('D_avg_t_db')))
+            check('H dT avg inside 0.3 K is green',
+                  (c.get('H_dtreturn_avg') or {}).get('cls') == IN, str(c.get('H_dtreturn_avg')))
+            check('H Ts Buh is not in the colour map at all',
+                  'H_avg_ts_buh' not in c and 'D_avg_ts_buh' not in c,
+                  str([k for k in c if 'ts_buh' in k]))
+            check('D+H Ts Buh is red against the H+D mean outlet band',
+                  (c.get('D+H_avg_ts_buh') or {}).get('cls') == OUT,
+                  str(c.get('D+H_avg_ts_buh')))
+            check('D+H Q is red against Qset',
+                  (c.get('D+H_avg_q_corr_wbuh') or {}).get('cls') == OUT,
+                  str(c.get('D+H_avg_q_corr_wbuh')))
+            check('D+H T_db carries no colour', 'D+H_avg_t_db' not in c,
+                  str(c.get('D+H_avg_t_db')))
+            check('dT min / max carry no colour',
+                  not any(k.endswith(('dtreturn_min', 'dtreturn_max')) for k in c),
+                  str([k for k in c if 'dtreturn' in k]))
+            check('the mean itself is untouched', r.get('H_avg_t_db') == 7.9,
+                  str(r.get('H_avg_t_db')))
+
+            body = h.page('defrost').get_data(as_text=True)
+            check('both colours reach the page', IN in body and OUT in body)
+            check('the mean is still printed in the cell', '7.900' in body)
+            check('the hover names the deviation and the band',
+                  'draft mean band' in body and '±0.3 K' in body)
+            check('the Ts Buh column is still on the page',
+                  '>Ts Buh<' in body, 'the Ts Buh header was dropped')
+    finally:
+        webapp._period_stat_setpoints = saved
+
+
+def test_colour_pstat_template_and_csv():
+    html = _template('period_statistics.html')
+    check('the two colour classes are defined',
+          '.pstat-in-band {' in html and '.pstat-out-band {' in html)
+    check('there is no third colour and no half-limit step',
+          'pstat-yellow' not in html and 'pstat-amber' not in html
+          and 'pstat-warn' not in html
+          and len(set(re.findall(r'\.pstat-\w+-band \{ color: (#[0-9a-fA-F]{6})', html))) == 2,
+          str(set(re.findall(r'\.pstat-\w+-band \{ color: (#[0-9a-fA-F]{6})', html))))
+    check('the class and the hover come from the row, not the template',
+          '{% if c and c.cls %} {{ c.cls }}{% endif %}' in html
+          and '{% if c and c.title %} title="{{ c.title }}"{% endif %}' in html)
+    check('the cell still prints the stored mean',
+          "{{ '%.3f'|format(v) }}" in html and "{{ '%.0f'|format(v) }}" in html)
+    check('no new checkbox was added to this page',
+          html.count('type="checkbox"') == 1, str(html.count('type="checkbox"')))
+    check('the split-span toggle is untouched',
+          'id="pstatShowSplitSpans"' in html and 'pstat-hide-split' in html)
+    export_js = html.split("getElementById('exportCsvBtn')", 1)[1].split('});', 1)[0]
+    check('the CSV is the text of the cells, with no colour in it',
+          'pstat-in-band' not in export_js and 'pstat-out-band' not in export_js
+          and 'pstatCellText' in export_js, export_js[:200])
+    check('nothing is persisted',
+          'column_visibility' not in html and 'localStorage' not in html)
+
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    loader = _function_code(src, '_load_period_statistics_rows')
+    check('the bands are read once per page, not per row',
+          loader.count('_period_stat_colour_bands()') == 1, str(loader.count('_period_stat_colour_bands()')))
+    check('the setpoints are cached per unit x condition',
+          'setpoint_cache' in loader and '_period_stat_setpoints(e, conn, setpoint_cache)' in loader,
+          loader[-400:])
+    check('the colour reads no score cache and no workbook',
+          'guideline_window_scores' not in loader and '_read_excel_sheet' not in loader,
+          'Period Statistics reached for another source')
+
+
+def test_colour_gw_mean_groups_are_one_checkbox():
+    html = _gw_html()
+    check('one mean-deviation checkbox', html.count('id="gwShowMeanDevs"') == 1,
+          str(html.count('id="gwShowMeanDevs"')))
+    check('it is named for what it shows', 'Show mean deviations' in html)
+    check('it is off on every load: the table renders hidden',
+          'gw-hide-mean" id="gwTable"' in html and 'box.checked = false' in html,
+          'the toggle would start on')
+    check('hiding is a class on the group, not a dropped column',
+          '#gwTable.gw-hide-mean th.gw-mean-dev' in html
+          and 'td.gw-mean-dev { display: none; }' in html)
+    check('the three group headers carry the class',
+          all('class="gw-mean-dev" id="%s"' % gid in html
+              for gid in ('gwHMeanGroup', 'gwDMeanGroup', 'gwSMeanGroup')))
+    check('all ten mean columns carry it',
+          html.count('<th class="gw-mean-dev" id="gwHdr') == 10,
+          str(html.count('<th class="gw-mean-dev" id="gwHdr')))
+    check('and so do the ten cells', "td.classList.add('gw-mean-dev')" in html)
+    check('H mean Tsup is hidden with the group, never deleted',
+          'gwHdrHMeanTs' in html and 'r.h_mean_tsup_k' in html
+          and 'mean_h_tsup_k' in html, 'the H mean Tsup column was removed')
+    check('the freeze is remeasured after a toggle',
+          'gwSyncFreeze();' in html.split('function gwApplyMeanDevs', 1)[1][:400],
+          html.split('function gwApplyMeanDevs', 1)[1][:200])
+    check('the toggle writes no settings file',
+          'column_visibility' not in html and 'localStorage' not in html)
+
+    # What must stay: the individual %, the clock times and eval ΔCOP.
+    for hid in ('gwHdrHDb', 'gwHdrEqDb', 'gwHdrEvalDb', 'gwHdrHWb', 'gwHdrHFl',
+                'gwHdrHDt', 'gwHdrDDb', 'gwHdrDDt', 'gwHdrSDb', 'gwHdrSWb',
+                'gwHdrSFl', 'gwHdrSDt'):
+        check('%s is always in the table' % hid,
+              '<th id="%s">' % hid in html, hid + ' was hidden or removed')
+    labels = _header_labels(html, '<tr class="gw-cols">')
+    for label in ('H start', 'H end', 'eq start', 'eval start', 'eval end',
+                  'D1 start', 'S1 start'):
+        check('the clock time "%s" stays' % label, label in labels, str(labels[:24]))
+    check('the individual % group headers are never tagged',
+          'class="gw-mean-dev" id="gwIntervalGroup"' not in html
+          and 'class="gw-mean-dev" id="gwDGroup"' not in html
+          and 'class="gw-mean-dev" id="gwSGroup"' not in html)
+    check('eval deltaCOP is not hidden', 'id="gwHdrDcop"' in html
+          and 'gw-mean-dev" id="gwHdrDcop"' not in html)
+    export_js = html.split('function gwExport', 1)[1].split('\n  }', 1)[0]
+    check('the CSV is still the server-side post of the loaded rows',
+          'gw-mean-dev' not in export_js and '/api/guideline_windows/export' in export_js,
+          export_js[:200])
+
+
+def test_colour_changed_nothing_it_was_told_to_leave_alone():
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('the score cache version was not bumped',
+          webapp.GUIDELINE_SCORE_CACHE_VERSION == 1,
+          str(webapp.GUIDELINE_SCORE_CACHE_VERSION))
+    check('Guideline Windows did not gain the H+D Q column',
+          'h_d_q' not in src and 'hd_q_pct' not in src, 'leftover A was started')
+    check('the two band files were not retuned',
+          json.load(open(os.path.join(REPO, 'flask_app', 'config',
+                                      'interval_deviations.json'), encoding='utf-8'))
+          ['intervals']['H']['mean_db_k'] == 0.3
+          and json.load(open(os.path.join(REPO, 'flask_app',
+                                          'permissible_deviations.json'), encoding='utf-8'))
+          ['mean_q_band_pct'] == 5.0)
+    check('MEAN_DEV_QUANTITIES is still the Guideline Windows list',
+          webapp.MEAN_DEV_QUANTITIES['H'] == ('db', 'wb', 'tsup', 'dtreturn', 'flow'),
+          str(webapp.MEAN_DEV_QUANTITIES['H']))
+    check('and this page does not reuse it as its colour map',
+          'tsup' not in webapp.PERIOD_STAT_COLOUR_METRICS['H'],
+          str(webapp.PERIOD_STAT_COLOUR_METRICS['H']))
+    check('Period Statistics still opens no workbook',
+          '_read_excel_sheet' not in _function_code(src, '_load_period_statistics_rows'))
+
+
+# ---------------------------------------------------------------------------
+# Suggest cycles: drop-to-drop stays, empty defrost windows are filtered out
+#
+# The finder is untouched - Min gap, the shoulders and the true-off merge still
+# decide where the parent windows are. On an A/B/E/F file only, a suggested
+# window that never shows a sustained dT_HP < 0.2 K is dropped afterwards,
+# because a power wiggle is not a defrost. C/D, an empty or unlisted letter, an
+# unreadable temperature series, and "the filter would leave nothing" all keep
+# the power suggestions. Synthetic traces and a throwaway SQLite only.
+# ---------------------------------------------------------------------------
+
+SUGGEST_A_FILE = 'synthetic_suggest_A_file.xlsx'        # A = a defrost letter
+SUGGEST_C_FILE = 'synthetic_suggest_C_file.xlsx'        # C = on-off, no dT filter
+SUGGEST_PLAIN_FILE = 'synthetic_suggest_nolabel.xlsx'   # no letter at all
+
+#: Four true-off pulses: the finder reads the last three as drop-to-drop starts,
+#: so the sheet carries exactly two parent windows.
+SUGGEST_OFFS = [(2000.0, 2600.0), (14000.0, 14600.0),
+                (26000.0, 26600.0), (38000.0, 38600.0)]
+SUGGEST_END = 48000.0
+#: The windows the finder returns for that power trace.
+W1 = (13990.0, 25980.0)
+W2 = (25990.0, 37980.0)
+
+#: dT_HP that never goes near the threshold - power wiggles, no defrost at all.
+SUGG_DT_NONE = [(0.0, 5.0)]
+#: A one-sample flicker in the first window, a real 10 min defrost in the second.
+SUGG_DT_SECOND_ONLY = [(0.0, 5.0), (14000.0, -3.0), (14010.0, 5.0),
+                       (26000.0, -3.0), (26600.0, 5.0)]
+
+
+def _suggest_sheet(dt_steps, step=10.0, t_return=30.0):
+    """The two-window power trace with a dT_HP profile written as real columns."""
+    t = np.arange(0.0, SUGGEST_END + step, step)
+    low = np.zeros(len(t), dtype=bool)
+    for a, b in SUGGEST_OFFS:
+        low |= (t >= a) & (t < b)
+    dt = np.full(len(t), dt_steps[0][1], dtype=float)
+    for start, value in dt_steps:
+        dt[t >= start] = value
+    return pd.DataFrame({
+        'time_elapsed': t,
+        'Electric Power Input (without correction)': np.where(low, 0.1, 3.0),
+        'T_return_emu': np.full(len(t), t_return),
+        'Ts Buh': t_return + dt,
+    })
+
+
+def _found(sheet, min_gap_s=900.0):
+    """[(start, end)] of the untouched drop-to-drop finder."""
+    return [(round(a, 1), round(b, 1)) for a, b, _c, _m in
+            webapp._detect_cycle_boundaries_drop_to_drop(sheet, min_gap_s=min_gap_s)]
+
+
+def _filtered(sheet, test_cond, min_gap_s=900.0):
+    """[(start, end)] after the post-filter, with its log swallowed."""
+    sugg = webapp._detect_cycle_boundaries_drop_to_drop(sheet, min_gap_s=min_gap_s)
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = webapp._filter_defrost_suggestions_with_dt_hp(sheet, sugg, test_cond)
+    return [(round(a, 1), round(b, 1)) for a, b, _c, _m in out]
+
+
+class SuggestHarness(ApiHarness):
+    """``/api/cycle_extract/suggest`` over one synthetic sheet, no results rows."""
+
+    ROWS = []
+    SHEET = staticmethod(lambda file_name=None, data_set=None, usecols=None: None)
+
+    def stored(self, file_name):
+        """[(start, end, marker_type, notes_auto)] the endpoint wrote, in time order."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT start_time, end_time, marker_type, notes_auto FROM "
+                "cycle_extraction_suggestions WHERE file_name=? ORDER BY start_time ASC",
+                (file_name,)).fetchall()
+        finally:
+            conn.close()
+        return [(round(r['start_time'], 1), round(r['end_time'], 1),
+                 r['marker_type'], r['notes_auto']) for r in rows]
+
+
+def _suggest_harness(sheet):
+    class _H(SuggestHarness):
+        SHEET = staticmethod(lambda file_name=None, data_set=None, usecols=None: sheet)
+    return _H()
+
+
+def test_suggest_a_letter_keeps_only_the_window_that_defrosted():
+    """1. Two drop-to-drop windows, one real defrost - the other one goes."""
+    sheet = _suggest_sheet(SUGG_DT_SECOND_ONLY)
+    check('the finder still returns both drop-to-drop windows',
+          _found(sheet) == [W1, W2], str(_found(sheet)))
+    check('only the window with a sustained low dT_HP survives the filter',
+          _filtered(sheet, 'A') == [W2], str(_filtered(sheet, 'A')))
+    check('a one-sample dT_HP flicker is not a defrost',
+          W1 not in _filtered(sheet, 'A'), str(_filtered(sheet, 'A')))
+    check('the other defrost letters read the same file the same way',
+          all(_filtered(sheet, c) == [W2] for c in ('B', 'E', 'F', 'A real BUH')),
+          str([_filtered(sheet, c) for c in ('B', 'E', 'F', 'A real BUH')]))
+
+    with _suggest_harness(sheet) as h:
+        resp, d = h.post('/api/cycle_extract/suggest',
+                         {'file_name': SUGGEST_A_FILE, 'data_set': 1, 'min_gap_s': 900})
+        check('suggest answers JSON', resp.content_type.startswith('application/json'),
+              resp.content_type)
+        check('the endpoint reports the filtered count', (d or {}).get('count') == 1,
+              str((d or {}).get('count')))
+        stored = h.stored(SUGGEST_A_FILE)
+        check('and stores only that window', [(a, b) for a, b, _m, _n in stored] == [W2],
+              str(stored))
+        check('the marker and the auto note are unchanged',
+              all(m == 'drop' and n == 'auto drop→drop' for _a, _b, m, n in stored),
+              str(stored))
+
+
+def test_suggest_a_letter_with_no_defrost_falls_back_to_the_full_list():
+    """2. Every window would go, so the unfiltered drop-to-drop list comes back."""
+    sheet = _suggest_sheet(SUGG_DT_NONE)      # dT_HP sits at ~5 K the whole file
+    check('neither window holds dT_HP below the threshold on its own',
+          all(webapp._dt_hp_low_hold_start(
+              *_dt_of(sheet[(sheet['time_elapsed'] >= a) & (sheet['time_elapsed'] <= b)]),
+              0.2, 60.0) is None for a, b in (W1, W2)))
+    check('but Suggest is never emptied by the filter',
+          _filtered(sheet, 'A') == [W1, W2], str(_filtered(sheet, 'A')))
+
+    buf = io.StringIO()
+    sugg = webapp._detect_cycle_boundaries_drop_to_drop(sheet, min_gap_s=900.0)
+    with contextlib.redirect_stdout(buf):
+        webapp._filter_defrost_suggestions_with_dt_hp(sheet, sugg, 'A')
+    check('and the fallback is logged', 'unfiltered' in buf.getvalue(), buf.getvalue().strip())
+
+    with _suggest_harness(sheet) as h:
+        _, d = h.post('/api/cycle_extract/suggest',
+                      {'file_name': SUGGEST_A_FILE, 'data_set': 1, 'min_gap_s': 900})
+        check('the endpoint stores the full list rather than nothing',
+              (d or {}).get('count') == 2 and
+              [(a, b) for a, b, _m, _n in h.stored(SUGGEST_A_FILE)] == [W1, W2],
+              str(h.stored(SUGGEST_A_FILE)))
+
+
+def test_suggest_on_off_and_unlisted_letters_are_not_dt_filtered():
+    """3. C/D, empty and an unlisted letter never meet the 0.2 K rule."""
+    sheet = _suggest_sheet(SUGG_DT_SECOND_ONLY)   # the A file loses W1 on this sheet
+    for cond in ('C', 'D', 'C70min', '', None, UNLISTED_COND):
+        check('letter %r keeps both drop-to-drop windows' % (cond,),
+              _filtered(sheet, cond) == [W1, W2], str(_filtered(sheet, cond)))
+
+    with _suggest_harness(sheet) as h:
+        _, c = h.post('/api/cycle_extract/suggest', {'file_name': SUGGEST_C_FILE, 'data_set': 1})
+        check('a C file keeps both windows through the endpoint',
+              (c or {}).get('count') == 2, str((c or {}).get('count')))
+        _, plain = h.post('/api/cycle_extract/suggest',
+                          {'file_name': SUGGEST_PLAIN_FILE, 'data_set': 1})
+        check('a file name with no letter keeps both too',
+              (plain or {}).get('count') == 2, str((plain or {}).get('count')))
+        _, sent = h.post('/api/cycle_extract/suggest',
+                         {'file_name': SUGGEST_A_FILE, 'data_set': 1, 'test_cond': 'C'})
+        check('a test_cond in the payload outranks the letter in the file name',
+              (sent or {}).get('count') == 2, str((sent or {}).get('count')))
+
+
+def test_suggest_without_a_temperature_series_is_unchanged():
+    """4. Cannot tell is not no defrost: an A file with no T columns keeps all."""
+    sheet = _no_t_series(_suggest_sheet(SUGG_DT_SECOND_ONLY))
+    check('the finder is unaffected by the missing temperatures',
+          _found(sheet) == [W1, W2], str(_found(sheet)))
+    check('and the filter keeps every window it cannot judge',
+          _filtered(sheet, 'A') == [W1, W2], str(_filtered(sheet, 'A')))
+
+    with _suggest_harness(sheet) as h:
+        _, d = h.post('/api/cycle_extract/suggest',
+                      {'file_name': SUGGEST_A_FILE, 'data_set': 1, 'min_gap_s': 900})
+        check('the endpoint stores both windows', (d or {}).get('count') == 2,
+              str((d or {}).get('count')))
+
+
+def test_suggest_leaves_the_drop_to_drop_finder_and_min_gap_alone():
+    """5. The finder, Min gap and the stored row shape are what they were."""
+    sheet = _suggest_sheet(SUGG_DT_SECOND_ONLY)
+    for gap in (60.0, 600.0, 900.0, 1800.0, 7200.0):
+        check('Min gap %g s still reaches the unchanged finder' % gap,
+              _found(sheet, min_gap_s=gap) == [W1, W2], str(_found(sheet, min_gap_s=gap)))
+    check('the filter only removes windows, never moves a boundary',
+          set(_filtered(sheet, 'A')) <= set(_found(sheet)), str(_filtered(sheet, 'A')))
+    check('an empty suggestion list is handed straight back',
+          webapp._filter_defrost_suggestions_with_dt_hp(sheet, [], 'A') == [])
+
+    seen = []
+    real = webapp._detect_cycle_boundaries_drop_to_drop
+
+    def _spy(df_full, min_gap_s=600.0, **kw):
+        seen.append(min_gap_s)
+        return real(df_full, min_gap_s=min_gap_s, **kw)
+
+    with _suggest_harness(sheet) as h:
+        webapp._detect_cycle_boundaries_drop_to_drop = _spy
+        try:
+            h.post('/api/cycle_extract/suggest', {'file_name': SUGGEST_C_FILE, 'min_gap_s': 1500})
+            h.post('/api/cycle_extract/suggest', {'file_name': SUGGEST_C_FILE, 'min_gap_s': 5})
+            h.post('/api/cycle_extract/suggest', {'file_name': SUGGEST_C_FILE, 'min_gap_s': 99999})
+        finally:
+            webapp._detect_cycle_boundaries_drop_to_drop = real
+        check('Min gap is forwarded and clamped exactly as before',
+              seen == [1500.0, 60.0, 7200.0], str(seen))
+        stored = h.stored(SUGGEST_C_FILE)
+        check('a re-run replaces the rows for that file rather than appending',
+              len(stored) == 2, str(len(stored)))
+        check('marker_type is still drop and the note still says auto drop-to-drop',
+              all(m == 'drop' and n == 'auto drop→drop' for _a, _b, m, n in stored),
+              str(stored))
+
+
 def main():
     test_defrost_opens_in_d()
     test_defrost_opens_in_d_without_later_drop()
@@ -4105,6 +6566,7 @@ def main():
     test_opens_in_h_with_one_trailing_d_is_not_seeded()
     test_saved_clock_seed_helper_reads_only_d_s_spans()
     test_cycle_extract_show_and_layers_can_use_saved_clocks()
+    test_cycle_extract_clock_buttons_say_edit_clocks()
     test_clock_layers_changed_nothing_outside_cycle_extract()
     test_batch_file_list_is_cheap_and_counts_what_is_saved()
     test_batch_skip_saved_fills_the_gap_and_leaves_saved_rows_alone()
@@ -4142,6 +6604,9 @@ def main():
     test_gw_dtreturn_uses_the_half_k_h_band_not_the_parent_pm_2()
     test_gw_on_off_and_short_h_leave_eval_dtreturn_and_delta_cop_empty()
     test_gw_delta_cop_is_from_eval_not_from_h()
+    test_gw_delta_cop_slices_are_on_the_row_and_in_the_csv()
+    test_gw_delta_cop_na_rows_keep_the_reason_and_gain_no_slices()
+    test_gw_delta_cop_hover_names_both_slice_cops()
     test_gw_html_json_csv_have_no_tsup_percent_fields()
     test_gw_db_wb_on_saved_defrost_ignore_a_d_only_excursion()
     test_gw_db_outside_h_band_is_100_percent()
@@ -4197,6 +6662,70 @@ def main():
     test_gw_ui_template_has_the_index_cop_column_and_the_filters()
     test_gw_ui_table_box_caps_its_width()
     test_gw_ui_changed_nothing_it_was_told_to_leave_alone()
+    test_apply_stores_the_transition_on_a_defrost_sheet()
+    test_apply_defrost_takes_the_last_dt_recovery_that_holds()
+    test_apply_defrost_caps_a_late_power_ramp_to_the_hold()
+    test_apply_on_off_is_power_only()
+    test_apply_continuous_and_unknown_letter_do_not_crash()
+    test_apply_never_overwrites_a_manual_time()
+    test_apply_is_wired_into_the_one_insert_path()
+    test_apply_writes_default_clocks_on_a_defrost_window()
+    test_apply_demoted_continuous_gets_h_and_eq_eval_but_no_d()
+    test_apply_c_letter_without_a_stop_writes_continuous_clocks()
+    test_apply_without_a_temperature_series_writes_no_clocks()
+    test_apply_does_not_rewrite_clocks_it_already_wrote()
+    test_apply_leaves_a_row_the_analyst_saved_alone()
+
+    test_veto_a_letter_on_a_heating_only_window_is_continuous()
+    test_veto_a_letter_with_a_real_defrost_stays_defrost()
+    test_veto_a_single_low_sample_is_not_a_defrost()
+    test_veto_c_letter_without_a_power_stop_is_continuous()
+    test_veto_c_letter_with_a_power_stop_stays_on_off()
+    test_veto_never_promotes_an_empty_or_unlisted_letter()
+    test_veto_leaves_an_analyst_or_indicator_kind_alone()
+    test_veto_cannot_judge_a_window_without_a_temperature_series()
+    test_veto_is_one_helper_used_by_apply_and_edit_clocks()
+
+    test_suggest_a_letter_keeps_only_the_window_that_defrosted()
+    test_suggest_a_letter_with_no_defrost_falls_back_to_the_full_list()
+    test_suggest_on_off_and_unlisted_letters_are_not_dt_filtered()
+    test_suggest_without_a_temperature_series_is_unchanged()
+    test_suggest_leaves_the_drop_to_drop_finder_and_min_gap_alone()
+
+    test_period_stats_reads_the_saved_guideline_defrost()
+    test_period_stats_on_off_uses_the_same_ten_minute_buffer()
+    test_period_stats_lists_a_cycle_type_other_with_guideline_clocks()
+    test_period_stats_without_any_clocks_is_na_not_zero()
+    test_period_stats_falls_back_to_the_old_cache_but_never_mixes()
+    test_period_stats_continuous_shows_h_and_invents_no_d()
+    test_period_stats_two_off_spans_union_into_off()
+    test_period_stats_one_off_span_is_unchanged()
+    test_period_stats_two_defrost_spans_still_union_into_d()
+    test_period_stats_page_has_no_buffer_what_if()
+    test_period_stats_reads_only_the_store()
+
+    test_pstat_load_reads_the_periods_in_one_batch()
+    test_pstat_template_is_a_scroll_box_with_dropdowns()
+    test_gw_template_help_is_short_and_the_entry_block_is_frozen()
+    test_deviations_template_scrolls_inside_a_box_and_freezes_duration()
+
+    test_hide_pstat_drops_t_mean_avgs_and_keeps_t_mean()
+    test_hide_pstat_split_spans_are_one_checkbox_not_a_dropped_pivot()
+    test_hide_deviations_removes_the_individual_tsup_columns()
+    test_hide_deviations_tail_is_one_checkbox_and_actions_stays()
+    test_hide_deviations_copy_says_what_the_page_is()
+
+    test_colour_map_is_the_locked_table()
+    test_colour_ts_buh_is_never_coloured_on_h_or_on()
+    test_colour_temperatures_use_their_own_interval_band()
+    test_colour_dt_avg_only_and_only_on_h()
+    test_colour_flow_follows_the_stored_set_type()
+    test_colour_parent_q_and_t_mean()
+    test_colour_missing_numbers_stay_plain()
+    test_colour_pstat_page_paints_the_cell_that_is_already_there()
+    test_colour_pstat_template_and_csv()
+    test_colour_gw_mean_groups_are_one_checkbox()
+    test_colour_changed_nothing_it_was_told_to_leave_alone()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: {', '.join(FAILURES)}")

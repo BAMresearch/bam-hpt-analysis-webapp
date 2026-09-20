@@ -4,5 +4,8 @@
   "eq_min": 60,
   "eval_min": 70,
   "_defrost_indicator_columns": "Optional list of column names in the Plotdaten sheet that flag an active defrost. Leave empty when the export has none; kind then comes from the stored cycle_type or the analyst dropdown.",
-  "defrost_indicator_columns": []
+  "defrost_indicator_columns": [],
+  "_dt_hp_comment": "End of a defrost: dT_HP = T_supply (Ts Buh when present) - T_return_emu must cross up through dt_hp_recover_k and stay there for dt_hp_hold_s without going negative again. This is not dTreturn. The hold is a tool choice so a one-sample flicker cannot end a defrost.",
+  "dt_hp_recover_k": 0.2,
+  "dt_hp_hold_s": 60
 }

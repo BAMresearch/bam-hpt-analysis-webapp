@@ -60,6 +60,75 @@
         border-color: #28a745;
     }
     
+    /* The main table is far wider than the window. Without an inner box the
+       page itself grows sideways, which is why there was no horizontal bar and
+       nothing could be frozen. Same idea as Mean Values `.table-scroll-container`
+       and Guideline Windows `.gw-table-scroll`. */
+    .dev-table-scroll {
+        margin-top: 20px;
+        margin-bottom: 30px;
+        width: auto;
+        max-width: calc(100vw - 40px);
+        overflow-x: auto;
+        overflow-y: auto;
+        max-height: calc(100vh - 300px);
+        scrollbar-width: auto;
+        scrollbar-color: #888 #f1f1f1;
+    }
+    .dev-table-scroll::-webkit-scrollbar { height: 14px; width: 14px; }
+    .dev-table-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 7px; }
+    .dev-table-scroll::-webkit-scrollbar-thumb { background: #888; border-radius: 7px; }
+    .dev-table-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
+
+    /* `border-collapse: separate` is what lets sticky cells keep their borders. */
+    #deviationsTable { border-collapse: separate; border-spacing: 0; width: auto;
+                       max-width: none; margin-bottom: 0; }
+    /* Column titles and the filter row stack while scrolling down: cell level,
+       not a sticky `thead` / `tr` - that makes a containing block, and the
+       left-frozen header cells then scroll away with the table. */
+    #deviationsTable thead tr:first-child th {
+        position: sticky; top: 0; z-index: 12;
+    }
+    #deviationsTable thead tr.filter-row th {
+        position: sticky; top: var(--dev-header-row-height, 46px); z-index: 11;
+    }
+    /* Frozen identity columns: the checkbox and # through Duration (s).
+       `--dev-left-N` is measured in JS from the column-title row. */
+    #deviationsTable th.dev-freeze, #deviationsTable td.dev-freeze {
+        position: sticky; background: #fff; z-index: 4;
+    }
+    #deviationsTable thead tr:first-child th.dev-freeze { background-color: #f8f9fa; z-index: 22; }
+    #deviationsTable thead tr.filter-row th.dev-freeze { background-color: #f8f9fa; z-index: 21; }
+    #deviationsTable.table-striped tbody tr:nth-of-type(odd) td.dev-freeze { background-color: #f2f2f2; }
+    #deviationsTable.table-striped tbody tr.table-warning td.dev-freeze { background-color: #fff3cd; }
+    #deviationsTable th.dev-freeze-0,  #deviationsTable td.dev-freeze-0  { left: var(--dev-left-0, 0px); }
+    #deviationsTable th.dev-freeze-1,  #deviationsTable td.dev-freeze-1  { left: var(--dev-left-1, 0px); }
+    #deviationsTable th.dev-freeze-2,  #deviationsTable td.dev-freeze-2  { left: var(--dev-left-2, 0px); }
+    #deviationsTable th.dev-freeze-3,  #deviationsTable td.dev-freeze-3  { left: var(--dev-left-3, 0px); }
+    #deviationsTable th.dev-freeze-4,  #deviationsTable td.dev-freeze-4  { left: var(--dev-left-4, 0px); }
+    #deviationsTable th.dev-freeze-5,  #deviationsTable td.dev-freeze-5  { left: var(--dev-left-5, 0px); }
+    #deviationsTable th.dev-freeze-6,  #deviationsTable td.dev-freeze-6  { left: var(--dev-left-6, 0px); }
+    #deviationsTable th.dev-freeze-7,  #deviationsTable td.dev-freeze-7  { left: var(--dev-left-7, 0px); }
+    #deviationsTable th.dev-freeze-8,  #deviationsTable td.dev-freeze-8  { left: var(--dev-left-8, 0px); }
+    #deviationsTable th.dev-freeze-9,  #deviationsTable td.dev-freeze-9  { left: var(--dev-left-9, 0px); }
+    #deviationsTable th.dev-freeze-10, #deviationsTable td.dev-freeze-10 { left: var(--dev-left-10, 0px); }
+    /* Duration (s) is the last frozen column and carries the edge. */
+    #deviationsTable th.dev-freeze-11, #deviationsTable td.dev-freeze-11 {
+        left: var(--dev-left-11, 0px);
+        box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.25);
+    }
+    /* File Name is the one identity column that can run long. */
+    #deviationsTable th.dev-freeze-2, #deviationsTable td.dev-freeze-2 {
+        max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* The violation-count tail, Total Points through Avg Timestep (s), behind
+       one checkbox. Display only: the cells stay in the DOM (the per-column
+       filters still read them), nothing is remembered between loads, and
+       **Actions** sits after the block so Plot never disappears with it. */
+    #deviationsTable.dev-hide-extra th.dev-extra,
+    #deviationsTable.dev-hide-extra td.dev-extra { display: none; }
+
     .badge-violation {
         background-color: #dc3545;
         color: white;
@@ -148,7 +217,9 @@
         <div class="d-flex justify-content-between align-items-start flex-wrap">
             <div>
                 <h1><i class="fas fa-exclamation-triangle"></i> Permissible Deviation Analysis</h1>
-                <p>Analyze temperature deviations from setpoints for each test condition (E, A, F, B, C, D)</p>
+                <p>Analyze temperature deviations from setpoints for each test condition (E, A, F, B, C, D).
+                   These are <strong>full-cycle parent</strong> checks; the interval (D / H / S) scores are on
+                   <a href="{{ url_for('guideline_windows') }}">Guideline Windows</a>.</p>
             </div>
             <button class="btn btn-outline-primary btn-sm mt-2" type="button" data-toggle="collapse" data-target="#configSection" aria-expanded="false" aria-controls="configSection">
                 <i class="fas fa-sliders-h"></i> Configure Deviation Bands
@@ -185,17 +256,6 @@
                             <input type="text" inputmode="decimal" id="config_WB_value" class="form-control form-control-sm config-numeric" 
                                    value="{{ deviations.WB.value }}" required>
                             <small class="text-muted">{{ deviations.WB.description }}</small>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="form-group mb-3">
-                            <label for="config_Tsup_value" class="font-weight-bold">
-                                <i class="fas fa-fire"></i> Supply Temp (Tsup)
-                                <span class="badge badge-secondary ml-1">K</span>
-                            </label>
-                            <input type="text" inputmode="decimal" id="config_Tsup_value" class="form-control form-control-sm config-numeric" 
-                                   value="{{ deviations.Tsup.value }}" required>
-                            <small class="text-muted">{{ deviations.Tsup.description }}</small>
                         </div>
                     </div>
                     <div class="col-md-3">
@@ -238,12 +298,6 @@
                                     <td><input type="text" inputmode="decimal" id="config_wb_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_pct_red', 5) }}"></td>
                                     <td><input type="text" inputmode="decimal" id="config_wb_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_pct_yellow', 1) }}"></td>
                                     <td><input type="text" inputmode="decimal" id="config_wb_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('wb_violations_red', 0) }}"></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>Tsup</strong></td>
-                                    <td><input type="text" inputmode="decimal" id="config_tsup_pct_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_pct_red', 5) }}"></td>
-                                    <td><input type="text" inputmode="decimal" id="config_tsup_pct_yellow" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_pct_yellow', 1) }}"></td>
-                                    <td><input type="text" inputmode="decimal" id="config_tsup_violations_red" class="form-control form-control-sm config-numeric" value="{{ deviations.get('tsup_violations_red', 0) }}"></td>
                                 </tr>
                                 <tr>
                                     <td><strong>dTreturn</strong></td>
@@ -401,20 +455,6 @@
             </div>
         </div>
         
-        <div class="alert alert-info" style="margin-top: 15px; font-size: 0.9em;">
-            <strong><i class="fas fa-database"></i> Database Relationship:</strong> This page displays deviation statistics stored in the same database as the "Mean Values" page. 
-            <ul class="mb-0 mt-2" style="padding-left: 20px;">
-                <li><strong>Same Database:</strong> Both pages use the <code>results</code> table. Deleting an entry on "Mean Values" also removes it from this page.</li>
-                <li><strong>Manual Calculation:</strong> Deviation statistics are <strong>NOT</strong> automatically calculated when entries are added/updated. Click "Calculate Statistics" to compute or update them.</li>
-                <li><strong>Persistent Storage:</strong> Once calculated, statistics are saved in the database and persist across sessions.</li>
-            </ul>
-        </div>
-        <p class="text-muted" style="font-size: 0.9em; margin-top: 10px;">
-            <i class="fas fa-info-circle"></i> 
-            The tool treats the "T_outdoor (WB)" column as wetbulb temperature. If entries show unrealistic deviations, 
-            this may indicate that the column contains relative humidity data instead, requiring manual data correction.
-            Maximum deviations are shown in Kelvin (K) for temperature differences.
-        </p>
         <div class="mt-3">
             <button class="btn btn-sm btn-outline-info" type="button" data-toggle="collapse" data-target="#filteringHelp" aria-expanded="false" aria-controls="filteringHelp">
                 <i class="fas fa-filter"></i> Filtering Help
@@ -502,14 +542,21 @@
             <i class="fas fa-filter"></i>
             <span id="filterMessage">Showing all entries</span>
         </div>
-        <button class="btn btn-sm btn-secondary" onclick="clearAllFilters()">
-            <i class="fas fa-times"></i> Clear All Filters
-        </button>
+        <div class="d-flex align-items-center">
+            <div class="custom-control custom-checkbox mr-3">
+                <input type="checkbox" class="custom-control-input" id="devShowExtraColumns">
+                <label class="custom-control-label" for="devShowExtraColumns"
+                       title="Total Points, the per-quantity violation counts and percentages, the Max +/- columns and Avg Timestep (s). Off on every load; Actions stays visible.">Show extra columns</label>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="clearAllFilters()">
+                <i class="fas fa-times"></i> Clear All Filters
+            </button>
+        </div>
     </div>
     
     <!-- Deviation Statistics Table -->
-    <div class="table-responsive">
-        <table class="table table-striped table-hover" id="deviationsTable">
+    <div class="dev-table-scroll" id="deviationsTableScroll">
+        <table class="table table-striped table-hover dev-hide-extra" id="deviationsTable">
             <thead>
                 <tr>
                     <th>
@@ -537,28 +584,24 @@
                     <th>Mean Q dev (kW)</th>
                     <th>Mean Q dev (%)</th>
                     <th>Mean flow dev (%)</th>
-                    <th>Total Points<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_total_points" title="Update this stat">Update</button></th>
-                    <th>DB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_outside_count" title="Update this stat">Update</button></th>
-                    <th>DB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_percentage" title="Update this stat">Update</button></th>
-                    <th>WB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_outside_count" title="Update this stat">Update</button></th>
-                    <th>WB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_percentage" title="Update this stat">Update</button></th>
-                    <th>Tsup Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_tsup_outside_count" title="Update this stat">Update</button></th>
-                    <th>Tsup %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_tsup_percentage" title="Update this stat">Update</button></th>
-                    <th>dTreturn Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_outside_count" title="Update this stat">Update</button></th>
-                    <th>dTreturn %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_percentage" title="Update this stat">Update</button></th>
-                    <th>Flow Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_outside_count" title="Update this stat">Update</button></th>
-                    <th>Flow %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_percentage" title="Update this stat">Update</button></th>
-                    <th>Max DB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_pos" title="Update this stat">Update</button></th>
-                    <th>Max DB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_neg" title="Update this stat">Update</button></th>
-                    <th>Max WB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_pos" title="Update this stat">Update</button></th>
-                    <th>Max WB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_neg" title="Update this stat">Update</button></th>
-                    <th>Max Tsup + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_tsup_pos" title="Update this stat">Update</button></th>
-                    <th>Max Tsup − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_tsup_neg" title="Update this stat">Update</button></th>
-                    <th>Max dTreturn + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_pos" title="Update this stat">Update</button></th>
-                    <th>Max dTreturn − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_neg" title="Update this stat">Update</button></th>
-                    <th>Max Flow + (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_pos_pct" title="Update this stat">Update</button></th>
-                    <th>Max Flow − (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_neg_pct" title="Update this stat">Update</button></th>
-                    <th>Avg Timestep (s)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_avg_timestep" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Total Points<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_total_points" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">DB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_outside_count" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">DB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_db_percentage" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">WB Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_outside_count" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">WB %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_wb_percentage" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">dTreturn Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_outside_count" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">dTreturn %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_dtreturn_percentage" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Flow Violations<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_outside_count" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Flow %<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_flow_percentage" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max DB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_pos" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max DB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_neg" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max WB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_pos" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max WB − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_wb_neg" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max dTreturn + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_pos" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max dTreturn − (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_dtreturn_neg" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max Flow + (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_pos_pct" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Max Flow − (%)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_flow_neg_pct" title="Update this stat">Update</button></th>
+                    <th class="dev-extra">Avg Timestep (s)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_avg_timestep" title="Update this stat">Update</button></th>
                     <th>Actions</th>
                 </tr>
                 <tr class="filter-row">
@@ -585,30 +628,26 @@
                     <th><input type="text" class="column-filter" data-column="20" placeholder="Filter: >0.5, <2" title="Mean Q dev (kW)"></th>
                     <th><input type="text" class="column-filter" data-column="21" placeholder="Filter: >5, >10" title="Mean Q dev (%)"></th>
                     <th><input type="text" class="column-filter" data-column="22" placeholder="Filter: >1, >2" title="Mean flow dev (%)"></th>
-                    <th><input type="text" class="column-filter" data-column="23" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="24" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="25" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="26" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="27" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="28" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="29" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="30" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="31" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="32" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="33" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="34" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="35" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="36" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="37" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="38" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="39" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="40" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="41" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="42" placeholder="Filter numbers..."></th>
-                    <th><input type="text" class="column-filter" data-column="43" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="23" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="24" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="25" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="26" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="27" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="28" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="29" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="30" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="31" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="32" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="33" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="34" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="35" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="36" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="37" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="38" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="39" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"></th>
                     <th></th>
-                    <th></th>
-                </tr>
+</tr>
             </thead>
             <tbody>
                 {% for entry in entries %}
@@ -824,14 +863,14 @@
                             <span class="text-muted">-</span>
                         {% endif %}
                     </td>
-                    <td class="stat-highlight">
+                    <td class="stat-highlight dev-extra">
                         {% if entry.total_points is not none %}
                             {{ entry.total_points }}
                         {% else %}
                             <span class="text-muted">-</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.db_outside_band_count is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.db_outside_band_count > deviations.get('db_violations_red', 0) %}
@@ -840,7 +879,7 @@
                             <span class="badge-good">{{ entry.db_outside_band_count }}</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.db_percentage is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.db_percentage > deviations.get('db_pct_red', 5) %}
@@ -851,7 +890,7 @@
                             <span class="badge-good">{{ "%.2f"|format(entry.db_percentage) }}%</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.wb_outside_band_count is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.wb_outside_band_count > deviations.get('wb_violations_red', 0) %}
@@ -860,7 +899,7 @@
                             <span class="badge-good">{{ entry.wb_outside_band_count }}</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.wb_percentage is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.wb_percentage > deviations.get('wb_pct_red', 5) %}
@@ -871,27 +910,7 @@
                             <span class="badge-good">{{ "%.2f"|format(entry.wb_percentage) }}%</span>
                         {% endif %}
                     </td>
-                    <td>
-                        {% if entry.tsup_outside_band_count is none %}
-                            {{ no_data_cell(entry) }}
-                        {% elif entry.tsup_outside_band_count > deviations.get('tsup_violations_red', 0) %}
-                            <span class="badge-violation">{{ entry.tsup_outside_band_count }}</span>
-                        {% else %}
-                            <span class="badge-good">{{ entry.tsup_outside_band_count }}</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if entry.tsup_percentage is none %}
-                            {{ no_data_cell(entry) }}
-                        {% elif entry.tsup_percentage > deviations.get('tsup_pct_red', 5) %}
-                            <span class="badge-violation">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
-                        {% elif entry.tsup_percentage > deviations.get('tsup_pct_yellow', 1) %}
-                            <span class="badge-warning">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
-                        {% else %}
-                            <span class="badge-good">{{ "%.2f"|format(entry.tsup_percentage) }}%</span>
-                        {% endif %}
-                    </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.dtreturn_outside_band_count is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.dtreturn_outside_band_count > deviations.get('dtreturn_violations_red', 0) %}
@@ -900,7 +919,7 @@
                             <span class="badge-good">{{ entry.dtreturn_outside_band_count }}</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.dtreturn_percentage is none %}
                             {{ no_data_cell(entry) }}
                         {% elif entry.dtreturn_percentage > deviations.get('dtreturn_pct_red', 5) %}
@@ -911,7 +930,7 @@
                             <span class="badge-good">{{ "%.2f"|format(entry.dtreturn_percentage) }}%</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.tmean_is_variable_flow %}
                             <span class="text-muted" title="Variable flow — flow violations are not scored.">n/a</span>
                         {% elif entry.flow_outside_count is none %}
@@ -922,7 +941,7 @@
                             <span class="badge-good">{{ entry.flow_outside_count }}</span>
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.tmean_is_variable_flow %}
                             <span class="text-muted" title="Variable flow — flow % is not scored.">n/a</span>
                         {% elif entry.flow_percentage is none %}
@@ -936,32 +955,29 @@
                         {% endif %}
                     </td>
                     {% set db_band = deviations.get('DB', {}).get('value', 1.0) %}
-                    <td>{{ extreme_cell(entry.max_db_pos, db_band, true, '', entry) }}</td>
-                    <td>{{ extreme_cell(entry.max_db_neg, -db_band, false, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_db_pos, db_band, true, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_db_neg, -db_band, false, '', entry) }}</td>
                     {% set wb_band = deviations.get('WB', {}).get('value', 1.0) %}
-                    <td>{{ extreme_cell(entry.max_wb_pos, wb_band, true, '', entry) }}</td>
-                    <td>{{ extreme_cell(entry.max_wb_neg, -wb_band, false, '', entry) }}</td>
-                    {% set tsup_band = deviations.get('Tsup', {}).get('value', 0.5) %}
-                    <td>{{ extreme_cell(entry.max_tsup_pos, tsup_band, true, '', entry) }}</td>
-                    <td>{{ extreme_cell(entry.max_tsup_neg, -tsup_band, false, '', entry) }}</td>
-                    <td>{{ extreme_cell(entry.max_dtreturn_pos, deviations.get('dTreturn', {}).get('upper', 2.0), true, '', entry) }}</td>
-                    <td>{{ extreme_cell(entry.max_dtreturn_neg, deviations.get('dTreturn', {}).get('lower', -2.0), false, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_wb_pos, wb_band, true, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_wb_neg, -wb_band, false, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_dtreturn_pos, deviations.get('dTreturn', {}).get('upper', 2.0), true, '', entry) }}</td>
+                    <td class="dev-extra">{{ extreme_cell(entry.max_dtreturn_neg, deviations.get('dTreturn', {}).get('lower', -2.0), false, '', entry) }}</td>
                     {% set flow_band = deviations.get('flow_instantaneous_pct', 2.5) %}
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.tmean_is_variable_flow %}
                             <span class="text-muted">n/a</span>
                         {% else %}
                             {{ extreme_cell(entry.max_flow_pos_pct, flow_band, true, '%', entry) }}
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.tmean_is_variable_flow %}
                             <span class="text-muted">n/a</span>
                         {% else %}
                             {{ extreme_cell(entry.max_flow_neg_pct, -flow_band, false, '%', entry) }}
                         {% endif %}
                     </td>
-                    <td>
+                    <td class="dev-extra">
                         {% if entry.avg_timestep_size is not none %}
                             {{ "%.3f"|format(entry.avg_timestep_size) }}
                         {% else %}
@@ -1032,10 +1048,72 @@
 
 {% block extra_js %}
 <script>
+    /* The individual Tsup columns (violations, %, Max Tsup +/-) are off this
+       table, so the transient Tsup band and its colouring thresholds are no
+       longer edited here. They are still posted back exactly as stored, so
+       saving the form cannot blank them in permissible_deviations.json. */
+    const DEV_STORED_TSUP = {
+        value: {{ deviations.Tsup.value | tojson }},
+        unit: {{ (deviations.Tsup.unit or 'K') | tojson }},
+        description: {{ (deviations.Tsup.description or '') | tojson }},
+        standard_reference: {{ (deviations.Tsup.standard_reference or '') | tojson }},
+        pct_red: {{ deviations.get('tsup_pct_red', 5) | tojson }},
+        pct_yellow: {{ deviations.get('tsup_pct_yellow', 1) | tojson }},
+        violations_red: {{ deviations.get('tsup_violations_red', 0) | tojson }}
+    };
+
+    // The identity block that stays put while the statistics columns scroll
+    // sideways: the checkbox and # through Duration (s).
+    const DEV_FREEZE_COLS = 12;
+
+    /* Mark the frozen cells once, then hand CSS one `left` per column instead of
+       an inline style per cell. Badges, Calculate and Configure bands are not
+       touched by any of this. */
+    function devSyncFreeze() {
+        const table = document.getElementById('deviationsTable');
+        const titles = table && table.querySelector('thead tr:first-child');
+        const filters = table && table.querySelector('thead tr.filter-row');
+        if (!table || !titles) { return; }
+        const rows = [titles];
+        if (filters) { rows.push(filters); }
+        Array.prototype.push.apply(rows, table.querySelectorAll('tbody tr'));
+        rows.forEach(function (tr) {
+            for (let c = 0; c < DEV_FREEZE_COLS && c < tr.children.length; c++) {
+                tr.children[c].classList.add('dev-freeze', 'dev-freeze-' + c);
+            }
+        });
+        let left = 0;
+        for (let c = 0; c < DEV_FREEZE_COLS && c < titles.children.length; c++) {
+            table.style.setProperty('--dev-left-' + c, left + 'px');
+            left += titles.children[c].getBoundingClientRect().width;
+        }
+        table.style.setProperty('--dev-header-row-height',
+                                titles.getBoundingClientRect().height + 'px');
+    }
+
+    /* One checkbox, off on every load: the tail is hidden with a class on the
+       table, never removed and never saved anywhere. The frozen block is
+       remeasured because the columns to its right moved. */
+    function devApplyExtraColumns() {
+        const box = document.getElementById('devShowExtraColumns');
+        const table = document.getElementById('deviationsTable');
+        if (!box || !table) { return; }
+        table.classList.toggle('dev-hide-extra', !box.checked);
+        devSyncFreeze();
+    }
+
     // Filtering functionality (similar to index.html)
     let allRows = [];
     
     $(document).ready(function() {
+        const extraBox = document.getElementById('devShowExtraColumns');
+        if (extraBox) {
+            extraBox.checked = false;
+            extraBox.addEventListener('change', devApplyExtraColumns);
+        }
+        devApplyExtraColumns();
+        devSyncFreeze();
+        window.addEventListener('resize', devSyncFreeze);
         // Store all rows
         $('#deviationsTable tbody tr').each(function() {
             allRows.push($(this));
@@ -1374,10 +1452,10 @@
                 standard_reference: 'SN EN 14511-3:2022 Table 6, Interval H'
             },
             'Tsup': {
-                value: parseFloat($('#config_Tsup_value').val()),
-                unit: 'K',
-                description: 'Supply temperature deviation band (transient)',
-                standard_reference: 'SN EN 14511-3:2022 Table 6, Interval H - Arithmetical mean'
+                value: DEV_STORED_TSUP.value,
+                unit: DEV_STORED_TSUP.unit,
+                description: DEV_STORED_TSUP.description,
+                standard_reference: DEV_STORED_TSUP.standard_reference
             },
             'dTreturn': {
                 lower: parseFloat($('#config_dTreturn_lower').val()),
@@ -1396,9 +1474,9 @@
             wb_pct_yellow: parseFloat($('#config_wb_pct_yellow').val()),
             db_violations_red: parseFloat($('#config_db_violations_red').val()) || 0,
             wb_violations_red: parseFloat($('#config_wb_violations_red').val()) || 0,
-            tsup_pct_red: parseFloat($('#config_tsup_pct_red').val()),
-            tsup_pct_yellow: parseFloat($('#config_tsup_pct_yellow').val()),
-            tsup_violations_red: parseFloat($('#config_tsup_violations_red').val()) || 0,
+            tsup_pct_red: DEV_STORED_TSUP.pct_red,
+            tsup_pct_yellow: DEV_STORED_TSUP.pct_yellow,
+            tsup_violations_red: DEV_STORED_TSUP.violations_red,
             dtreturn_pct_red: parseFloat($('#config_dtreturn_pct_red').val()),
             dtreturn_pct_yellow: parseFloat($('#config_dtreturn_pct_yellow').val()),
             dtreturn_violations_red: parseFloat($('#config_dtreturn_violations_red').val()) || 0,
@@ -1412,7 +1490,9 @@
         };
         
         // Validate
-        if (isNaN(formData.DB.value) || formData.DB.value < 0 || isNaN(formData.WB.value) || formData.WB.value < 0 || isNaN(formData.Tsup.value) || formData.Tsup.value < 0) {
+        // Tsup is not an input on this form any more, so it is not validated:
+        // it is whatever is already stored.
+        if (isNaN(formData.DB.value) || formData.DB.value < 0 || isNaN(formData.WB.value) || formData.WB.value < 0) {
             showConfigAlert('danger', 'Invalid transient band values. Please enter non-negative numbers.');
             return;
         }
@@ -1454,7 +1534,6 @@
         if (confirm('Reset all values to default standards? This will discard any custom changes.')) {
             $('#config_DB_value').val(1.0);
             $('#config_WB_value').val(1.0);
-            $('#config_Tsup_value').val(0.5);
             $('#config_dTreturn_lower').val(-2.0);
             $('#config_dTreturn_upper').val(2.0);
             $('#config_mean_db_k').val(0.6);
@@ -1467,9 +1546,6 @@
             $('#config_wb_pct_yellow').val(1);
             $('#config_db_violations_red').val(0);
             $('#config_wb_violations_red').val(0);
-            $('#config_tsup_pct_red').val(5);
-            $('#config_tsup_pct_yellow').val(1);
-            $('#config_tsup_violations_red').val(0);
             $('#config_dtreturn_pct_red').val(5);
             $('#config_dtreturn_pct_yellow').val(1);
             $('#config_dtreturn_violations_red').val(0);

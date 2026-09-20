@@ -139,7 +139,7 @@ Open `import_hpt.ipynb` with working directory = the cloned folder (§3).
 3. Confirm or add cycles. Set **ds** per cycle (1, 2, 3, …) *before* Apply.
 4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Test label, Lab ID and HP ID (HP ID from the profile). **Notes** must contain `drop` or `ramp` if the window should be split into defrost/heating or on/off sub-periods on **Period Statistics**; `other` means no split.
 
-5. (Optional — needed for evaluation-window means and interval checks.) **Propose guideline clocks** → confirm kind → **Save all proposed** or **Save clocks**. Check them on **Guideline Windows**. Definitions: [Analysis Guide](ANALYSIS_GUIDE.md) §1 / §5.1.
+5. (Optional — needed for evaluation-window means and interval checks.) **Edit clocks** → confirm kind → **Save all clocks** or **Save clocks**. **Edit clocks** only opens the clocks; nothing is stored until you save. Check them on **Guideline Windows**. Definitions: [Analysis Guide](ANALYSIS_GUIDE.md) §1 / §5.1.
 
 You may see yellow notifications; they are not errors but notes about how missing data is handled.
 

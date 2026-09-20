@@ -1,5 +1,5 @@
 """
-Cycle detection for BAM load-based testing (Phase 1).
+Cycle detection for load-based testing.
 Detects cycle boundaries and compressor ON/OFF states from time series power data.
 """
 from __future__ import annotations

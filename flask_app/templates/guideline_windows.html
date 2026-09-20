@@ -32,8 +32,49 @@
   .gw-table-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 7px; }
   .gw-table-scroll::-webkit-scrollbar-thumb { background: #888; border-radius: 7px; }
   .gw-table-scroll::-webkit-scrollbar-thumb:hover { background: #555; }
-  #gwTable { font-size: 11px; white-space: nowrap; width: auto; max-width: none; margin-bottom: 0; }
+  #gwTable { font-size: 11px; white-space: nowrap; width: auto; max-width: none; margin-bottom: 0;
+             border-collapse: separate; border-spacing: 0; }
+  #gwTable th { background: #f8f9fa; }
   #gwTable thead tr.gw-groups th { background: #eef1f4; text-align: center; font-weight: 600; }
+  /* Both header rows stay while scrolling down: stacked `top`, cell level.
+     Not a sticky `thead` / `tr` - that makes a containing block, and the
+     left-frozen header cells then scroll away with the table. */
+  #gwTable thead tr.gw-groups th {
+    position: sticky; top: 0; z-index: 12;
+    box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+  }
+  #gwTable thead tr.gw-cols th {
+    position: sticky; top: var(--gw-header-row-height, 26px); z-index: 11;
+    box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+  }
+  /* Frozen identity columns: # through Kind, the Entry block. `--gw-left-N` is
+     measured in JS from the column-title row. */
+  #gwTable th.gw-freeze, #gwTable td.gw-freeze { position: sticky; background: #fff; z-index: 3; }
+  #gwTable thead tr.gw-groups th.gw-freeze { background: #eef1f4; z-index: 22; }
+  #gwTable thead tr.gw-cols th.gw-freeze { background: #f8f9fa; z-index: 21; }
+  #gwTable.table-hover tbody tr:hover td.gw-freeze { background-color: #f5f5f5; }
+  #gwTable th.gw-freeze-entry { left: 0; }
+  #gwTable th.gw-freeze-0, #gwTable td.gw-freeze-0 { left: var(--gw-left-0, 0px); }
+  #gwTable th.gw-freeze-1, #gwTable td.gw-freeze-1 { left: var(--gw-left-1, 0px); }
+  #gwTable th.gw-freeze-2, #gwTable td.gw-freeze-2 { left: var(--gw-left-2, 0px); }
+  #gwTable th.gw-freeze-3, #gwTable td.gw-freeze-3 { left: var(--gw-left-3, 0px); }
+  #gwTable th.gw-freeze-4, #gwTable td.gw-freeze-4 { left: var(--gw-left-4, 0px); }
+  #gwTable th.gw-freeze-5, #gwTable td.gw-freeze-5 { left: var(--gw-left-5, 0px); }
+  #gwTable th.gw-freeze-6, #gwTable td.gw-freeze-6 { left: var(--gw-left-6, 0px); }
+  #gwTable th.gw-freeze-7, #gwTable td.gw-freeze-7 { left: var(--gw-left-7, 0px); }
+  #gwTable th.gw-freeze-8, #gwTable td.gw-freeze-8 { left: var(--gw-left-8, 0px); }
+  #gwTable th.gw-freeze-9, #gwTable td.gw-freeze-9 { left: var(--gw-left-9, 0px); }
+  /* The last frozen column carries the edge against the score columns. */
+  #gwTable th.gw-freeze-9, #gwTable td.gw-freeze-9, #gwTable th.gw-freeze-entry {
+    box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.25);
+  }
+  /* The three mean-deviation groups behind one display-only checkbox, off on
+     every load (the Period Statistics `Show split spans` pattern). Whole
+     groups go, header cell included, so no `colspan` has to be recounted. The
+     individual %, the clock times and eval ΔCOP are never hidden, and the CSV
+     is a server-side post of the loaded rows, so it keeps every column. */
+  #gwTable.gw-hide-mean th.gw-mean-dev,
+  #gwTable.gw-hide-mean td.gw-mean-dev { display: none; }
   #gwTable td.gw-num { text-align: right; font-variant-numeric: tabular-nums; }
   #gwTable td.gw-note { white-space: normal; min-width: 220px; color: #6c757d; }
   .gw-kind { font-weight: 600; }
@@ -51,35 +92,13 @@
 
 <div class="gw-actions">
   <p class="gw-help mb-2">
-    Read-only check of the guideline clocks <strong>saved</strong> on Cycle Extract: the stored D / S, H,
-    equilibrium and evaluation times beside the entry's stored Tsup, Q, P and COP and the same four on the
-    evaluation window. After those means: <strong>H / eq / eval</strong> individual
-    <strong>DB %</strong>, <strong>WB %</strong>, <strong>flow %</strong> and
-    <strong>dTreturn %</strong> (Interval H bands on each saved window),
-    <strong>D</strong> and <strong>S</strong> individual % (one number per interval
-    on the union of saved spans), and
-    <strong>eval ΔCOP</strong> (first against last slice of the saved evaluation window).
-    After those, <strong>H / D / S mean deviations</strong>: one arithmetic mean per interval
-    against its setpoint, in <strong>K</strong> (or <strong>% of set</strong> for flow) with the
-    draft mean bands — a different quantity from the individual %, so H mean DB is ±0.3 K where
-    H individual DB is ±1 K. Full-cycle mean Tsup, Tmean and Q stay on the Deviations page.
-    Tsup cells are means in °C, not a sample share.
-    Unsaved proposals do not appear here — save them on Cycle Extract first.
-  </p>
-  <p class="gw-help mb-2">
-    Every number on this page comes out of the <strong>database</strong>. The interval scores are
-    computed once, when the clocks are <strong>saved</strong> on Cycle Extract, and stored beside them:
-    no Plotdaten file is opened here, so loading is quick and leaving the page does not throw the table
-    away. A row whose scores are not stored — clocks saved before this, or clocks that have changed
-    since — keeps its clock times and shows <em>n/a</em> in the score cells, never a 0 and never an old
-    percentage. <strong>Compute missing scores</strong> fills exactly those rows, file by file; it
-    writes no clocks and never starts on its own.
-  </p>
-  <p class="gw-help mb-2">
-    <strong>#</strong> is the entry's position in the open database — the same number it has on
-    <strong>Mean Values</strong> and <strong>Deviations</strong>, so the three pages line up. The
-    three filters below <em>hide</em> rows; they never renumber <strong>#</strong>, never reload and
-    never open a Plotdaten file. <strong>Download CSV</strong> writes the rows you can see.
+    Read-only check of the guideline clocks <strong>saved</strong> on Cycle Extract: the stored
+    D / S, H, equilibrium and evaluation times beside the entry's means and the same means on the
+    evaluation window.
+    The score columns are the <strong>%</strong> of samples outside the draft individual bands,
+    <strong>eval &Delta;COP</strong>, and &mdash; behind <strong>Show mean deviations</strong> &mdash;
+    the <strong>mean deviations</strong> against the draft mean bands (a different quantity).
+    Unsaved proposals do not appear here &mdash; save them on Cycle Extract first.
   </p>
   <button type="button" class="btn btn-sm btn-primary" id="gwLoadSelectedBtn" onclick="gwLoadSelected()"
           {% if not preselected_rowids %}style="display:none;"{% endif %}>
@@ -90,7 +109,7 @@
   </button>
   <button type="button" class="btn btn-sm btn-outline-warning" id="gwComputeBtn"
           onclick="gwOpenComputeConfirm()"
-          title="Reads each Plotdaten file once and stores the interval scores of the parents that have saved clocks but none. Writes no clocks.">
+          title="Every number on this page is read from the database: the interval scores are computed and stored when clocks are saved on Cycle Extract, so no Plotdaten file is opened here. A row whose scores are not stored - clocks saved before this, or clocks changed since - keeps its times and shows n/a, never a 0 and never an old percentage. This button fills exactly those rows, one file at a time. It writes no clocks and never starts on its own.">
     <i class="fas fa-calculator"></i> Compute missing scores
   </button>
 
@@ -128,6 +147,14 @@
       <button type="button" class="btn btn-sm btn-outline-secondary" id="gwClearFiltersBtn"
               onclick="gwClearFilters()">Clear filters</button>
     </div>
+    <div class="gw-filter">
+      <label>&nbsp;</label>
+      <div class="custom-control custom-checkbox">
+        <input type="checkbox" class="custom-control-input" id="gwShowMeanDevs">
+        <label class="custom-control-label" for="gwShowMeanDevs"
+               title="H / D / S mean deviation: one arithmetic mean per interval against its setpoint, a different quantity from the individual % beside them. Display only - the columns are still loaded and the CSV keeps them.">Show mean deviations</label>
+      </div>
+    </div>
   </div>
 
   <div class="gw-status" id="gwStatus">
@@ -140,7 +167,7 @@
 </div>
 
 <div class="gw-table-scroll" id="gwTableScroll">
-  <table class="table table-sm table-bordered table-hover" id="gwTable" style="display:none;">
+  <table class="table table-sm table-bordered table-hover gw-hide-mean" id="gwTable" style="display:none;">
     <thead>
       <tr class="gw-groups">
         <th colspan="10">Entry</th>
@@ -151,13 +178,13 @@
         <th colspan="12" id="gwIntervalGroup">H / eq / eval individual % (Interval H)</th>
         <th colspan="2" id="gwDGroup">D individual %</th>
         <th colspan="4" id="gwSGroup">S individual %</th>
-        <th colspan="5" id="gwHMeanGroup">H mean deviation (K / % of set)</th>
-        <th colspan="2" id="gwDMeanGroup">D mean deviation (K)</th>
-        <th colspan="3" id="gwSMeanGroup">S mean deviation (K / % of set)</th>
+        <th colspan="5" class="gw-mean-dev" id="gwHMeanGroup">H mean deviation (K / % of set)</th>
+        <th colspan="2" class="gw-mean-dev" id="gwDMeanGroup">D mean deviation (K)</th>
+        <th colspan="3" class="gw-mean-dev" id="gwSMeanGroup">S mean deviation (K / % of set)</th>
         <th rowspan="2" id="gwHdrDcop">eval ΔCOP %</th>
         <th rowspan="2">Note</th>
       </tr>
-      <tr>
+      <tr class="gw-cols">
         <th id="gwHdrIndex">#</th><th>File</th><th>Data set</th><th>Test</th><th>Profile</th><th>HP</th>
         <th id="gwHdrCop">COP dataset</th>
         <th>Start s</th><th>End s</th><th>Kind</th>
@@ -173,12 +200,12 @@
         <th id="gwHdrDDb">D DB %</th><th id="gwHdrDDt">D dTreturn %</th>
         <th id="gwHdrSDb">S DB %</th><th id="gwHdrSWb">S WB %</th>
         <th id="gwHdrSFl">S flow %</th><th id="gwHdrSDt">S dTreturn %</th>
-        <th id="gwHdrHMeanDb">H mean DB K</th><th id="gwHdrHMeanWb">H mean WB K</th>
-        <th id="gwHdrHMeanTs">H mean Tsup K</th><th id="gwHdrHMeanDt">H mean dTreturn K</th>
-        <th id="gwHdrHMeanFl">H mean flow % of set</th>
-        <th id="gwHdrDMeanDb">D mean DB K</th><th id="gwHdrDMeanWb">D mean WB K</th>
-        <th id="gwHdrSMeanDb">S mean DB K</th><th id="gwHdrSMeanWb">S mean WB K</th>
-        <th id="gwHdrSMeanFl">S mean flow % of set</th>
+        <th class="gw-mean-dev" id="gwHdrHMeanDb">H mean DB K</th><th class="gw-mean-dev" id="gwHdrHMeanWb">H mean WB K</th>
+        <th class="gw-mean-dev" id="gwHdrHMeanTs">H mean Tsup K</th><th class="gw-mean-dev" id="gwHdrHMeanDt">H mean dTreturn K</th>
+        <th class="gw-mean-dev" id="gwHdrHMeanFl">H mean flow % of set</th>
+        <th class="gw-mean-dev" id="gwHdrDMeanDb">D mean DB K</th><th class="gw-mean-dev" id="gwHdrDMeanWb">D mean WB K</th>
+        <th class="gw-mean-dev" id="gwHdrSMeanDb">S mean DB K</th><th class="gw-mean-dev" id="gwHdrSMeanWb">S mean WB K</th>
+        <th class="gw-mean-dev" id="gwHdrSMeanFl">S mean flow % of set</th>
       </tr>
     </thead>
     <tbody id="gwBody"></tbody>
@@ -209,6 +236,7 @@
 {% block extra_js %}
 <script type="application/json" id="gwPreselected">{{ (preselected_rowids or []) | tojson }}</script>
 <script>
+  var GW_FREEZE_COLS = 10;       // the Entry block: # through Kind, frozen left
   var _gwPreselected = JSON.parse(document.getElementById('gwPreselected').textContent || '[]');
   var _gwSelector = null;        // the rowids the table was loaded with (null = whole database)
   var _gwLoaded = false;
@@ -273,12 +301,35 @@
     return gwCell(Number(v).toFixed(2), gwPctClass(v, metric));
   }
 
-  function gwDeltaCell(v, reason) {
+  /** The audit line behind one ΔCOP %: both slice COPs and the window each was
+   *  read over, in seconds like every other time on this page. A row scored
+   *  before the slices were stored has the % but no COPs; it keeps the plain
+   *  reading of the column instead of a half-filled sentence. */
+  function gwDeltaTitle(r) {
+    var slice = _gwMeta.delta_cop_slice_min;
+    var limit = _gwMeta.delta_cop_pct;
+    var tail = 'ΔCOP = (last − first) / first, limit ±' + limit + ' %';
+    if (!r || r.delta_cop_first == null || r.delta_cop_last == null) {
+      return 'First ' + slice + ' min against last ' + slice
+        + ' min of the saved evaluation window — ' + tail
+        + ' (save the clocks or use Compute missing scores to store the two slice COPs)';
+    }
+    function win(a, b) {
+      return (a == null || b == null) ? '?' : (gwSeconds(a) + '–' + gwSeconds(b) + ' s');
+    }
+    return 'first ' + slice + ' min: COP ' + Number(r.delta_cop_first).toFixed(3)
+      + ' over ' + win(r.delta_cop_first_start, r.delta_cop_first_end)
+      + '; last ' + slice + ' min: COP ' + Number(r.delta_cop_last).toFixed(3)
+      + ' over ' + win(r.delta_cop_last_start, r.delta_cop_last_end)
+      + ' — ' + tail;
+  }
+
+  function gwDeltaCell(v, reason, r) {
     if (v === null || v === undefined) { return gwNa(reason); }
     var n = Number(v);
     var cls = (Math.abs(n) > _gwMeta.delta_cop_pct) ? 'gw-num gw-red' : 'gw-num gw-green';
     var text = (n >= 0 ? '+' : '') + n.toFixed(2);
-    return gwCell(text, cls);
+    return gwCell(text, cls, gwDeltaTitle(r));
   }
 
   /** One signed mean deviation of an interval against its setpoint.
@@ -404,22 +455,81 @@
       tr.appendChild(gwPctCell(r.s_wb_pct, sR.wb, 'wb'));
       tr.appendChild(gwPctCell(r.s_flow_pct, sR.flow, 'flow'));
       tr.appendChild(gwPctCell(r.s_dtreturn_pct, sR.dtreturn, 'dtreturn'));
-      tr.appendChild(gwMeanCell(r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K'));
-      tr.appendChild(gwMeanCell(r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K'));
-      tr.appendChild(gwMeanCell(r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K'));
-      tr.appendChild(gwMeanCell(r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K'));
-      tr.appendChild(gwMeanCell(r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set'));
-      tr.appendChild(gwMeanCell(r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K'));
-      tr.appendChild(gwMeanCell(r.d_mean_wb_k, dmR.wb, _gwMeta.mean_d_wb_k, 'K'));
-      tr.appendChild(gwMeanCell(r.s_mean_db_k, smR.db, _gwMeta.mean_s_db_k, 'K'));
-      tr.appendChild(gwMeanCell(r.s_mean_wb_k, smR.wb, _gwMeta.mean_s_wb_k, 'K'));
-      tr.appendChild(gwMeanCell(r.s_mean_flow_pct, smR.flow, _gwMeta.mean_s_flow_pct, '% of set'));
-      tr.appendChild(gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason));
+      // The three mean groups carry one class so the checkbox can hide them as
+      // whole groups. `h_mean_tsup_k` stays here: it is hidden with the group,
+      // never deleted from the table.
+      [[r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K'],
+       [r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K'],
+       [r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K'],
+       [r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K'],
+       [r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set'],
+       [r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K'],
+       [r.d_mean_wb_k, dmR.wb, _gwMeta.mean_d_wb_k, 'K'],
+       [r.s_mean_db_k, smR.db, _gwMeta.mean_s_db_k, 'K'],
+       [r.s_mean_wb_k, smR.wb, _gwMeta.mean_s_wb_k, 'K'],
+       [r.s_mean_flow_pct, smR.flow, _gwMeta.mean_s_flow_pct, '% of set']
+      ].forEach(function (m) {
+        var td = gwMeanCell(m[0], m[1], m[2], m[3]);
+        td.classList.add('gw-mean-dev');
+        tr.appendChild(td);
+      });
+      tr.appendChild(gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason, r));
       tr.appendChild(gwCell(r.note || '', 'gw-note'));
+      // The Entry block stays put while the score columns scroll sideways.
+      for (var c = 0; c < GW_FREEZE_COLS && c < tr.children.length; c++) {
+        tr.children[c].classList.add('gw-freeze', 'gw-freeze-' + c);
+      }
       body.appendChild(tr);
     });
     document.getElementById('gwTable').style.display = rows.length ? '' : 'none';
+    gwSyncFreeze();
   }
+
+  /** Left offsets of the frozen Entry block, measured once from the header row
+   *  and handed to CSS as variables: one write per column, not one per cell.
+   *  The same trick keeps the second header row under the first one. */
+  function gwSyncFreeze() {
+    var table = document.getElementById('gwTable');
+    var groups = table && table.querySelector('thead tr.gw-groups');
+    var cols = table && table.querySelector('thead tr.gw-cols');
+    if (!table || !groups || !cols) { return; }
+    // Mark the header cells of the Entry block the same way the rows are marked.
+    if (groups.children.length) { groups.children[0].classList.add('gw-freeze', 'gw-freeze-entry'); }
+    for (var h = 0; h < GW_FREEZE_COLS && h < cols.children.length; h++) {
+      cols.children[h].classList.add('gw-freeze', 'gw-freeze-' + h);
+    }
+    var left = 0;
+    var cells = cols.querySelectorAll('th.gw-freeze');
+    for (var i = 0; i < cells.length; i++) {
+      table.style.setProperty('--gw-left-' + i, left + 'px');
+      left += cells[i].getBoundingClientRect().width;
+    }
+    table.style.setProperty('--gw-header-row-height',
+                            groups.getBoundingClientRect().height + 'px');
+  }
+
+  /* One checkbox, off on every load: the three mean-deviation groups are
+     hidden with a class on the table, never removed and never remembered. The
+     Entry block is remeasured afterwards because the columns moved. Nothing is
+     written to a settings file and the CSV is untouched. */
+  function gwApplyMeanDevs() {
+    var box = document.getElementById('gwShowMeanDevs');
+    var table = document.getElementById('gwTable');
+    if (!box || !table) { return; }
+    table.classList.toggle('gw-hide-mean', !box.checked);
+    gwSyncFreeze();
+  }
+
+  (function () {
+    var box = document.getElementById('gwShowMeanDevs');
+    if (box) {
+      box.checked = false;
+      box.addEventListener('change', gwApplyMeanDevs);
+    }
+    gwApplyMeanDevs();
+  })();
+
+  window.addEventListener('resize', gwSyncFreeze);
 
   /* ───────────────────────────────────────────────────────────────────────
      The three filters.

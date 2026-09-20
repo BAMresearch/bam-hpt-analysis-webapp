@@ -30,7 +30,7 @@
     "applies_to": "variable_flow",
     "band_key": "mean_tmean_k",
     "description": "Mean water temperature: cycle mean of T_mean_log against the ecodesign Table 3 mean. Variable-flow tests only \u2014 fixed-flow tests run above the Table 3 mean at part load by physics, so they are judged on Tsup instead. No transient band is defined.",
-    "standard_reference": "BAM lab proposal \u2014 the ecodesign draft defines no tolerance for the mean temperature. 0.5 K chosen as the analogue of SN EN 14511-3:2022 Table 6 Interval H (mean supply temperature)."
+    "standard_reference": "Working tolerance \u2014 the ecodesign draft defines none for the mean temperature. 0.5 K chosen as the analogue of SN EN 14511-3:2022 Table 6 Interval H (mean supply temperature)."
   },
   "mean_db_k": 0.6,
   "mean_wb_k": 0.4,

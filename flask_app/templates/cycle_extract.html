@@ -184,7 +184,7 @@
         <span class="small-help" id="dbClockStatus">
           Fills the <b>gaps</b> in <span class="mono">{{ open_database_label }}</span>: every file that has
           entries here, file by file, after you confirm. Already-saved parents are <b>not</b> rewritten —
-          to change a file you can see, open it, <b>Propose</b> and <b>Save all proposed</b>; to redo a
+          to change a file you can see, open it, <b>Edit clocks</b> and <b>Save all clocks</b>; to redo a
           whole pass, <b>Clear</b> first. Nothing runs until you confirm.
         </span>
       </div>
@@ -202,8 +202,9 @@
           </span>
         </div>
         <div class="d-flex align-items-center">
-          <button id="proposeClocksBtn" class="btn btn-outline-dark btn-sm mr-2" type="button">
-            <i class="fas fa-stopwatch"></i> Propose guideline clocks
+          <button id="proposeClocksBtn" class="btn btn-outline-dark btn-sm mr-2" type="button"
+                  title="Open the D / H / equilibrium / evaluation clocks of this file so you can change them. It writes nothing &mdash; Save clocks / Save all clocks is what stores. Saved clocks already draw on show without this button.">
+            <i class="fas fa-stopwatch"></i> Edit clocks
           </button>
           <label class="mb-0 mr-2 small-help" for="defaultKindSelect"
                  title="Fills rows whose kind could not be determined. It never overwrites a kind already set on a row.">
@@ -216,10 +217,10 @@
             <option value="continuous">continuous</option>
           </select>
           <button id="saveAllClocksBtn" class="btn btn-success btn-sm mr-3" type="button" disabled
-                  title="Store the current proposals for this whole file — or only the rows ticked under &quot;show&quot;">
-            <i class="fas fa-save"></i> Save all proposed
+                  title="Store the clocks now open for this whole file — or only the rows ticked under &quot;show&quot;">
+            <i class="fas fa-save"></i> Save all clocks
           </button>
-          <label class="mb-0 mr-3 small-help" title="Draw the sub-period layers for the rows you ticked below. Off by default. show works for rows that already have saved clocks, and for rows you have proposed.">
+          <label class="mb-0 mr-3 small-help" title="Draw the sub-period layers for the rows you ticked below. Off by default. show works for rows that already have saved clocks, and for rows you have open in Edit clocks.">
             <input type="checkbox" id="periodLayersToggle"> <b>Period layers</b>
           </label>
           <span class="small-help" id="layerToggles" style="opacity:.5;">
@@ -235,17 +236,19 @@
         </div>
       </div>
       <div class="small-help mt-1" id="clockStatus">
-        The parent entry stays the full cycle. <b>Propose guideline clocks</b> reads this file only and suggests
-        D (or S) + H, plus equilibrium / evaluation inside H on defrost and continuous cycles. Proposing stores
-        nothing: use <b>Save all proposed</b> for the file (or tick <b>show</b> on the rows you want), or
-        <b>edit</b> a single row. Rows whose kind stays unknown are skipped and listed. Lengths come from
+        The parent entry stays the full cycle. <b>Edit clocks</b> reads this file only and opens
+        D (or S) + H, plus equilibrium / evaluation inside H on defrost and continuous cycles, so you can
+        change them. It writes <b>nothing</b>: <b>Save all clocks</b> stores the file (or tick <b>show</b>
+        on the rows you want), <b>Save clocks</b> stores one row. A power-transition time already on the
+        row is <b>reused</b>, never overwritten; where it is still empty the same detector <b>Apply</b>
+        uses fills the preview only. Rows whose kind stays unknown are skipped and listed. Lengths come from
         <span class="mono">flask_app/config/cycle_periods.json</span>.
         <b>Period layers</b> stay off until you turn them on. <b>show</b> is available for any row that
-        already has <b>saved</b> clocks and for any row you have proposed; ticked rows then draw D/S, H,
-        equilibrium and evaluation on this chart. While you are editing a row the layers draw its
-        <b>proposal</b>, otherwise the <b>saved</b> bands — so a file you have just reloaded shows its
-        stored clocks without re-deriving anything. Editing and saving still need
-        <b>Propose guideline clocks</b>. Draft Tsup is a mean check, not an individual band, so there is
+        already has <b>saved</b> clocks — no click needed — and for any row you have open in
+        <b>Edit clocks</b>; ticked rows then draw D/S, H, equilibrium and evaluation on this chart.
+        While you are editing a row the layers draw the clocks you have <b>open</b>, otherwise the
+        <b>saved</b> bands — so a file you have just reloaded shows its stored clocks without
+        re-deriving anything. Draft Tsup is a mean check, not an individual band, so there is
         no Tsup strip here — the Deviations Tsup plot shades saved clocks instead.
       </div>
     </div>
@@ -835,8 +838,8 @@
     if (nSaved) {
       clockStatus(nSaved + ' of ' + _existingEntries.length + ' entr'
         + (_existingEntries.length === 1 ? 'y' : 'ies') + ' already carry <b>saved</b> guideline clocks. '
-        + 'Tick <b>show</b> and turn <b>Period layers</b> on to see those bands — no Propose needed. '
-        + '<b>Propose guideline clocks</b> is still what gives you clocks to <b>edit</b> or re-save.');
+        + 'Tick <b>show</b> and turn <b>Period layers</b> on to see those bands — no click needed. '
+        + '<b>Edit clocks</b> is what opens them for changing or re-saving; it stores nothing.');
     }
     renderExistingTable();
     renderChart();
@@ -861,8 +864,8 @@
         ? ' <span class="small-help" title="The proposal on screen is not what is stored '+
           '&mdash; press Save clocks to replace the saved rows.">&ne; saved</span>' : '';
       var showTitle = canShow
-        ? (pr ? 'Draw the proposed bands of this entry' : 'Draw the saved bands of this entry')
-        : 'No clocks yet — press Propose guideline clocks';
+        ? (pr ? 'Draw the open bands of this entry' : 'Draw the saved bands of this entry')
+        : 'No clocks yet — press Edit clocks';
       tr.innerHTML =
         '<td><input type="checkbox" class="ex-show" title="'+esc(showTitle)+'"'+
           (_clockShow[rid]?' checked':'')+(canShow?'':' disabled')+'></td>'+
@@ -880,7 +883,7 @@
             + (savedIcon ? (' ' + savedIcon) : '') + diffNote
           : (savedIcon
               ? savedIcon + ' <span class="small-help" title="Saved clocks can be shown; '+
-                'press Propose guideline clocks to edit them.">saved</span>'
+                'press Edit clocks to change them.">saved</span>'
               : '<span class="small-help">&mdash;</span>'))+'</td>';
       body.appendChild(tr);
       if (pr && _clockExpanded[rid]) body.appendChild(buildClockRow(e, pr));
@@ -956,7 +959,7 @@
           numInput('ck-dsend', ds ? ds.end_time : null, 'Buffer end. Moving it rebuilds H and any locked eq/eval.')+
           '</div>')+
         '<div class="col-auto pb-1">'+
-          '<button class="btn btn-outline-secondary btn-sm ck-reset" type="button" title="Drop my edits and re-propose from the stored data">reset</button> '+
+          '<button class="btn btn-outline-secondary btn-sm ck-reset" type="button" title="Drop my edits and derive this row again from the stored data">reset</button> '+
           '<button class="btn btn-success btn-sm ck-save" type="button">Save clocks</button>'+
         '</div>'+
       '</div>'+
@@ -1057,7 +1060,7 @@
     }).length;
     var unknown = (d.entries||[]).filter(function(p){ return p.kind === 'unknown'; }).length;
     var fromDefault = (d.entries||[]).filter(function(p){
-      return p.kind_source === 'file-level default';
+      return String(p.kind_source || '').indexOf('file-level default') === 0;
     }).length;
     var twoSpan = (d.entries||[]).filter(function(p){
       return (p.periods||[]).filter(function(x){
@@ -1069,8 +1072,9 @@
       + (twoSpan ? (', ' + twoSpan + ' with two D / S spans') : '')
       + (fromDefault ? (', ' + fromDefault + ' took kind <b>' + esc(defaultKind()) + '</b> from the file-level default') : '')
       + (unknown ? (', ' + unknown + ' need a kind — set one per row or pick a default above') : '')
-      + '. Tick <b>show</b> and <b>Period layers</b> to draw them; a row you are editing draws its '
-      + 'proposal, a row you have not proposed draws its saved bands.');
+      + '. Nothing is stored yet — <b>Save clocks</b> or <b>Save all clocks</b> does that. '
+      + 'Tick <b>show</b> and <b>Period layers</b> to draw them; a row you are editing draws the clocks '
+      + 'you have open, a row you have not opened draws its saved bands.');
     document.getElementById('saveAllClocksBtn').disabled = !Object.keys(_clockProposals).length;
     renderExistingTable();
     renderChart();
@@ -1115,12 +1119,12 @@
     // silently widen that scope back to the whole file.
     var ticked = tickedProposedRowids();
     if (!ticked.length && tickedRowids().length) {
-      clockStatus('The ticked row(s) have no proposal yet. Press <b>Propose guideline clocks</b> first, '
+      clockStatus('The ticked row(s) have no clocks open yet. Press <b>Edit clocks</b> first, '
         + 'or untick them to save the whole file.');
       return;
     }
     var scope = ticked.length ? (ticked.length + ' ticked row(s)') : 'every row of this file';
-    clockStatus('Saving the proposed clocks for ' + scope + '…');
+    clockStatus('Saving the open clocks for ' + scope + '…');
     var resp = await fetch('/api/cycle_extract/save_all_periods', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ file_name: _fileName, rowids: ticked.length ? ticked : null,
@@ -1211,12 +1215,12 @@
       showDbClockModal('Save clocks for the open database',
         head + '<p><b>Nothing to write.</b> All ' + d.n_saved + ' parent cycl'
         + (d.n_saved === 1 ? 'e' : 'es') + ' already carry saved guideline clocks, and this pass never '
-        + 'overwrites them.</p><ul><li>To <b>update</b> one file: open it, <b>Propose guideline clocks</b>, '
-        + 'then <b>Save all proposed</b>.</li><li>To <b>retry the whole database</b> with new clock rules: '
+        + 'overwrites them.</p><ul><li>To <b>update</b> one file: open it, <b>Edit clocks</b>, '
+        + 'then <b>Save all clocks</b>.</li><li>To <b>retry the whole database</b> with new clock rules: '
         + '<b>Clear saved guideline clocks</b> first, then run this again.</li></ul>' + note,
         '', '', null);
       dbClockStatus('Nothing to write — every parent in this database already has saved clocks. '
-        + 'Use <b>Save all proposed</b> to update one file, or <b>Clear saved guideline clocks</b> '
+        + 'Use <b>Save all clocks</b> to update one file, or <b>Clear saved guideline clocks</b> '
         + 'to redo the whole database.');
       return;
     }
@@ -1231,7 +1235,7 @@
     showDbClockModal('Save clocks for the open database',
       head
       + '<p><b>' + d.n_unsaved + '</b> parent cycl' + (d.n_unsaved === 1 ? 'e' : 'es') + ' in <b>'
-      + files.length + '</b> file' + (files.length === 1 ? '' : 's') + ' will be proposed and saved. '
+      + files.length + '</b> file' + (files.length === 1 ? '' : 's') + ' will be derived and saved. '
       + '<b>' + d.n_saved + '</b> already-saved parent cycl' + (d.n_saved === 1 ? 'e is' : 'es are')
       + ' left alone — this pass never overwrites stored clocks.</p>'
       + '<div class="table-responsive" style="max-height:220px; overflow-y:auto;">'
@@ -1384,8 +1388,8 @@
       _clockProposals = {}; _clockOverrides = {}; _clockExpanded = {};
       document.getElementById('saveAllClocksBtn').disabled = true;
       await loadExistingEntries();
-      clockStatus('Saved guideline clocks were cleared for this file. <b>Propose guideline clocks</b> '
-        + 'derives them again — nothing was proposed or saved for you.');
+      clockStatus('Saved guideline clocks were cleared for this file. <b>Edit clocks</b> '
+        + 'opens them again — nothing was derived or saved for you.');
     }
   }
 
