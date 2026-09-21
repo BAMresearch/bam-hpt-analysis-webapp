@@ -5774,8 +5774,11 @@ def test_period_stats_reads_only_the_store():
     check('the guideline buffer is buffer_min, not 0',
           webapp._guideline_buffer_s() == 600, str(webapp._guideline_buffer_s()))
     tpl = open(os.path.join(REPO, 'flask_app', 'templates', 'base.html'), encoding='utf-8').read()
-    check('dTreturn Insights is still in the nav', 'dtreturn_insights' in tpl,
-          'the old pipeline page was hidden')
+    check('dTreturn Insights is off the navbar',
+          'dtreturn_insights' not in tpl and 'dTreturn Insights' not in tpl,
+          'the research page is back on the nav')
+    check('the /dtreturn_insights route is still defined',
+          "@app.route('/dtreturn_insights')" in src)
 
 
 # ---------------------------------------------------------------------------
@@ -7225,6 +7228,58 @@ def test_suggest_leaves_the_drop_to_drop_finder_and_min_gap_alone():
               str(stored))
 
 
+def test_compose_test_label_is_letter_and_flow():
+    check('B + fixed is B fixed',
+          webapp.compose_test_label('B', 'fixed') == 'B fixed')
+    check('A + std is A std',
+          webapp.compose_test_label('A', 'std') == 'A std')
+    check('letter only when flow is empty',
+          webapp.compose_test_label('E', None) == 'E')
+    check('empty parts yield None',
+          webapp.compose_test_label('', '') is None
+          and webapp.compose_test_label(None, None) is None)
+
+
+def test_infer_metadata_test_label_combines_letter_and_flow():
+    var_fl = webapp.infer_metadata_from_filename('HPT_RRT1_Lab04_B_VarFl.xlsx')
+    check('filename letter stays on test_cond', var_fl.get('test_cond') == 'B')
+    check('Test_label is B var, not a second copy of B',
+          var_fl.get('test_label') == 'B var', repr(var_fl.get('test_label')))
+    std_fl = webapp.infer_metadata_from_filename('unit_lab01_A_StdFl.xlsx')
+    check('StdFl becomes A std',
+          std_fl.get('test_cond') == 'A' and std_fl.get('test_label') == 'A std',
+          repr(std_fl.get('test_label')))
+
+
+def test_review_modal_hides_test_label_and_drops_stale_copy():
+    html = _template('index.html')
+    review = html.split('id="reviewNewEntriesModal"', 1)[1]
+    header = review.split('id="reviewNewEntriesTable"', 1)[1].split('</thead>', 1)[0]
+    blurb = review.split('alert-info', 1)[1].split('</div>', 1)[0]
+    check('review header still has Test cond', 'Test cond' in header)
+    check('review header has no Test label column', 'Test label' not in header)
+    check('Indicator stays on the review table', 'Indicator' in header)
+    check('Notes stay on the review table', 'Notes' in header)
+    check('the old Period Statistics drop/ramp rule is gone',
+          'Period Statistics can split' not in blurb
+          and 'must contain' not in blurb)
+    check('Table 3 is gone from the review blurb', 'Table 3' not in blurb)
+    check('confirm still writes test_label from cond and flow',
+          'values.test_label' in review and 'flow_config' in review)
+
+
+def test_dtreturn_insights_is_off_the_nav():
+    nav = _template('base.html')
+    check('the navbar has no dTreturn Insights item',
+          'dTreturn Insights' not in nav and '/dtreturn_insights' not in nav)
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('the /dtreturn_insights route is still there',
+          "@app.route('/dtreturn_insights')" in src)
+    page = _template('dtreturn_insights.html')
+    check('the page says it is off the navbar',
+          'not on the navbar' in page.lower())
+
+
 def main():
     test_app_py_was_not_truncated()
     test_defrost_opens_in_d()
@@ -7427,6 +7482,10 @@ def main():
     test_colour_pstat_template_and_csv()
     test_colour_gw_mean_groups_are_one_checkbox()
     test_colour_changed_nothing_it_was_told_to_leave_alone()
+    test_compose_test_label_is_letter_and_flow()
+    test_infer_metadata_test_label_combines_letter_and_flow()
+    test_review_modal_hides_test_label_and_drops_stale_copy()
+    test_dtreturn_insights_is_off_the_nav()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed: {', '.join(FAILURES)}")

@@ -137,7 +137,7 @@ Open `import_hpt.ipynb` with working directory = the cloned folder (§3).
 1. Pick the Plotdaten file.
 2. **Select a unit profile** (required). HP ID fills itself.
 3. Confirm or add cycles. Set **ds** per cycle (1, 2, 3, …) *before* Apply.
-4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Test label, Lab ID and HP ID (HP ID from the profile). Apply also stores default guideline clocks (D/H or S/H, plus equilibrium and evaluation when they fit). **Period Statistics** reads those clocks — **Notes** no longer need `drop` or `ramp` for the split.
+4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Lab ID and HP ID (HP ID from the profile). Test label is stored as the letter plus flow (for example `B fixed`) and is not on the modal. Apply also stores default guideline clocks (D/H or S/H, plus equilibrium and evaluation when they fit). **Period Statistics** reads those clocks — **Notes** no longer need `drop` or `ramp` for the split.
 
 5. (Optional — needed for evaluation-window means and interval checks.) **Edit clocks** → confirm kind → **Save all clocks** or **Save clocks**. **Edit clocks** only opens the clocks; nothing is stored until you save. Check them on **Guideline Windows**. Definitions: [Analysis Guide](ANALYSIS_GUIDE.md) §1 / §5.1.
 
@@ -175,7 +175,6 @@ You may see yellow notifications; they are not errors but notes about how missin
 | Deviations | Parent-cycle bands; Plot |
 | Guideline Windows | Saved clocks, evaluation means, interval % / ΔCOP |
 | Period Statistics | Defrost / heating (or Off / On) sub-periods from saved guideline clocks |
-| dTreturn Insights | Return-temperature controllability |
 | Scatter | Compare units / flows / (if needed) climate×application |
 | Export | Summary for Excel workbooks |
 

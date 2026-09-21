@@ -892,10 +892,9 @@
                         <div id="reviewImportNotices" class="import-notices"></div>
                         <div class="alert alert-info">
                             Fields below are auto-filled from the filename and defaults. Adjust anything that is wrong before Confirm.
-                            Climate (Average / Warmer / Colder) and application (LT / MT / HT) select Table 3 leaving-water and mean-water setpoints.
+                            <strong>Test cond</strong> is the condition letter (setpoints and the usual defrost / on–off hint). Climate and application pick the setpoint slice.
                             <strong>COP dataset</strong> also sets Scatter dataset to the same value here; you can split them later on the Data page.
-                            After you confirm, the app recomputes derived quantities and deviation statistics.
-                            <strong>Notes</strong> must contain <code>drop</code> or <code>ramp</code> for defrost (A/B/E/F) and on/off (C/D) windows so Period Statistics can split sub-periods; use something else (for example <code>other</code>) only when the window has no compressor transition.
+                            After Confirm, derived quantities and full-cycle deviations are recomputed. Clocks are already stored at Apply; change them on Cycle Extract.
                         </div>
                         <div id="reviewNewEntriesError" class="alert alert-danger" style="display:none;"></div>
                         <div class="form-group mb-3">
@@ -905,7 +904,7 @@
                                 Required. One profile for every row in this batch (same unit).
                                 Filename patterns are matched when possible; otherwise pick a profile or
                                 <a href="{{ url_for('profiles_page') }}">create one on Profiles</a>.
-                                The profile also auto-fills <b>hp_id</b> for grouping in scatter plots and dTreturn insights.
+                                The profile also auto-fills <b>hp_id</b> for grouping in scatter plots.
                             </small>
                         </div>
                         <div class="table-responsive">
@@ -917,19 +916,18 @@
                                         <th class="col-num">Start</th>
                                         <th class="col-num">End</th>
                                         <th class="col-compact">Test cond</th>
-                                        <th class="col-compact" title="From the filename (A–G); usually the same as Test cond">Test label</th>
                                         <th class="col-climate">Climate</th>
                                         <th class="col-select">Application</th>
                                         <th class="col-select">Flow</th>
                                         <th class="col-compact">Lab ID</th>
-                                        <th class="col-compact" title="Filled from the unit profile; used for grouping in scatter and dTreturn">HP ID</th>
-                                        <th class="col-text" title="Signal used to mark cycle start/end">Indicator</th>
-                                        <th class="col-text" title="Use drop or ramp to split defrost/on-off windows into sub-periods">Notes</th>
+                                        <th class="col-compact" title="Filled from the unit profile; used for grouping in scatter plots">HP ID</th>
+                                        <th class="col-text" title="Optional reminder of how the cycle start was chosen (e.g. Pelec)">Indicator</th>
+                                        <th class="col-text" title="Optional reminder (e.g. drop or ramp). Not required for Period Statistics">Notes</th>
                                         <th class="col-cop">COP dataset</th>
                                     </tr>
                                 </thead>
                                 <tbody id="reviewNewEntriesTbody">
-                                    <tr><td colspan="14" class="text-muted">Loading…</td></tr>
+                                    <tr><td colspan="13" class="text-muted">Loading…</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -2907,7 +2905,6 @@
                 addCell(entry.end_time ?? '', 'col-num');
 
                 const testCond = input(v.test_cond); testCond.dataset.key = 'test_cond'; addCell(testCond, 'col-compact');
-                const testLabel = input(v.test_label); testLabel.dataset.key = 'test_label'; addCell(testLabel, 'col-compact');
                 const climate = optionSelect(v.climate, ['', 'Average', 'Warmer', 'Colder']); climate.dataset.key = 'climate'; addCell(climate, 'col-climate');
                 const application = optionSelect(v.application, ['', 'LT', 'MT', 'HT']); application.dataset.key = 'application'; addCell(application, 'col-select');
                 const flowCfg = flowSelect(v.flow_config); flowCfg.dataset.key = 'flow_config'; addCell(flowCfg, 'col-select');
@@ -2915,12 +2912,12 @@
                 const hpId = input(v.hp_id, 'number'); hpId.dataset.key = 'hp_id'; addCell(hpId, 'col-compact');
                 const indicator = input(v.indicator || 'Pelec');
                 indicator.dataset.key = 'indicator';
-                indicator.title = 'Signal used to mark cycle start/end (e.g. Pelec, Tsupply)';
+                indicator.title = 'Optional reminder of how the cycle start was chosen (e.g. Pelec)';
                 indicator.placeholder = 'Pelec';
                 addCell(indicator, 'col-text');
                 const notes = input(v.notes);
                 notes.dataset.key = 'notes';
-                notes.title = 'drop = window starts at a power drop; ramp = window starts at a power ramp-up; other = no sub-period split';
+                notes.title = 'Optional reminder (e.g. drop or ramp). Not required for Period Statistics';
                 addCell(notes, 'col-text');
                 const copDs = yesNoSelect(v.cop_dataset); copDs.dataset.key = 'cop_dataset'; addCell(copDs, 'col-cop');
 
@@ -2985,6 +2982,8 @@
                 if (values.cop_dataset) {
                     values.scatter_dataset = values.cop_dataset;
                 }
+                const labelParts = [values.test_cond, values.flow_config].filter(Boolean);
+                values.test_label = labelParts.length ? labelParts.join(' ') : null;
                 values.profile_id = profileId || null;
                 return { rowid, values };
             });

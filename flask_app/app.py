@@ -833,6 +833,18 @@ def ensure_results_columns(columns: dict[str, str]) -> None:
         conn.close()
 
 
+def compose_test_label(test_cond, flow_config):
+    """Human-readable Test_label from the condition letter and flow.
+
+    Examples: ``B fixed``, ``A std``, ``E var``. Not a condition letter —
+    setpoints and kind still read ``test_cond``. Empty parts are omitted.
+    """
+    letter = str(test_cond or '').strip()
+    flow = str(flow_config or '').strip()
+    parts = [p for p in (letter, flow) if p]
+    return ' '.join(parts) if parts else None
+
+
 def infer_metadata_from_filename(file_name: str) -> dict:
     """
     Infer metadata fields from filename + defaults.
@@ -843,7 +855,7 @@ def infer_metadata_from_filename(file_name: str) -> dict:
 
     hp_id = None
     lab_id = None
-    test_label = None
+    test_cond = None
 
     # Don't use word-boundaries here because filenames often have underscores (word chars),
     # e.g. "hp<n>_lab<nn>_..." would fail \b...\b.
@@ -865,10 +877,8 @@ def infer_metadata_from_filename(file_name: str) -> dict:
     parts = re.split(r'[_\-\s]+', os.path.splitext(base)[0])
     for p in parts:
         if re.fullmatch(r'[A-Ga-g]', p or ""):
-            test_label = p.upper()
+            test_cond = p.upper()
             break
-
-    test_cond = test_label
 
     climate = None
     application = None
@@ -906,7 +916,7 @@ def infer_metadata_from_filename(file_name: str) -> dict:
         # inferred
         'hp_id': hp_id,
         'lab_id': lab_id,
-        'test_label': test_label,
+        'test_label': compose_test_label(test_cond, flow_config),
         'test_cond': test_cond,
         'climate': climate,
         'application': application,
@@ -5917,6 +5927,9 @@ def api_apply_new_entries_metadata():
                 # If user set test_cond, keep dev_test_condition in sync unless explicitly provided
                 if 'test_cond' in values and 'dev_test_condition' not in values:
                     values['dev_test_condition'] = values.get('test_cond')
+                # Test_label is derived (e.g. "B fixed"); the letter stays on test_cond
+                values['test_label'] = compose_test_label(
+                    values.get('test_cond'), values.get('flow_config'))
                 # Review modal shows COP dataset only; keep scatter in lockstep unless sent separately
                 if 'cop_dataset' in values and 'scatter_dataset' not in values:
                     values['scatter_dataset'] = values.get('cop_dataset')
