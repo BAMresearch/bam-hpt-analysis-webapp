@@ -346,9 +346,8 @@ UI badges from `permissible_deviations.json`:
 | `Tsup.value` | 0.5 K | Instantaneous Tsup half-width |
 | `dTreturn.lower` / `upper` | −2.0 / +2.0 K | Controllability band |
 | `mean_tsup_k` / `mean_tmean_k` | 0.5 / 0.5 K | The two mean-temperature bands the Deviations table colours |
-| `mean_q_band_pct` | 5 % | Mean Q % band on Deviations, and the Q band on Scatter |
+| `mean_q_band_pct` | 5 % | Mean Q % band the Deviations table colours, and the Q band on Scatter |
 | `mean_db_k` / `mean_wb_k` / `mean_flow_pct` | 0.6 / 0.4 K / 1 % | **Scatter plot bands only.** Nothing on Deviations is coloured against them |
-| `mean_flow_pct` | 1.0 % | Mean flow colouring |
 | `flow_instantaneous_pct` | 2.5 % | Instantaneous flow band |
 | `db_pct_red` / `db_pct_yellow` | 5 / 1 | DB % colouring |
 | `wb_pct_red` / `wb_pct_yellow` | 5 / 1 | WB % |
@@ -356,7 +355,6 @@ UI badges from `permissible_deviations.json`:
 | `dtreturn_pct_red` / `dtreturn_pct_yellow` | 2 / 1 | dTreturn % |
 | `flow_pct_red` / `flow_pct_yellow` | 5 / 1 | Flow % |
 | `mean_q_pct_red` / `mean_q_pct_yellow` | 10 / 5 | Leftover keys, no longer read by any page |
-| `mean_q_band_pct` | 5.0 % | Qset ± band drawn on the heating-capacity plot |
 | `*_violations_red` | 0 | Count → red if above |
 
 These are the values shipped with v0.1 for the **parent** Deviations page. They are configuration, not agreed acceptance limits — see the TBD below.

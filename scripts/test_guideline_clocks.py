@@ -60,11 +60,8 @@ def check(name, condition, detail=''):
         FAILURES.append(name)
 
 
-# flask_app/app.py has been truncated three times (16 Sep, 20 Sep, 21 Sep 3.1
-# first pass): a complete-looking file of ~11 500 lines that still imports, but
-# is missing Cycle Extract / plots / the ``if __name__`` block. Import success
-# is not enough. This check reads the file as text so a short save fails the
-# suite before any other test.
+# A short flask_app/app.py can still import. This check reads the file as text
+# so a truncated save fails the suite before any other test.
 _APP_PY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             '..', 'flask_app', 'app.py')
 _APP_PY_MIN_LINES = 18000
@@ -3092,8 +3089,8 @@ def test_gw_html_json_csv_have_no_tsup_percent_fields():
     check('Deviations template no longer has the extra interval table',
           'Deviations by guideline interval' not in dev_html
           and 'intervalDeviationsTable' not in dev_html)
-    # Flipped by 3.2: the parent Violations / % columns are off the **table**.
-    # SQLite keeps them and Calculate still writes them (checked below).
+    # SQLite keeps the parent Violations / % columns; Calculate still writes
+    # them (checked below).
     check('parent dTreturn columns left the template',
           'dev_dtreturn_outside_count' not in dev_html
           and 'dev_dtreturn_percentage' not in dev_html)
@@ -6033,8 +6030,8 @@ def test_deviations_template_scrolls_inside_a_box_and_freezes_duration():
           all(c in html for c in ('badge-violation', 'badge-good', 'badge-warning')))
     check('Calculate Statistics and the per-column Update were left alone',
           'Calculate Statistics' in html and 'update-dev-btn' in html)
-    # Flipped by 3.2: the four individual % columns left the table with the
-    # editor. They stay in SQLite; only the page stopped showing them.
+    # Parent individual % columns stay in SQLite; only the page stopped showing
+    # them.
     check('the parent individual % columns are off the table',
           not any(k in html for k in ('dev_db_percentage', 'dev_wb_percentage',
                                       'dev_dtreturn_percentage',
@@ -6183,8 +6180,7 @@ def test_hide_deviations_removes_the_individual_tsup_columns():
     check('the Tsup row of the % colouring table is gone',
           'config_tsup_pct_red' not in html and 'config_tsup_pct_yellow' not in html
           and 'config_tsup_violations_red' not in html)
-    # 3.2 went further: there is no Save on this page at all, so nothing here
-    # can blank a stored key. The carry-over constant went with the form.
+    # There is no Save on this page, so nothing here can blank a stored key.
     check('no Save means nothing to carry over',
           'DEV_STORED_TSUP' not in html and 'formData' not in html,
           'the band-editor form is back')
@@ -6566,9 +6562,9 @@ def test_chrome_deviations_mean_cells_are_green_red_or_plain():
 
 
 def test_chrome_set_on_hover_on_guideline_windows_and_period_statistics():
-    # Period Statistics: the colour hover already had the signed deviation and
-    # the band; 3.2 adds the set that was subtracted. Uncoloured cells are
-    # untouched, and dTreturn has no set to name.
+    # Period Statistics: colour hover names the signed deviation, the band and
+    # the set that was subtracted. Uncoloured cells are untouched; dTreturn has
+    # no set to name.
     _cls, title = _colour('H', 'avg_t_db', 7.5)
     check('a coloured Period Statistics cell names the set',
           'set 7' in title and '+0.50 K' in title and '±0.3 K' in title, title)
