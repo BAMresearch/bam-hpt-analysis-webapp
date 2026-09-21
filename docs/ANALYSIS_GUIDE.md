@@ -196,7 +196,7 @@ The single worst-case deviation (`dev_max_*_deviation`) is retained in the datab
 
 The **Deviations** page still scores the **whole parent window** with §5 / §8 / §11. Guideline Windows scores **saved** guideline clocks only. Colouring on both pages is a reading aid, not a stored pass/fail (§10). Missing series or a window that was not saved is **n/a**, never `0`.
 
-**Individual %** uses the same rule as the parent: share of samples outside the band, `count / N × 100`. Equilibrium and evaluation reuse Interval **H**. D and S use their own half-widths. There is **no Tsup %** on Guideline Windows: the draft outlet check is a **mean** ±0.5 K, not an individual sample band. Parent Deviations still stores full-cycle Tsup %.
+**Individual %** uses the same rule as the parent: share of samples outside the band, `count / N × 100`, but **every half-width on this page comes from `flask_app/config/interval_deviations.json`** — H, D and S each carry their own keys and none of them reads `permissible_deviations.json`. Equilibrium and evaluation reuse Interval **H**'s keys (they are clocks inside H) and keep their own `dtreturn_k`. The Deviations page has no band editor at all any more — it only *shows*, read-only, the three full-cycle mean bands it colours — so nothing on that page can move these percentages or the interval steps on the Deviations plot. There is **no Tsup %** on Guideline Windows: the draft outlet check is a **mean** ±0.5 K, not an individual sample band. Parent Deviations still stores full-cycle Tsup %.
 
 \(T_{\mathrm{return,calc}}\) is the **set** liquid-sink inlet. Therefore
 
@@ -208,7 +208,7 @@ is measured return minus set on every interval (do not invent a separate return 
 
 | Check | Window | Individual band (as implemented) |
 |-------|--------|----------------------------------|
-| H / eq / eval DB, WB, flow | that saved window | same as parent Interval H: DB/WB ±1 K, flow ±2.5 % (fixed-flow only) |
+| H / eq / eval DB, WB, flow | that saved window | DB ±1 K, WB ±1 K, flow ±2.5 % (fixed-flow only) — Interval **H**'s `db_k` / `wb_k` / `flow_instantaneous_pct` in `interval_deviations.json`, **not** the parent `DB` / `WB` / `flow_instantaneous_pct` |
 | H / eq / eval **dTreturn** | that saved window | **±0.5 K** (`interval_deviations.json` `dtreturn_k`) — **not** the parent −2…+2 K |
 | D individual | union of saved D spans | DB ±5.0 K; dTreturn ±2 K. No D WB %, D flow %, D Tsup % |
 | S individual | union of saved S spans | DB/WB ±2.0 K; flow ±2.5 % (fixed-flow); dTreturn ±1 K. No S Tsup % |
@@ -233,7 +233,7 @@ DB / WB / Tsup = \(\bar T - T_{\mathrm{set}}\); dTreturn mean = mean of \(T_{\ma
 
 Empty, not 0, when there is no evaluation window, the window is shorter than two slices, or a slice has no Q/P. Not the first/last five minutes of H.
 
-Config: `flask_app/config/interval_deviations.json`. These values are draft configuration, not agreed acceptance limits.
+Config: `flask_app/config/interval_deviations.json` — the single source for every interval band above, individual and mean. The numbers happen to match the parent Interval H widths today; they are separate keys and may be retuned on their own. These values are draft configuration, not agreed acceptance limits.
 
 ---
 
@@ -325,11 +325,12 @@ UI badges from `permissible_deviations.json`:
 
 | Display | Rule |
 |---------|------|
-| Instantaneous % | red if `% > *_pct_red`; yellow if `% > *_pct_yellow`; else green |
-| Violation count | red if `count > *_violations_red` (0 → any count &gt; 0 can be red) |
-| Max + / Max − | red if beyond the transient band (`DB/WB/Tsup.value`, `dTreturn.lower/upper`, `flow_instantaneous_pct`); else green |
-| Mean DB/WB/Tsup/Tmean | red if \|mean dev\| &gt; `mean_*_k`; yellow if &gt; half the limit; else green |
-| Mean Q % / mean flow % | analogous red/yellow thresholds |
+| Instantaneous % and violation counts | Still calculated and stored per entry, but **no longer columns on Deviations** — the draft scores those sample shares by interval (§5.1), not over the whole cycle |
+| Max + / Max − (Deviations, behind **Show extra columns**) | red if beyond the transient band (`DB/WB.value`, `dTreturn.lower/upper`, `flow_instantaneous_pct`); else green |
+| Mean Tsup / Mean Tmean (Deviations) | green if \|mean dev\| ≤ `mean_tsup_k` / `mean_tmean_k`, red otherwise. **Two colours, no yellow and no half-limit step.** Mean Tmean only on variable flow |
+| Mean Q % (Deviations) | green if \|dev\| ≤ `mean_q_band_pct` (±5 % of Qset), red otherwise. The older `mean_q_pct_red` / `mean_q_pct_yellow` pair is no longer read |
+| Mean DB / Mean WB / Mean flow % (Deviations) | **Plain numbers, never coloured.** The draft defines no full-cycle permissible deviation for them; the interval checks are on Guideline Windows and Period Statistics (§5.1). Hover names the set that was subtracted |
+| Interval means (Period Statistics, Guideline Windows) | green inside the draft interval mean band, red outside — the same two-colour rule. Hover names the signed deviation, the set and the band |
 | **N/A** | Calculated, but the quantity has **no valid points** in the window, **or the check does not apply** (water-to-water **instantaneous** DB/WB; variable-flow flow %; fixed-flow Tmean). Not 0. Water-to-water still shows **mean DB** (setpoint stored for Qset) and shows **-** for **mean WB** (WB setpoint not stored). |
 | **0** | Measured (or scored), and no violations |
 | **-** | Not yet calculated |
@@ -344,7 +345,9 @@ UI badges from `permissible_deviations.json`:
 | `WB.value` | 1.0 K | Instantaneous WB half-width |
 | `Tsup.value` | 0.5 K | Instantaneous Tsup half-width |
 | `dTreturn.lower` / `upper` | −2.0 / +2.0 K | Controllability band |
-| `mean_db_k` / `mean_wb_k` / `mean_tsup_k` / `mean_tmean_k` | 0.6 / 0.4 / 0.5 / 0.5 K | Mean-deviation colouring |
+| `mean_tsup_k` / `mean_tmean_k` | 0.5 / 0.5 K | The two mean-temperature bands the Deviations table colours |
+| `mean_q_band_pct` | 5 % | Mean Q % band on Deviations, and the Q band on Scatter |
+| `mean_db_k` / `mean_wb_k` / `mean_flow_pct` | 0.6 / 0.4 K / 1 % | **Scatter plot bands only.** Nothing on Deviations is coloured against them |
 | `mean_flow_pct` | 1.0 % | Mean flow colouring |
 | `flow_instantaneous_pct` | 2.5 % | Instantaneous flow band |
 | `db_pct_red` / `db_pct_yellow` | 5 / 1 | DB % colouring |
@@ -352,7 +355,7 @@ UI badges from `permissible_deviations.json`:
 | `tsup_pct_red` / `tsup_pct_yellow` | 5 / 1 | Tsup % |
 | `dtreturn_pct_red` / `dtreturn_pct_yellow` | 2 / 1 | dTreturn % |
 | `flow_pct_red` / `flow_pct_yellow` | 5 / 1 | Flow % |
-| `mean_q_pct_red` / `mean_q_pct_yellow` | 10 / 5 | Mean Q % colouring |
+| `mean_q_pct_red` / `mean_q_pct_yellow` | 10 / 5 | Leftover keys, no longer read by any page |
 | `mean_q_band_pct` | 5.0 % | Qset ± band drawn on the heating-capacity plot |
 | `*_violations_red` | 0 | Count → red if above |
 

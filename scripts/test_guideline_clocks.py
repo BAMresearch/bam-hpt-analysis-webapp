@@ -60,6 +60,36 @@ def check(name, condition, detail=''):
         FAILURES.append(name)
 
 
+# flask_app/app.py has been truncated three times (16 Sep, 20 Sep, 21 Sep 3.1
+# first pass): a complete-looking file of ~11 500 lines that still imports, but
+# is missing Cycle Extract / plots / the ``if __name__`` block. Import success
+# is not enough. This check reads the file as text so a short save fails the
+# suite before any other test.
+_APP_PY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'flask_app', 'app.py')
+_APP_PY_MIN_LINES = 18000
+_APP_PY_MUST_DEFINE = (
+    '_interval_individual_half',
+    'ensure_guideline_scores_table',
+    'period_statistics',
+    'api_cycle_extract_save_all_periods',
+)
+
+
+def test_app_py_was_not_truncated():
+    with open(_APP_PY_PATH, encoding='utf-8') as fh:
+        text = fh.read()
+    n = text.count('\n') + (0 if text.endswith('\n') else 1)
+    check('app.py is still the full file (>= %d lines)' % _APP_PY_MIN_LINES,
+          n >= _APP_PY_MIN_LINES, '%d lines' % n)
+    tail = text[-1200:]
+    check('app.py still ends by starting the Flask server',
+          "if __name__ == '__main__':" in tail and 'app.run(' in tail,
+          tail[-200:].replace('\n', ' / '))
+    for name in _APP_PY_MUST_DEFINE:
+        check('app.py still defines %s' % name, ('def %s' % name) in text)
+
+
 def windows(result):
     """{period_type: (start, end)} — only for results with one span per type."""
     return {p['period_type']: (p['start_time'], p['end_time']) for p in result['periods']}
@@ -2164,7 +2194,15 @@ def test_interval_pd_without_clocks_leaves_the_parent_alone():
         check('and nothing is reported as an interval row', body.get('interval_rows') == 0, str(body))
 
 
-def test_interval_pd_defrost_scores_h_eq_eval_with_the_h_bands():
+def test_interval_pd_defrost_block_scores_no_interval_but_keeps_delta_cop():
+    """The leftover Calculate extra block, once Interval H stopped following the parent file.
+
+    Nothing declares ``bands: permissible_deviations`` any more, so every row of
+    that block is ``no_bands`` — H, equilibrium and evaluation included, where
+    it used to score them with the parent widths. That block is not on the
+    Deviations page and is not being revived. The clock spans and ΔCOP never
+    needed the pointer and still come through.
+    """
     step = _pd_q_step_for(6.0)             # a clearly red ΔCOP
     with DeviationsHarness(sheet=_pd_sheet(q_step=step)) as h:
         h.add_entry(1)
@@ -2177,26 +2215,25 @@ def test_interval_pd_defrost_scores_h_eq_eval_with_the_h_bands():
         check('kind comes from the stored period types', (block or {}).get('kind') == 'defrost',
               str((block or {}).get('kind')))
         scored = {iv['key'] for iv in block['intervals'] if iv['status'] == 'ok'}
-        check('H, equilibrium and evaluation are scored',
-              scored == {'H', 'equilibrium', 'evaluation'}, str(sorted(scored)))
+        check('no interval of the extra block is scored any more', scored == set(),
+              str(sorted(scored)))
+        cfg = webapp.load_interval_deviations_config()
+        check('because no interval points at the parent band file',
+              not any(webapp._interval_pd_has_bands(cfg, k)
+                      for k in ('H', 'equilibrium', 'evaluation', 'D', 'S')),
+              str({k: (cfg['intervals'].get(k) or {}).get('bands')
+                   for k in ('H', 'equilibrium', 'evaluation')}))
 
         parent = h.parent_row(1)
         check('the parent still sees the D excursion (that is why it is the full cycle)',
               parent['dev_tsup_percentage'] > 5.0, str(parent['dev_tsup_percentage']))
         for key in ('H', 'equilibrium', 'evaluation'):
             iv = _pd_interval(block, key)
-            check(f'{key} is scored on its own time mask, so Tsup is in band there',
-                  iv['stats']['tsup_percentage'] == 0.0, str(iv['stats']['tsup_percentage']))
-        check('each interval counts only its own points',
-              (_pd_interval(block, 'equilibrium')['stats']['total_points']
-               < _pd_interval(block, 'H')['stats']['total_points'] < parent['dev_total_points']),
-              str([_pd_interval(block, 'equilibrium')['stats']['total_points'],
-                   _pd_interval(block, 'H')['stats']['total_points'], parent['dev_total_points']]))
-        check('equilibrium and evaluation reuse the Interval H bands',
-              (_pd_interval(block, 'equilibrium')['stats']['tsup_setpoint']
-               == _pd_interval(block, 'H')['stats']['tsup_setpoint']
-               == parent['dev_tsup_setpoint']),
-              str(_pd_interval(block, 'equilibrium')['stats']['tsup_setpoint']))
+            check(f'{key} shows its saved span but no bands',
+                  iv['status'] == 'no_bands' and iv['stats'] is None
+                  and 'not configured' in iv['reason'], str(iv))
+            check(f'{key} still reports the clock span it was given', bool(iv['spans']),
+                  str(iv['spans']))
 
         dc = block['delta_cop']
         expect = _pd_delta_cop(_pd_sheet(q_step=step), *PD_EVAL)
@@ -2231,8 +2268,8 @@ def test_interval_pd_on_off_has_no_equilibrium_evaluation_or_delta_cop():
         h.calculate([1])
         block = h.block(1)
         check('kind is on_off', block['kind'] == 'on_off', str(block['kind']))
-        check('H is still scored (the "on" span)',
-              _pd_interval(block, 'H')['status'] == 'ok', str(_pd_interval(block, 'H')))
+        check('H shows the saved "on" span but no bands (the pointer is gone)',
+              _pd_interval(block, 'H')['status'] == 'no_bands', str(_pd_interval(block, 'H')))
         for key in ('equilibrium', 'evaluation'):
             iv = _pd_interval(block, key)
             check(f'{key} is absent by rule on an on–off cycle',
@@ -2252,8 +2289,8 @@ def test_interval_pd_short_h_has_no_evaluation_or_delta_cop():
         h.add_period(1, 'equilibrium', PD_D_END, 4800.0)
         h.calculate([1])
         block = h.block(1)
-        check('H and equilibrium are still scored',
-              all(_pd_interval(block, k)['status'] == 'ok' for k in ('H', 'equilibrium')),
+        check('H and equilibrium keep their saved spans but have no bands',
+              all(_pd_interval(block, k)['status'] == 'no_bands' for k in ('H', 'equilibrium')),
               str([_pd_interval(block, k)['status'] for k in ('H', 'equilibrium')]))
         ev = _pd_interval(block, 'evaluation')
         check('evaluation is absent and the reason names the H length',
@@ -2288,8 +2325,8 @@ def test_interval_pd_short_evaluation_window_has_no_delta_cop():
         h.add_period(1, 'evaluation', 4800.0, 5220.0)   # 7 min: under two 5 min slices
         h.calculate([1])
         block = h.block(1)
-        check('the evaluation window itself is still scored',
-              _pd_interval(block, 'evaluation')['status'] == 'ok',
+        check('the evaluation window is still reported (no bands, but not absent)',
+              _pd_interval(block, 'evaluation')['status'] == 'no_bands',
               str(_pd_interval(block, 'evaluation')['status']))
         dc = block['delta_cop']
         check('but ΔCOP is empty, not 0', dc['value_pct'] is None, str(dc))
@@ -2353,8 +2390,15 @@ def test_interval_pd_page_no_longer_shows_the_extra_table():
         check('the page renders', page.status_code == 200, str(page.status_code))
         check('the extra interval table is gone', 'Deviations by guideline interval' not in html)
         check('a line points at Guideline Windows', 'Guideline Windows' in html)
-        check('the parent table still has dTreturn %', 'dTreturn %' in html)
-        check('Configure Deviation Bands is still there', 'Configure Deviation Bands' in html)
+        rendered = _header_labels(html, 'id="deviationsTable">')
+        check('the parent individual % columns are off the rendered table',
+              not any(lbl.startswith(gone) for lbl in rendered for gone in
+                      ('DB Violations', 'DB %', 'WB Violations', 'WB %',
+                       'dTreturn Violations', 'dTreturn %',
+                       'Flow Violations', 'Flow %')), str(rendered))
+        check('the band editor is a read-only card now',
+              'Configure Deviation Bands' not in html
+              and 'Permissible deviations (this page)' in html)
         check('rendering reads no sheet', reads == [], str(reads))
 
 
@@ -3048,8 +3092,11 @@ def test_gw_html_json_csv_have_no_tsup_percent_fields():
     check('Deviations template no longer has the extra interval table',
           'Deviations by guideline interval' not in dev_html
           and 'intervalDeviationsTable' not in dev_html)
-    check('parent dTreturn columns are unchanged',
-          'dev_dtreturn_outside_count' in dev_html and 'dev_dtreturn_percentage' in dev_html)
+    # Flipped by 3.2: the parent Violations / % columns are off the **table**.
+    # SQLite keeps them and Calculate still writes them (checked below).
+    check('parent dTreturn columns left the template',
+          'dev_dtreturn_outside_count' not in dev_html
+          and 'dev_dtreturn_percentage' not in dev_html)
     # Flipped with the hide/remove slice: the four parent **individual** Tsup
     # columns are off the table for good (draft individual liquid-sink outlet is
     # n/a). The mean check stays, here and on the plot.
@@ -3508,6 +3555,324 @@ def test_step_b_helper_without_clocks_or_with_unknown_types():
     db = _steps(gap, 'db')
     check('a time with no saved D/S/H period gets no step, not the parent band',
           [(iv, s, e) for iv, s, e, _h in db] == [('D', 0.0, PD_D_END)], str(db))
+
+
+# ---------------------------------------------------------------------------
+# Band decoupling: Interval H individual widths live in interval_deviations.json
+#
+# H / equilibrium / evaluation used to declare ``bands: permissible_deviations``
+# and read DB / WB / flow from the parent file, so saving Configure Deviation
+# Bands retuned the Guideline Windows H % and the Deviations Plot H steps. The
+# same numbers (DB 1.0 K, WB 1.0 K, flow 2.5 %) are now explicit keys on H, and
+# eq/eval reuse H. The parent file keeps its own full-cycle widths and is still
+# what Configure writes; nothing on an interval reads it. Synthetic sheets and
+# a throwaway SQLite only.
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _parent_bands_retuned(db=9.0, wb=9.0, flow=9.0):
+    """Configure Deviation Bands saved with absurd parent widths.
+
+    Everything that file drives moves together - ``load_permissible_deviations``
+    and the module-level ``DB_BAND`` / ``WB_BAND`` / ``DEVIATION_BANDS`` /
+    ``PERMISSIBLE_DEVIATIONS`` that the parent Calculate path reads - so an
+    interval that still shows ±1 K inside this block really has stopped
+    following it. Nothing is written to disk: the shipped JSON is untouched.
+    """
+    names = ('load_permissible_deviations', 'PERMISSIBLE_DEVIATIONS',
+             'DB_BAND', 'WB_BAND', 'DEVIATION_BANDS')
+    saved = {k: getattr(webapp, k) for k in names}
+    bands = dict(webapp.load_permissible_deviations())
+    bands['DB'] = dict(bands.get('DB') or {}, value=db)
+    bands['WB'] = dict(bands.get('WB') or {}, value=wb)
+    bands['flow_instantaneous_pct'] = flow
+    webapp.load_permissible_deviations = lambda: bands
+    webapp.PERMISSIBLE_DEVIATIONS = bands
+    webapp.DB_BAND = db
+    webapp.WB_BAND = wb
+    webapp.DEVIATION_BANDS = webapp.calculate_deviation_bands(
+        webapp.DEVIATION_SETPOINTS, db, wb)
+    try:
+        yield bands
+    finally:
+        for k, v in saved.items():
+            setattr(webapp, k, v)
+
+
+def _h_entry(**over):
+    """A results row for the synthetic E-condition sheet. No database needed."""
+    entry = {'file_name': PD_FILE, 'data_set': 1, 'test_cond': 'E',
+             'dev_test_condition': 'E', 'profile_id': 'HPT_RRT1', 'HP_ID': '1',
+             'start_time': 0.0, 'end_time': PD_END}
+    entry.update(over)
+    return entry
+
+
+def test_interval_individual_half_never_reads_the_parent_band_file():
+    with _parent_bands_retuned():
+        for interval in ('H', 'equilibrium', 'evaluation'):
+            got = [webapp._interval_individual_half(q, interval) for q in ('db', 'wb', 'flow')]
+            check(f'{interval} individual DB/WB/flow stay 1.0 K / 1.0 K / 2.5 % with parent 9',
+                  got == [1.0, 1.0, 2.5], str(got))
+            check(f'{interval} individual dTreturn is still ±0.5 K',
+                  webapp._interval_individual_half('dtreturn', interval) == 0.5,
+                  str(webapp._interval_individual_half('dtreturn', interval)))
+        stub = {'DB': {'value': 9.0}, 'WB': {'value': 9.0}, 'flow_instantaneous_pct': 9.0}
+        got = [webapp._interval_individual_half(q, 'H', parent_bands=stub)
+               for q in ('db', 'wb', 'flow')]
+        check('an explicit parent_bands argument is accepted but never read',
+              got == [1.0, 1.0, 2.5], str(got))
+        check('D individual DB stays ±5 K', webapp._interval_individual_half('db', 'D') == 5.0,
+              str(webapp._interval_individual_half('db', 'D')))
+        check('D WB is still n/a - not the H 1 K and not the parent 9 K',
+              webapp._interval_individual_half('wb', 'D') is None,
+              str(webapp._interval_individual_half('wb', 'D')))
+        check('D flow is n/a for the same reason',
+              webapp._interval_individual_half('flow', 'D') is None,
+              str(webapp._interval_individual_half('flow', 'D')))
+        s_halves = [webapp._interval_individual_half(q, 'S')
+                    for q in ('db', 'wb', 'flow', 'dtreturn')]
+        check('S keeps its own ±2 K / ±2 K / ±2.5 % / ±1 K',
+              s_halves == [2.0, 2.0, 2.5, 1.0], str(s_halves))
+        check('an interval nobody configured is n/a, never a parent fallback',
+              webapp._interval_individual_half('db', 'no_such_interval') is None)
+
+    parent = webapp.load_permissible_deviations()
+    check('the shipped parent file itself was not retuned',
+          float(parent['DB']['value']) == 1.0 and float(parent['WB']['value']) == 1.0,
+          str(parent['DB']))
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    for name in ('_interval_individual_half', '_interval_individual_band_steps',
+                 '_window_h_band_pcts'):
+        check(f'{name} does not call load_permissible_deviations at all',
+              'load_permissible_deviations(' not in _function_code(src, name), name)
+    check('_window_h_band_pcts no longer scores the band with calculate_entry_deviations',
+          'calculate_entry_deviations' not in _function_code(src, '_window_h_band_pcts'))
+
+
+def test_window_h_band_pcts_follows_the_interval_json_not_configure():
+    sheet = _pd_sheet(db_in_d=0.0, db_in_h=1.5, wb_in_d=0.0, wb_in_h=1.5)
+    df = sheet(PD_FILE, 1)
+    entry = _h_entry()
+    base = webapp._window_h_band_pcts(df, PD_FILE, 1, PD_D_END, PD_END, entry)
+    check('a 1.5 K offset in H is 100 % outside the Interval H ±1 K band',
+          base['db'] == (100.0, ''), str(base['db']))
+    check('the same holds for WB against its set - 1 K', base['wb'] == (100.0, ''),
+          str(base['wb']))
+    with _parent_bands_retuned():
+        retuned = webapp._window_h_band_pcts(df, PD_FILE, 1, PD_D_END, PD_END, entry)
+    check('saving Configure with DB 9 K does not move the H DB %',
+          retuned['db'] == base['db'], f"{retuned['db']} vs {base['db']}")
+    check('nor the H WB %', retuned['wb'] == base['wb'], f"{retuned['wb']} vs {base['wb']}")
+
+    h_spec = dict((webapp.load_interval_deviations_config().get('intervals') or {}).get('H') or {})
+    widened = webapp._window_h_band_pcts(df, PD_FILE, 1, PD_D_END, PD_END, entry,
+                                         spec=dict(h_spec, db_k=2.0))
+    check('the H db_k key is what moves it: ±2 K puts the same 1.5 K inside',
+          widened['db'] == (0.0, ''), str(widened['db']))
+    dropped = webapp._window_h_band_pcts(
+        df, PD_FILE, 1, PD_D_END, PD_END, entry,
+        spec={k: v for k, v in h_spec.items() if k != 'db_k'})
+    check('and no db_k at all is n/a with a reason, never 0',
+          dropped['db'][0] is None and 'no DB band' in dropped['db'][1], str(dropped['db']))
+
+    check('HPT_RRT1 is variable flow, so flow % is n/a and not 0',
+          base['flow'][0] is None and 'variable-flow' in base['flow'][1], str(base['flow']))
+    saved_var, saved_set = _fixed_flow_stubs()
+    try:
+        fixed = webapp._window_h_band_pcts(df, PD_FILE, 1, PD_D_END, PD_END, _h_entry())
+    finally:
+        _restore_flow_stubs(saved_var, saved_set)
+    check('with a fixed flow set the H flow % is a number against ±2.5 %',
+          fixed['flow'][0] == 0.0, str(fixed['flow']))
+
+    no_window = webapp._window_h_band_pcts(df, PD_FILE, 1, None, None, entry)
+    check('no saved window of this kind is n/a, never 0',
+          no_window['db'] == (None, 'no window of this kind is saved'), str(no_window['db']))
+    unread = webapp._window_h_band_pcts(None, PD_FILE, 1, PD_D_END, PD_END, entry)
+    check('an unreadable sheet says so instead of scoring',
+          unread['db'] == (None, 'the sheet could not be read'), str(unread['db']))
+    outside = webapp._window_h_band_pcts(df, PD_FILE, 1, PD_END + 100.0, PD_END + 200.0, entry)
+    check('a window the sheet has no samples in is n/a too',
+          outside['db'][0] is None, str(outside['db']))
+
+
+def test_interval_band_steps_ignore_the_parent_band_file():
+    periods = _step_periods_defrost()
+    with _parent_bands_retuned():
+        db = _steps(periods, 'db')
+        check('the H DB step is 1.0 K even with parent DB 9 K',
+              [(iv, half) for iv, _s, _e, half in db] == [('D', 5.0), ('H', 1.0)], str(db))
+        wb = _steps(periods, 'wb')
+        check('the H WB step is 1.0 K and D still has none',
+              [(iv, half) for iv, _s, _e, half in wb] == [('H', 1.0)], str(wb))
+        flow = _steps(periods, 'flow')
+        check('the H flow step is 2.5 % with parent flow 9 %',
+              [(iv, half) for iv, _s, _e, half in flow] == [('H', 2.5)], str(flow))
+        on_off = [{'period_type': 'off', 'start_time': 0.0, 'end_time': PD_D_END},
+                  {'period_type': 'on', 'start_time': PD_D_END, 'end_time': PD_END}]
+        check('S keeps its own ±2 K and H is still ±1 K on an on-off row',
+              [(iv, half) for iv, _s, _e, half in _steps(on_off, 'db')]
+              == [('S', 2.0), ('H', 1.0)], str(_steps(on_off, 'db')))
+
+
+def test_interval_json_holds_the_h_individual_widths_and_no_parent_pointer():
+    path = os.path.join(REPO, 'flask_app', 'config', 'interval_deviations.json')
+    raw = json.load(open(path, encoding='utf-8'))
+    intervals = raw['intervals']
+    check('no interval points at permissible_deviations any more',
+          not any('bands' in (intervals.get(k) or {}) for k in intervals),
+          str({k: (intervals.get(k) or {}).get('bands') for k in intervals}))
+    h = intervals['H']
+    check('H carries its own individual DB / WB / flow / dTreturn',
+          [h.get('db_k'), h.get('wb_k'), h.get('flow_instantaneous_pct'), h.get('dtreturn_k')]
+          == [1.0, 1.0, 2.5, 0.5], str(h))
+    check('H keeps every mean key it had',
+          [h.get(k) for k in ('mean_db_k', 'mean_wb_k', 'mean_tsup_k',
+                              'mean_dtreturn_k', 'mean_flow_pct')] == [0.3, 0.4, 0.5, 0.3, 1.0],
+          str(h))
+    check('equilibrium and evaluation stay dtreturn_k only - no second H table',
+          intervals['equilibrium'] == {'dtreturn_k': 0.5}
+          and intervals['evaluation'] == {'dtreturn_k': 0.5},
+          str([intervals['equilibrium'], intervals['evaluation']]))
+    check('D keys are unchanged',
+          intervals['D'] == {'db_k': 5.0, 'dtreturn_k': 2.0,
+                             'mean_db_k': 1.5, 'mean_wb_k': 1.0}, str(intervals['D']))
+    check('S keys are unchanged',
+          intervals['S'] == {'db_k': 2.0, 'wb_k': 2.0, 'flow_instantaneous_pct': 2.5,
+                             'dtreturn_k': 1.0, 'mean_db_k': 0.6, 'mean_wb_k': 0.6,
+                             'mean_flow_pct': 2.5}, str(intervals['S']))
+    check('the deltaCOP settings are untouched',
+          [raw['delta_cop_pct'], raw['delta_cop_slice_min']] == [2.5, 5],
+          str([raw['delta_cop_pct'], raw['delta_cop_slice_min']]))
+    check('the bands comment no longer says Interval H is shipped in the parent file',
+          'already ships in' not in raw['_bands_comment']
+          and 'own individual half-widths' in raw['_bands_comment'], raw['_bands_comment'][:120])
+    doc = webapp.load_interval_deviations_config.__doc__ or ''
+    check('and neither does the loader docstring',
+          'are not duplicated here' not in doc
+          and 'Nothing in here is read from' in doc, doc[:400])
+    parent = webapp.load_permissible_deviations()
+    check('the parent file keeps its own full-cycle widths and Configure still writes it',
+          [float(parent['DB']['value']), float(parent['WB']['value']),
+           float(parent['flow_instantaneous_pct']), float(parent['dTreturn']['lower']),
+           float(parent['dTreturn']['upper']), float(parent['mean_db_k'])]
+          == [1.0, 1.0, 2.5, -2.0, 2.0, 0.6],
+          str([parent['DB']['value'], parent['dTreturn'], parent['mean_db_k']]))
+
+
+def test_score_fingerprints_are_carried_over_instead_of_recomputed():
+    """Adding the H keys changed the file hash; the stored scores were still right.
+
+    The sweep only moves a row whose stored fingerprint is exactly
+    ``fingerprint(its saved clocks, its buffer_s, the old digest)``. A row that
+    had already missed because its clocks moved on stays a miss, and no payload
+    is touched. Throwaway SQLite, no sheet, no analyst database.
+    """
+    old = webapp.GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS[0]
+    digest = webapp._interval_deviations_config_hash()
+    check('the cache version was not bumped for this',
+          webapp.GUIDELINE_SCORE_CACHE_VERSION == 1,
+          str(webapp.GUIDELINE_SCORE_CACHE_VERSION))
+    check('the pre-decoupling digest is recorded and is not the current one',
+          bool(old) and old != digest, f"{old} vs {digest}")
+
+    buffer_s = webapp._guideline_buffer_s()
+    saved_clocks = [{'period_type': 'defrost', 'start_time': 0.0, 'end_time': PD_D_END},
+                    {'period_type': 'heating', 'start_time': PD_D_END, 'end_time': PD_END}]
+    moved_clocks = [{'period_type': 'defrost', 'start_time': 0.0, 'end_time': 900.0},
+                    {'period_type': 'heating', 'start_time': 900.0, 'end_time': PD_END}]
+
+    tmpdir = tempfile.mkdtemp(prefix='gw_fingerprint_')
+    db = os.path.join(tmpdir, 'throwaway.db')
+
+    def connect():
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    names = ('get_db_connection', 'get_database_path')
+    saved = {k: getattr(webapp, k) for k in names}
+    webapp.get_db_connection = connect
+    webapp.get_database_path = lambda: db
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            webapp.ensure_cycle_periods_table()
+            webapp.ensure_guideline_scores_table()
+        conn = connect()
+        try:
+            for rid, clocks in ((1, saved_clocks), (2, moved_clocks), (3, saved_clocks)):
+                for p in clocks:
+                    conn.execute(
+                        'INSERT INTO cycle_periods (entry_rowid, period_type, start_time, '
+                        'end_time, detection_method, buffer_s) VALUES (?,?,?,?,?,?)',
+                        (rid, p['period_type'], p['start_time'], p['end_time'],
+                         webapp.GUIDELINE_DETECTION_METHOD, buffer_s))
+            payloads = {
+                1: json.dumps({'h_db_pct': 12.5, 'note': 'carried over'}),
+                2: json.dumps({'h_db_pct': 33.0, 'note': 'clocks moved'}),
+                3: json.dumps({'h_db_pct': 44.0, 'note': 'unrelated fingerprint'}),
+            }
+            stored = {
+                # scored against the old file, clocks unchanged since -> carry over
+                1: webapp._guideline_score_fingerprint(saved_clocks, buffer_s, old),
+                # scored against the old file, but these clocks were edited afterwards
+                2: webapp._guideline_score_fingerprint(saved_clocks, buffer_s, old),
+                3: 'a' * 40,
+            }
+            for rid, fp in stored.items():
+                conn.execute(
+                    'INSERT INTO guideline_window_scores (entry_rowid, buffer_s, fingerprint, '
+                    'payload, computed_at) VALUES (?,?,?,?,?)',
+                    (rid, buffer_s, fp, payloads[rid], '2026-09-20T12:00:00'))
+            conn.commit()
+        finally:
+            conn.close()
+
+        webapp._guideline_fp_rewritten.discard(db)
+        with contextlib.redirect_stdout(io.StringIO()):
+            webapp.ensure_guideline_scores_table()
+
+        conn = connect()
+        try:
+            after = {int(r['entry_rowid']): (r['fingerprint'], r['payload'])
+                     for r in conn.execute(
+                         'SELECT entry_rowid, fingerprint, payload '
+                         'FROM guideline_window_scores').fetchall()}
+        finally:
+            conn.close()
+        fresh = webapp._guideline_score_fingerprint(saved_clocks, buffer_s)
+        check('the untouched row was rewritten to the fingerprint of the current file',
+              after[1][0] == fresh, f"{after[1][0]} vs {fresh}")
+        check('so Guideline Windows reads it back as a hit, with no rescoring',
+              after[1][0] != stored[1] and after[1][0] == fresh, after[1][0])
+        check('the row whose clocks moved keeps its stored fingerprint',
+              after[2][0] == stored[2], f"{after[2][0]} vs {stored[2]}")
+        check('so it is still a miss and was never promoted to a hit',
+              after[2][0] != webapp._guideline_score_fingerprint(moved_clocks, buffer_s)
+              and after[2][0] != fresh, after[2][0])
+        check('a fingerprint that matches nothing is left exactly as it was',
+              after[3][0] == stored[3], after[3][0])
+        check('no payload was rewritten',
+              [after[r][1] for r in (1, 2, 3)] == [payloads[r] for r in (1, 2, 3)],
+              str([after[r][1] for r in (1, 2, 3)]))
+
+        webapp._guideline_fp_rewritten.discard(db)
+        conn = connect()
+        try:
+            again = webapp._rewrite_guideline_score_fingerprints(conn)
+            unmoved = conn.execute(
+                'SELECT fingerprint FROM guideline_window_scores WHERE entry_rowid=1'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        check('a second sweep is a no-op', again == 0, str(again))
+        check('and row 1 is untouched by it', unmoved == fresh, unmoved)
+    finally:
+        for k, v in saved.items():
+            setattr(webapp, k, v)
+        webapp._guideline_fp_rewritten.discard(db)
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_plot_deviation_is_one_figure_per_quantity():
@@ -5666,12 +6031,14 @@ def test_deviations_template_scrolls_inside_a_box_and_freezes_duration():
 
     check('the badges were left alone',
           all(c in html for c in ('badge-violation', 'badge-good', 'badge-warning')))
-    check('Calculate and Configure bands were left alone',
-          'Configure Deviation Bands' in html and 'update-dev-btn' in html)
-    check('the PD columns that stayed are all still there',
-          all(k in html for k in ('dev_db_percentage', 'dev_wb_percentage',
-                                  'dev_dtreturn_percentage',
-                                  'dev_flow_percentage')))
+    check('Calculate Statistics and the per-column Update were left alone',
+          'Calculate Statistics' in html and 'update-dev-btn' in html)
+    # Flipped by 3.2: the four individual % columns left the table with the
+    # editor. They stay in SQLite; only the page stopped showing them.
+    check('the parent individual % columns are off the table',
+          not any(k in html for k in ('dev_db_percentage', 'dev_wb_percentage',
+                                      'dev_dtreturn_percentage',
+                                      'dev_flow_percentage')))
     check('the Guideline Windows dropdowns were not copied here',
           'gwFilter' not in html and 'gw-filters' not in html)
     check('the per-column filter row this page already had is unchanged',
@@ -5802,27 +6169,25 @@ def test_hide_deviations_removes_the_individual_tsup_columns():
 
     check('Mean Tsup Dev (K) stays on the table',
           'Mean Tsup Dev (K)' in labels, str(labels))
-    check('Mean Tsup +/- (K) stays in Configure',
-          'config_mean_tsup_k' in html and 'Mean Tsup' in html)
+    check('the Tsup mean band is named on the read-only card',
+          'config_mean_tsup_k' not in html and 'mean_tsup_k' in html)
     check('the Tsup mean plot stays',
           'response.image_tsup' in html and 'Tsup (mean)' in html)
     check('Q stays', 'mean_q_dev_kw' in html and 'mean_q_dev_pct' in html)
-    check('parent dTreturn columns stay',
-          'dev_dtreturn_outside_count' in html and 'dev_dtreturn_percentage' in html)
+    check('parent dTreturn columns left the table with the other % columns',
+          'dev_dtreturn_outside_count' not in html
+          and 'dev_dtreturn_percentage' not in html)
 
     check('Supply Temp (Tsup) is off the Transient operation config',
           'config_Tsup_value' not in html and 'Supply Temp (Tsup)' not in html)
     check('the Tsup row of the % colouring table is gone',
           'config_tsup_pct_red' not in html and 'config_tsup_pct_yellow' not in html
           and 'config_tsup_violations_red' not in html)
-    check('Save posts the stored Tsup band back unchanged',
-          'DEV_STORED_TSUP' in html
-          and 'value: DEV_STORED_TSUP.value' in html
-          and 'tsup_pct_red: DEV_STORED_TSUP.pct_red' in html
-          and 'tsup_violations_red: DEV_STORED_TSUP.violations_red' in html,
-          'the form would blank the stored Tsup keys')
-    check('and Save no longer requires a Tsup input',
-          'isNaN(formData.Tsup.value)' not in html, 'validation still wants the input')
+    # 3.2 went further: there is no Save on this page at all, so nothing here
+    # can blank a stored key. The carry-over constant went with the form.
+    check('no Save means nothing to carry over',
+          'DEV_STORED_TSUP' not in html and 'formData' not in html,
+          'the band-editor form is back')
 
     # Removing the columns from the page must not remove them from SQLite:
     # `init_deviation_columns` still declares them and Calculate still writes
@@ -5920,9 +6285,338 @@ def test_hide_deviations_copy_says_what_the_page_is():
     check('and it sends interval scores to Guideline Windows',
           'Guideline Windows' in text and 'interval' in text.lower(), text.strip())
     check('Filtering Help may stay', 'Filtering Help' in html)
-    check('Calculate and Configure were not restyled',
-          'Calculate Statistics' in html and 'Configure Deviation Bands' in html
-          and 'update-dev-btn' in html)
+    check('Calculate was not restyled',
+          'Calculate Statistics' in html and 'update-dev-btn' in html)
+    check('and the editor is a read-only card, not a Configure form',
+          'Configure Deviation Bands' not in html
+          and 'Permissible deviations (this page)' in html)
+
+
+
+# ---------------------------------------------------------------------------
+# Deviations chrome.
+#
+# The page is the **full-cycle parent** check, not a band editor and not a
+# sample-share scorer. The live Configure form is a read-only card of the three
+# H+D mean bands this table still colours (Tsup ±0.5 K, Tmean ±0.5 K on
+# variable flow, Q ±5 % of Qset); bands are changed in the committed JSON, and
+# the D / H / S interval checks live on Guideline Windows / Period Statistics.
+# The Violations / % columns and the Setpoint column leave the **table** only —
+# SQLite keeps them and Calculate still writes them.
+#
+# Colour on what is left is green inside / red outside, two colours, no yellow
+# and no half-limit step. Mean DB / WB / flow have no full-cycle band at all, so
+# they stay plain numbers and say so on hover. Sets are audit, not a check: the
+# letter badge names the letter and the slice, and every mean cell names the set
+# that was subtracted. Nothing here reads a workbook or a lab file.
+# ---------------------------------------------------------------------------
+
+#: A band file with the three H+D mean bands the page colours, plus the old
+#: red 10 / yellow 5 pair that Mean Q % must now ignore.
+CHROME_BANDS = {
+    'mean_tsup_k': 0.5, 'mean_tmean_k': 0.5, 'mean_q_band_pct': 5.0,
+    'mean_db_k': 0.6, 'mean_wb_k': 0.4, 'mean_flow_pct': 1.0,
+    'mean_q_pct_red': 10.0, 'mean_q_pct_yellow': 5.0,
+    'DB': {'value': 1.0}, 'WB': {'value': 1.0},
+    'dTreturn': {'lower': -2.0, 'upper': 2.0},
+    'flow_instantaneous_pct': 2.5,
+}
+
+
+def _chrome_entry(**over):
+    """One synthetic Deviations row: every set known, nothing read from a file."""
+    entry = {
+        'rowid': 1, 'file_name': 'synthetic.xlsx', 'data_set': 1,
+        'start_time': 0, 'end_time': 100, 'cycle_duration': 100.0,
+        'has_statistics': True, 'test_condition': 'A',
+        'climate_label': 'Average', 'application_label': 'MT',
+        'slice_from_entry': False,
+        'db_setpoint': 7.0, 'wb_setpoint': 6.0, 'tsup_setpoint': 45.0,
+        'tmean_setpoint': 40.0, 'qset_kw': 5.0,
+        'flow_setpoint': 1.0, 'flow_set_type': 'volume',
+        'flow_setpoint_display': 'v_set 1.000 m³/h',
+        'tmean_is_variable_flow': False,
+        'mean_db_deviation': 2.0, 'mean_wb_deviation': -2.0,
+        'mean_tsup_deviation': 0.4, 'mean_tmean_deviation': None,
+        'mean_q_dev_kw': 0.3, 'mean_q_dev_pct': 6.0, 'mean_flow_dev_pct': 3.0,
+        'total_points': 10, 'avg_timestep_size': 1.0, 'profile_id': '',
+    }
+    entry.update(over)
+    return entry
+
+
+def _chrome_render(entries):
+    """``[[(td tag, td inner), ...], ...]`` — the body cells of each rendered row.
+
+    The template is rendered straight from the Jinja environment on synthetic
+    rows, so the colour and the hover are read off the real page instead of off
+    a regular expression over the source.
+    """
+    with webapp.app.test_request_context():
+        html = webapp.app.jinja_env.get_template('deviations.html').render(
+            entries=entries, interval_entries=[], interval_config={},
+            deviation_bands={}, setpoints={}, total_entries=len(entries),
+            calculated_entries=len(entries), column_name_map={},
+            deviations=CHROME_BANDS, flow_modes=getattr(webapp, 'FLOW_MODES', {}))
+    body = html.split('id="deviationsTable"', 1)[1]                .split('<tbody>', 1)[1].split('</tbody>', 1)[0]
+    rows = []
+    for chunk in body.split('<tr ')[1:]:
+        rows.append(re.findall(r'(<td\b[^>]*>)(.*?)</td>', chunk, re.S))
+    return html, rows
+
+
+def test_chrome_deviations_bands_are_read_only():
+    html = _template('deviations.html')
+    check('the Configure editor is gone',
+          'Configure Deviation Bands' not in html
+          and 'deviationsConfigForm' not in html
+          and 'config_DB_value' not in html and 'config_mean_db_k' not in html
+          and 'Save Configuration' not in html and 'Reset to Defaults' not in html,
+          'a band input is still on the page')
+    check('the Transient operation block and the red/yellow % table went with it',
+          'Transient operation' not in html
+          and 'config_db_pct_red' not in html and 'config_mean_q_pct_red' not in html
+          and 'config_flow_instantaneous_pct' not in html
+          and 'Violation coloring thresholds' not in html)
+    check('the Design parameters block is off this page',
+          'unitDesignTable' not in html and 'addUnitDesignForm' not in html
+          and 'Design parameters' not in html and 'new_pdesign_kw' not in html)
+    check('the card is still a collapse, still closed on load, no longer "Configure"',
+          'class="collapse mt-3" id="configSection"' in html
+          and 'Permissible deviations (this page)' in html)
+
+    matrix = html.split('id="devBandMatrix"', 1)[1].split('</table>', 1)[0]
+    check('the matrix holds no input of any kind', '<input' not in matrix, matrix[:160])
+    for key in ('mean_tsup_k', 'mean_tmean_k', 'mean_q_band_pct'):
+        check('the matrix reads %s from the config already loaded' % key,
+              ("deviations.get('%s')" % key) in matrix, key)
+    check('Mean Q uses the band key, not the old red 10 / yellow 5 pair',
+          'mean_q_pct_red' not in html and 'mean_q_pct_yellow' not in html)
+    check('an empty band reads n/a, never 0',
+          'macro band_cell' in html and 'n/a' in html and 'value is none' in html)
+
+    card = html.split('id="devBandMatrixCard"', 1)[1].split('Filtering Help', 1)[0]
+    check('the card sends D / H / S to Guideline Windows and Period Statistics',
+          'Guideline Windows' in card and 'Period Statistics' in card, card[-600:])
+    check('it says bands are changed in the committed JSON, not here',
+          'committed' in card and 'User Guide' in card, card[-600:])
+    check('and it links to Profiles for the unit parameters',
+          "url_for('profiles_page')" in card, card[-400:])
+
+    # The numbers a partner actually reads, off the rendered card.
+    _rendered, _rows = _chrome_render([_chrome_entry()])
+    live = _rendered.split('id="devBandMatrix"', 1)[1].split('</table>', 1)[0]
+    check('the rendered matrix names Tsup ±0.5 K',
+          'Liquid sink outlet (Tsup)' in live and '0.5 K' in live, live)
+    check('the Tmean row is marked variable flow',
+          'variable flow' in live, live)
+    check('and Q is ±5 % of Qset',
+          '5 % of Qset' in live, live)
+
+
+def test_chrome_deviations_table_drops_violations_and_setpoint():
+    html = _template('deviations.html')
+    labels = _header_labels(html, 'id="deviationsTable">')
+    for gone in ('DB Violations', 'DB %', 'WB Violations', 'WB %',
+                 'dTreturn Violations', 'dTreturn %', 'Flow Violations', 'Flow %',
+                 'Setpoint'):
+        check('no "%s" header' % gone,
+              not any(lbl.startswith(gone) for lbl in labels), str(labels))
+    for gone in ('dev_db_outside_count', 'dev_db_percentage',
+                 'dev_wb_outside_count', 'dev_wb_percentage',
+                 'dev_dtreturn_outside_count', 'dev_dtreturn_percentage',
+                 'dev_flow_outside_count', 'dev_flow_percentage'):
+        check('%s has no per-column Update left on this page' % gone, gone not in html)
+    check('Test Condition stays', 'Test Condition' in labels, str(labels))
+    for stay in ('Mean DB Dev (K)', 'Mean WB Dev (K)', 'Mean Tsup Dev (K)',
+                 'Mean Tmean Dev (K)', 'Mean Q dev (kW)', 'Mean Q dev (%)',
+                 'Mean flow dev (%)'):
+        check('"%s" stays' % stay, stay in labels, str(labels))
+
+    header = html.split('id="deviationsTable">', 1)[1].split('</tr>', 1)[0]
+    cells = re.findall(r'(<th\b[^>]*>)(.*?)</th>', header, re.S)
+    lab = [re.sub(r'<[^>]+>', ' ', c).strip() for _, c in cells]
+    extra = [i for i, (tag, _) in enumerate(cells) if 'dev-extra' in tag]
+    check('the extra block opens on Total Points and closes on Avg Timestep (s)',
+          lab[extra[0]].startswith('Total Points')
+          and lab[extra[-1]].startswith('Avg Timestep (s)'),
+          str([lab[i] for i in extra]))
+    check('and everything between them is a Max +/- column',
+          all(lab[i].startswith('Max ') for i in extra[1:-1]),
+          str([lab[i] for i in extra[1:-1]]))
+    check('Actions comes after the block and stays visible',
+          lab[-1] == 'Actions' and 'dev-extra' not in cells[-1][0], str(lab[-3:]))
+    check('Calculate Statistics stays in the toolbar', 'Calculate Statistics' in html)
+    check('the checkbox no longer promises violation counts',
+          'violation counts' not in html and 'Show extra columns' in html)
+
+    # Removing columns from the page must not remove them from SQLite.
+    src = open(os.path.join(REPO, 'flask_app', 'app.py'), encoding='utf-8').read()
+    check('Calculate still writes the parent violation counts and percentages',
+          'dev_db_percentage = ?' in src and 'dev_flow_percentage = ?' in src
+          and 'dev_dtreturn_outside_count = ?' in src,
+          'a Calculate write was removed with the column')
+    check('nothing drops a parent dev_* column',
+          not any(('DROP COLUMN ' + k) in src.upper() for k in
+                  ('DEV_DB_PERCENTAGE', 'DEV_WB_PERCENTAGE',
+                   'DEV_DTRETURN_PERCENTAGE', 'DEV_FLOW_PERCENTAGE',
+                   'DEV_DB_SETPOINT')),
+          'a dev_* column is dropped in code')
+
+    # Header, filter row and body row stay the same width after the renumbering.
+    filt = html.split('<tr class="filter-row">', 1)[1].split('</tr>', 1)[0]
+    fcells = re.findall(r'<th\b[^>]*>.*?</th>', filt, re.S)
+    body = html.split('id="deviationsTable">', 1)[1].split('<tbody>', 1)[1] \
+               .split('</tbody>', 1)[0]
+    tds = re.findall(r'(?m)^\s*<td\b[^>]*>', body)
+    check('header, filter row and body row are the same width',
+          len(cells) == len(fcells) == len(tds),
+          '%d / %d / %d' % (len(cells), len(fcells), len(tds)))
+    check('every remaining filter still points at its own column',
+          all(int(m.group(1)) == i
+              for i, cell in enumerate(fcells)
+              for m in [re.search(r'data-column="(\d+)"', cell)] if m),
+          'a filter is off by the removed columns')
+
+
+def test_chrome_deviations_mean_cells_are_green_red_or_plain():
+    # Row 0: fixed flow, Tsup inside its band, Q 6 % outside its 5 % band.
+    # Row 1: variable flow, Tsup outside, Tmean outside, Q 4 % inside.
+    rows = _chrome_render([
+        _chrome_entry(),
+        _chrome_entry(rowid=2, mean_tsup_deviation=0.6, mean_q_dev_pct=4.0,
+                      tmean_is_variable_flow=True, mean_tmean_deviation=0.6),
+    ])[1]
+    check('two rows rendered', len(rows) == 2, str(len(rows)))
+    a, b = rows[0], rows[1]
+    check('the row is the full width', len(a) == len(b) == 33, '%d / %d' % (len(a), len(b)))
+
+    MEAN_DB, MEAN_WB, MEAN_TSUP, MEAN_TMEAN = 15, 16, 17, 18
+    MEAN_Q_KW, MEAN_Q_PCT, MEAN_FLOW = 19, 20, 21
+
+    # Mean DB / WB / flow: plain numbers, no badge of any colour, and a hover
+    # that says why there is no colour instead of leaving the analyst guessing.
+    for name, idx in (('Mean DB', MEAN_DB), ('Mean WB', MEAN_WB),
+                      ('Mean flow', MEAN_FLOW)):
+        tag, inner = a[idx]
+        check('%s Dev is a plain number' % name,
+              'badge-violation' not in inner and 'badge-good' not in inner
+              and 'badge-warning' not in inner, inner.strip())
+        check('%s hover says there is no full-cycle PD' % name,
+              'No full-cycle PD' in tag and 'Guideline Windows' in tag, tag)
+    check('Mean DB names the set that was subtracted', '7.0' in a[MEAN_DB][0], a[MEAN_DB][0])
+    check('Mean WB names its own set', '6.0' in a[MEAN_WB][0], a[MEAN_WB][0])
+    check('Mean flow names the flow set',
+          'v_set 1.000' in a[MEAN_FLOW][0], a[MEAN_FLOW][0])
+
+    # Mean Tsup: green inside 0.5 K, red outside, and no yellow in between.
+    check('Mean Tsup +0.40 K is green',
+          'badge-good' in a[MEAN_TSUP][1] and 'badge-warning' not in a[MEAN_TSUP][1],
+          a[MEAN_TSUP][1].strip())
+    check('Mean Tsup +0.60 K is red, not yellow',
+          'badge-violation' in b[MEAN_TSUP][1] and 'badge-warning' not in b[MEAN_TSUP][1],
+          b[MEAN_TSUP][1].strip())
+    check('and its hover names the set and the band',
+          '45.0' in a[MEAN_TSUP][0] and '0.5 K' in a[MEAN_TSUP][0], a[MEAN_TSUP][0])
+
+    # Mean Tmean: variable flow only.
+    check('Mean Tmean on a fixed-flow row is n/a and uncoloured',
+          'n/a (fixed flow)' in a[MEAN_TMEAN][1]
+          and 'badge-violation' not in a[MEAN_TMEAN][1]
+          and 'badge-good' not in a[MEAN_TMEAN][1], a[MEAN_TMEAN][1].strip())
+    check('and it says why on hover',
+          'variable flow' in a[MEAN_TMEAN][0], a[MEAN_TMEAN][0])
+    check('Mean Tmean +0.60 K on a variable-flow row is red, not yellow',
+          'badge-violation' in b[MEAN_TMEAN][1]
+          and 'badge-warning' not in b[MEAN_TMEAN][1], b[MEAN_TMEAN][1].strip())
+    check('with the Table 3 mean named on hover',
+          '40.0' in b[MEAN_TMEAN][0] and '0.5 K' in b[MEAN_TMEAN][0], b[MEAN_TMEAN][0])
+
+    # Mean Q: kW is a plain number, % is read against mean_q_band_pct. The band
+    # file above still carries the old red 10 / yellow 5 pair, so a 6 % row that
+    # comes back green or yellow means the template is reading the wrong key.
+    check('Mean Q (kW) is a plain number',
+          'badge-' not in a[MEAN_Q_KW][1], a[MEAN_Q_KW][1].strip())
+    check('and its hover names Qset', '5.00 kW' in a[MEAN_Q_KW][0], a[MEAN_Q_KW][0])
+    check('Mean Q +6.00 % is red against the ±5 % band, not yellow at red 10',
+          'badge-violation' in a[MEAN_Q_PCT][1]
+          and 'badge-warning' not in a[MEAN_Q_PCT][1], a[MEAN_Q_PCT][1].strip())
+    check('Mean Q +4.00 % is green', 'badge-good' in b[MEAN_Q_PCT][1],
+          b[MEAN_Q_PCT][1].strip())
+    check('and the hover names Qset and the band',
+          '5.00 kW' in a[MEAN_Q_PCT][0] and '5 %' in a[MEAN_Q_PCT][0], a[MEAN_Q_PCT][0])
+
+    # A missing mean is a dash, never a 0 and never red.
+    empty = _chrome_render([_chrome_entry(
+        mean_db_deviation=None, mean_wb_deviation=None, mean_tsup_deviation=None,
+        mean_q_dev_kw=None, mean_q_dev_pct=None, mean_flow_dev_pct=None)])[1][0]
+    for name, idx in (('Mean DB', MEAN_DB), ('Mean Tsup', MEAN_TSUP),
+                      ('Mean Q (kW)', MEAN_Q_KW), ('Mean Q (%)', MEAN_Q_PCT)):
+        check('a missing %s is a dash, not 0 and not red' % name,
+              '>-<' in empty[idx][1] and 'badge-violation' not in empty[idx][1]
+              and '0.00' not in empty[idx][1], empty[idx][1].strip())
+
+    # The letter badge carries the audit trail the Setpoint column used to.
+    tag = a[14][0]
+    check('Test Condition hovers the letter and the climate / application slice',
+          'Test condition A' in tag and 'Average' in tag and 'MT' in tag, tag)
+    missing = _chrome_render([_chrome_entry(test_condition=None)])[1][0]
+    check('a row with no letter says so instead of inventing one',
+          'no test condition is stored' in missing[14][0], missing[14][0])
+
+
+def test_chrome_set_on_hover_on_guideline_windows_and_period_statistics():
+    # Period Statistics: the colour hover already had the signed deviation and
+    # the band; 3.2 adds the set that was subtracted. Uncoloured cells are
+    # untouched, and dTreturn has no set to name.
+    _cls, title = _colour('H', 'avg_t_db', 7.5)
+    check('a coloured Period Statistics cell names the set',
+          'set 7' in title and '+0.50 K' in title and '±0.3 K' in title, title)
+    check('flow names the set with its stored unit',
+          'set 1 m³/h' in _colour('H', 'avg_volume_flow', 1.02)[1],
+          _colour('H', 'avg_volume_flow', 1.02)[1])
+    check('the parent Q cell names Qset in kW',
+          'Qset 5.00 kW' in _colour('D+H', 'avg_q_corr_wbuh', 5.4)[1],
+          _colour('D+H', 'avg_q_corr_wbuh', 5.4)[1])
+    check('dTreturn has no set to name — it is already a deviation',
+          'set ' not in _colour('H', 'dtreturn_avg', 0.2)[1],
+          _colour('H', 'dtreturn_avg', 0.2)[1])
+    check('an uncoloured cell is still ("", "")',
+          _colour('H', 'avg_ts_buh', 45.0) == ('', ''),
+          str(_colour('H', 'avg_ts_buh', 45.0)))
+    check('a cell with no setpoint keeps its own reason and gains no set',
+          _colour('H', 'avg_t_db', 7.5, setpoints={})[1]
+          == webapp.PERIOD_STAT_COLOUR_NO_SETPOINT['db'],
+          _colour('H', 'avg_t_db', 7.5, setpoints={})[1])
+
+    # Guideline Windows: the sets ride on the row at render, never in the
+    # cached score payload, so no fingerprint and no cache version moves.
+    sets = webapp._guideline_row_sets(
+        {'file_name': 'synthetic.xlsx', 'test_cond': '', 'dev_db_setpoint': 7.0})
+    check('the row carries a set per quantity',
+          set(sets) == {'db', 'wb', 'tsup', 'flow', 'flow_type',
+                        'climate', 'application'}, str(sorted(sets)))
+    check('dry-bulb falls back to the stored set and wet-bulb is one K under it',
+          sets['db'] == 7.0 and sets['wb'] == 6.0, str(sets))
+    check('a slice is always resolved (Average / MT when nothing names one)',
+          bool(sets['climate']) and bool(sets['application']), str(sets))
+    check('the sets are not part of the cached score payload',
+          'sets' not in webapp.GUIDELINE_SCORE_VALUE_KEYS
+          and not any(k.startswith('set') for k in webapp.GUIDELINE_SCORE_VALUE_KEYS),
+          str(webapp.GUIDELINE_SCORE_VALUE_KEYS))
+    check('and the cache version did not move', webapp.GUIDELINE_SCORE_CACHE_VERSION == 1,
+          str(webapp.GUIDELINE_SCORE_CACHE_VERSION))
+
+    gw = _template('guideline_windows.html')
+    check('gwMeanCell is handed the set it should name',
+          'function gwSetLabel(' in gw
+          and 'gwMeanCell(m[0], m[1], m[2], m[3], gwSetLabel(r, m[4]))' in gw)
+    check('and a row that cannot resolve one keeps the band-only hover',
+          "if (setLabel) { title += ', ' + setLabel; }" in gw)
+    for name in ('guideline_windows.html', 'period_statistics.html'):
+        heads = re.findall(r'<th\b[^>]*>(.*?)</th>', _template(name), re.S)
+        check('no Setpoint column was added to %s' % name,
+              not any('Setpoint' in h for h in heads), name)
 
 
 # ---------------------------------------------------------------------------
@@ -6536,6 +7230,7 @@ def test_suggest_leaves_the_drop_to_drop_finder_and_min_gap_alone():
 
 
 def main():
+    test_app_py_was_not_truncated()
     test_defrost_opens_in_d()
     test_defrost_opens_in_d_without_later_drop()
     test_defrost_opens_in_d_with_later_drop()
@@ -6593,7 +7288,7 @@ def main():
     test_eval_means_when_the_sheet_cannot_be_read()
     test_eval_means_stay_empty_without_an_evaluation_window()
     test_interval_pd_without_clocks_leaves_the_parent_alone()
-    test_interval_pd_defrost_scores_h_eq_eval_with_the_h_bands()
+    test_interval_pd_defrost_block_scores_no_interval_but_keeps_delta_cop()
     test_interval_pd_on_off_has_no_equilibrium_evaluation_or_delta_cop()
     test_interval_pd_short_h_has_no_evaluation_or_delta_cop()
     test_interval_pd_delta_cop_just_under_and_just_over_the_limit()
@@ -6639,6 +7334,11 @@ def main():
     test_step_b_helper_two_d_spans_keep_h_in_the_gap()
     test_step_b_helper_on_off_and_continuous()
     test_step_b_helper_without_clocks_or_with_unknown_types()
+    test_interval_individual_half_never_reads_the_parent_band_file()
+    test_window_h_band_pcts_follows_the_interval_json_not_configure()
+    test_interval_band_steps_ignore_the_parent_band_file()
+    test_interval_json_holds_the_h_individual_widths_and_no_parent_pointer()
+    test_score_fingerprints_are_carried_over_instead_of_recomputed()
     test_plot_deviation_is_one_figure_per_quantity()
     test_plot_deviation_carries_flow_in_the_same_modal()
     test_plot_water_to_water_keeps_tsup_and_dtreturn()
@@ -6714,6 +7414,11 @@ def main():
     test_hide_deviations_removes_the_individual_tsup_columns()
     test_hide_deviations_tail_is_one_checkbox_and_actions_stays()
     test_hide_deviations_copy_says_what_the_page_is()
+
+    test_chrome_deviations_bands_are_read_only()
+    test_chrome_deviations_table_drops_violations_and_setpoint()
+    test_chrome_deviations_mean_cells_are_green_red_or_plain()
+    test_chrome_set_on_hover_on_guideline_windows_and_period_statistics()
 
     test_colour_map_is_the_locked_table()
     test_colour_ts_buh_is_never_coloured_on_h_or_on()

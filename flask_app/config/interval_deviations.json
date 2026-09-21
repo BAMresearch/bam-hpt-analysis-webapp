@@ -1,14 +1,16 @@
 {
   "_comment": "Permissible deviations per guideline interval. Draft values - not the official HPT guideline.",
-  "_bands_comment": "Interval H is what the tool already ships in flask_app/permissible_deviations.json. Equilibrium and evaluation reuse those bands; there is deliberately no second H table here.",
-  "_dtreturn_comment": "dtreturn_k is the individual liquid sink INLET half-width in K: dTreturn = T_return_emu - T_return_calc, measured return minus set return. Interval H is +/-0.5 K and equilibrium and evaluation reuse it. The parent Deviations page keeps its own full-cycle band (-2...+2 K) in permissible_deviations.json. An interval without dtreturn_k is shown as n/a, never as 0 %.",
-  "_ds_comment": "Interval D and S individual half-widths from the draft transient table (air-to-water). Encode only filled cells: a missing key is n/a, never 0. Do not set bands to permissible_deviations - that would score D/S with Interval H.",
+  "_bands_comment": "Interval H carries its own individual half-widths here: db_k, wb_k, flow_instantaneous_pct and dtreturn_k. Equilibrium and evaluation reuse the H keys for DB / WB / flow and keep their own dtreturn_k, so there is deliberately no second H table. Nothing in this file points at flask_app/permissible_deviations.json any more: saving Configure Deviation Bands edits the full-cycle parent Deviations tolerances only, and must not retune Guideline Windows interval % or the Deviations Plot interval steps.",
+  "_dtreturn_comment": "dtreturn_k is the individual liquid sink INLET half-width in K: dTreturn = T_return_emu - T_return_calc, measured return minus set return. Interval H is +/-0.5 K and equilibrium and evaluation carry the same +/-0.5 K. The parent Deviations page keeps its own full-cycle band (-2...+2 K) in permissible_deviations.json. An interval without dtreturn_k is shown as n/a, never as 0 %.",
+  "_ds_comment": "Interval D and S individual half-widths from the draft transient table (air-to-water). Encode only filled cells: a missing key is n/a, never 0. Do not copy the Interval H keys onto D or S - that would score them with the +/-1 K of H.",
   "_mean_comment": "mean_* keys are the MEAN half-widths of the draft transient table: one arithmetic mean per interval against its setpoint, not a share of samples. Guideline Windows scores them as H / D / S mean columns (K, or % of set for flow). They are a different quantity from the individual widths above, so H mean DB is +/-0.3 K while H individual DB stays +/-1 K, and they must not be copied onto the parent Deviations page (mean DB there stays 0.6 K). A draft cell that is - or ? has no key here and stays n/a: D has no mean Tsup / flow / inlet, S has no mean Tsup / inlet, and Tmean is undecided on H, D and S.",
   "delta_cop_pct": 2.5,
   "delta_cop_slice_min": 5,
   "intervals": {
     "H": {
-      "bands": "permissible_deviations",
+      "db_k": 1.0,
+      "wb_k": 1.0,
+      "flow_instantaneous_pct": 2.5,
       "dtreturn_k": 0.5,
       "mean_db_k": 0.3,
       "mean_wb_k": 0.4,
@@ -16,8 +18,8 @@
       "mean_dtreturn_k": 0.3,
       "mean_flow_pct": 1.0
     },
-    "equilibrium": { "bands": "permissible_deviations", "dtreturn_k": 0.5 },
-    "evaluation": { "bands": "permissible_deviations", "dtreturn_k": 0.5 },
+    "equilibrium": { "dtreturn_k": 0.5 },
+    "evaluation": { "dtreturn_k": 0.5 },
     "D": {
       "db_k": 5.0,
       "dtreturn_k": 2.0,

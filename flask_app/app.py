@@ -11446,55 +11446,25 @@ def _series_for_entry_deviations(entry, fallback_df):
     return loaded
 
 
-def _window_h_band_pcts(df_full, file_name, data_set, start, end, entry):
+def _window_h_band_pcts(df_full, file_name, data_set, start, end, entry, spec=None):
     """Interval H individual DB / WB / flow % on one saved window.
 
-    Same formulas as the parent Deviations table (``calculate_entry_deviations``),
-    cut to this window. Empty window or a check that does not apply → n/a, never 0.
+    Same counting rule as D and S, so all three interval rows of Guideline
+    Windows are scored by one helper against one file: the widths are Interval
+    **H**'s own ``db_k`` / ``wb_k`` / ``flow_instantaneous_pct`` in
+    ``interval_deviations.json``. It deliberately does not go through
+    ``calculate_entry_deviations`` any more — that path reads the full-cycle
+    parent widths, which made saving Configure Deviation Bands retune these
+    percentages. equilibrium and evaluation are scored with the same H spec
+    (they carry only their own dTreturn width), so the caller passes no spec for
+    them either. Empty window or a check that does not apply → n/a, never 0.
     ``df_full`` should already be the Deviations series when the caller has it.
     """
-    missing = {k: (None, 'no window of this kind is saved') for k in ('db', 'wb', 'flow')}
-    if start is None or end is None:
-        return missing
-    if df_full is None or 'time_elapsed' not in getattr(df_full, 'columns', []):
-        return {k: (None, 'the sheet could not be read') for k in ('db', 'wb', 'flow')}
-    window = df_full[(df_full['time_elapsed'] >= start) & (df_full['time_elapsed'] <= end)]
-    if window.empty:
-        return {k: (None, 'the sheet holds no samples in this window') for k in ('db', 'wb', 'flow')}
-    entry = _entry_with_hp_id(entry)
-    warnings = []
-    import io
-    import contextlib
-    with contextlib.redirect_stdout(io.StringIO()):
-        stats = calculate_entry_deviations(
-            file_name, data_set, start, end, warning_list=warnings,
-            hp_id=entry.get('hp_id'),
-            entry=entry, df=df_full,
-        )
-    if not stats:
-        reason = (warnings[0] if warnings else 'deviations could not be scored for this window')
-        return {k: (None, reason) for k in ('db', 'wb', 'flow')}
-    none_reason = {
-        'db': 'no valid dry-bulb samples (or the check does not apply)',
-        'wb': 'no valid wet-bulb samples (or the check does not apply)',
-        'flow': 'no valid flow samples (or the check does not apply)',
-    }
-    applicable = _entry_applicable_checks(entry)
-    db_set = stats.get('db_setpoint')
-    out = {}
-    for key, col in (('db', 'db_percentage'), ('wb', 'wb_percentage'), ('flow', 'flow_percentage')):
-        val = stats.get(col)
-        if val is not None:
-            out[key] = (_guideline_num(val), '')
-        elif key == 'flow' and _entry_is_variable_flow(entry):
-            out[key] = (None, 'variable-flow test — flow % is not scored')
-        elif key == 'flow' and 'flow' not in applicable:
-            out[key] = (None, 'the flow check does not apply')
-        elif key in ('db', 'wb') and db_set is None and key in applicable:
-            out[key] = (None, 'no outdoor setpoint for this test condition')
-        else:
-            out[key] = (None, none_reason[key])
-    return out
+    if spec is None:
+        spec = (load_interval_deviations_config().get('intervals') or {}).get('H') or {}
+    return _window_ds_band_pcts(
+        df_full, None, [(start, end)], spec, entry, file_name, data_set,
+        ('db', 'wb', 'flow'))
 
 
 def _interval_spec_half(spec, name):
@@ -11967,6 +11937,9 @@ def ensure_guideline_scores_table() -> None:
 
     Separate from ``entry_interval_deviations`` on purpose: that table is
     the Deviations extra-block payload and still belongs to /calculate_deviations.
+
+    Also carries stored fingerprints over an equivalent band-file edit, once per
+    database per process. See ``_rewrite_guideline_score_fingerprints``.
     """
     conn = get_db_connection()
     try:
@@ -11982,6 +11955,20 @@ def ensure_guideline_scores_table() -> None:
             """
         )
         conn.commit()
+        try:
+            path = get_database_path()
+        except Exception:
+            path = None
+        if path not in _guideline_fp_rewritten:
+            try:
+                moved = _rewrite_guideline_score_fingerprints(conn)
+                if moved:
+                    print(f"Guideline Windows score cache: {moved} fingerprint(s) carried over "
+                          f"an equivalent interval_deviations.json edit (no rescoring needed).")
+            except Exception as e:
+                print(f"Guideline Windows fingerprint carry-over skipped: {e}")
+            if path is not None:
+                _guideline_fp_rewritten.add(path)
     finally:
         conn.close()
 
@@ -12017,11 +12004,14 @@ def _interval_deviations_config_hash() -> str:
     return digest
 
 
-def _guideline_score_fingerprint(periods, buffer_s) -> str:
+def _guideline_score_fingerprint(periods, buffer_s, intervals_digest=None) -> str:
     """What a cached score was computed from: the clocks, the buffer, the bands.
 
     Anything that would change a number changes this string, so a stale row is a
     miss — n/a with a reason — and never a percentage from the previous clocks.
+    ``intervals_digest`` overrides the band-file hash. Only the carry-over sweep
+    below passes it, to ask "was this row scored against that older file?" —
+    scoring itself always uses the file on disk.
     """
     items = []
     for p in periods or []:
@@ -12031,11 +12021,73 @@ def _guideline_score_fingerprint(periods, buffer_s) -> str:
         except (KeyError, TypeError, ValueError):
             continue
     items.sort()
+    if intervals_digest is None:
+        intervals_digest = _interval_deviations_config_hash()
     raw = json.dumps({'v': GUIDELINE_SCORE_CACHE_VERSION,
                       'periods': items,
                       'buffer_s': int(buffer_s),
-                      'intervals': _interval_deviations_config_hash()}, sort_keys=True)
+                      'intervals': intervals_digest}, sort_keys=True)
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
+# Earlier ``interval_deviations.json`` files whose *effective* half-widths are
+# the ones in force today. Interval H's individual DB / WB / flow moved off
+# permissible_deviations.json and onto explicit H keys at the same numbers
+# (1.0 K / 1.0 K / 2.5 %), so every score computed against the digest below is
+# still correct — only the file bytes changed. Without this list the analyst
+# would have to re-run Compute missing scores over the whole database for no
+# change in any percentage. Never add a digest here whose widths really differ:
+# that would show an old number against a new band.
+GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS = (
+    'c4a50572573481baa55144ab90cb114d199fc5c9',
+)
+
+# Databases this process has already swept, so the pass costs one scan per file
+# rather than one per request. Cleared by the tests between throwaway databases.
+_guideline_fp_rewritten = set()
+
+
+def _rewrite_guideline_score_fingerprints(conn) -> int:
+    """Carry cached scores over an equivalent band-file edit. Returns rows moved.
+
+    SQLite only — no sheet is opened and no score is recomputed. A row moves
+    only when its stored fingerprint is exactly what *this* row's saved clocks
+    and buffer would have produced against one of the equivalent digests above.
+    A row whose clocks were edited since it was scored therefore keeps its old
+    fingerprint and stays a miss: the sweep can promote a stale number to a hit
+    only by matching clocks it no longer has, which is the one thing it checks.
+    ``payload`` is never touched.
+    """
+    if not GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS:
+        return 0
+    rows = conn.execute(
+        'SELECT entry_rowid, buffer_s, fingerprint FROM guideline_window_scores'
+    ).fetchall()
+    by_buffer = {}
+    for r in rows:
+        try:
+            by_buffer.setdefault(int(r['buffer_s'] or 0), []).append(r)
+        except (TypeError, ValueError):
+            continue
+    moved = []
+    for buffer_s, group in by_buffer.items():
+        periods = _guideline_periods_by_rowid(
+            conn, [int(r['entry_rowid']) for r in group], buffer_s)
+        for r in group:
+            saved = periods.get(int(r['entry_rowid'])) or []
+            # What this row's own clocks hash to against the file as it is now.
+            fresh = _guideline_score_fingerprint(saved, buffer_s)
+            if r['fingerprint'] == fresh:
+                continue
+            for old in GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS:
+                if r['fingerprint'] == _guideline_score_fingerprint(saved, buffer_s, old):
+                    moved.append((fresh, int(r['entry_rowid'])))
+                    break
+    if moved:
+        conn.executemany(
+            'UPDATE guideline_window_scores SET fingerprint=? WHERE entry_rowid=?', moved)
+        conn.commit()
+    return len(moved)
 
 
 def _guideline_periods_by_rowid(conn, rowids, buffer_s) -> dict:
@@ -12362,8 +12414,11 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                 pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
                 row[f'{slot}_dtreturn_pct'] = pct
                 row['dtreturn_reasons'][slot] = reason
+                # H's own widths, and the same spec for equilibrium / evaluation:
+                # those two reuse H for DB / WB / flow by design.
                 hband = _window_h_band_pcts(
-                    df_dev, row['file_name'], row['data_set'], w_start, w_end, parent)
+                    df_dev, row['file_name'], row['data_set'], w_start, w_end, parent,
+                    spec=spec_h)
                 for metric in ('db', 'wb', 'flow'):
                     val, why = hband[metric]
                     row[f'{slot}_{metric}_pct'] = val
@@ -12551,6 +12606,56 @@ def _store_scores_for_parents(rowids, sheets=None):
     return sorted(payloads), failed
 
 
+def _guideline_row_sets(entry, cache=None) -> dict:
+    """The setpoints one Guideline Windows row's **mean** cells were read against.
+
+    Audit for the hover, not a column and not a score: the mean columns already
+    show mean − set, and this names the set that was subtracted. Resolved with
+    the same helpers ``_window_mean_devs`` used when the row was scored, so the
+    hover can never name a set the number was not read against. dTreturn has
+    none — that series is already a deviation, scored against 0 K.
+
+    SQLite and configuration only; no Plotdaten file and no score cache. A
+    lookup that raises leaves that set missing, and the cell then keeps the
+    band-only hover it has today. ``cache`` keys on the unit and the test
+    condition, so a whole-database load costs one profile lookup per unit.
+    """
+    entry = _entry_with_hp_id(entry or {})
+    file_name = entry.get('file_name')
+    hp_id = entry.get('hp_id')
+    key = (file_name, str(hp_id), entry.get('profile_id'), entry.get('condition_set_id'),
+           entry.get('climate'), entry.get('application'),
+           str(entry.get('dev_test_condition') or entry.get('test_cond') or ''),
+           entry.get('dev_db_setpoint'))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    def _safe(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+
+    db_set = _safe(_entry_db_setpoint, entry, file_name)
+    # Same call the flow mean was scored with, so the set shown is that set.
+    flow = _safe(get_flow_set_for_hp, hp_id, file_name=file_name,
+                 profile_id=entry.get('profile_id')) or (None, None)
+    climate, application = _safe(_entry_climate_application, entry) or (None, None)
+    out = {
+        'db': db_set,
+        # Same wet-bulb convention as the parent table and the mean columns.
+        'wb': (db_set - 1.0) if db_set is not None else None,
+        'tsup': _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
+        'flow': _guideline_num(flow[1]),
+        'flow_type': flow[0],
+        'climate': climate,
+        'application': application,
+    }
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
 def _guideline_window_rows(rowids=None) -> dict:
     """One row per parent entry: stored clocks, parent means, **stored** scores.
 
@@ -12633,10 +12738,15 @@ def _guideline_window_rows(rowids=None) -> dict:
         conn.close()
 
     rows, n_missing, n_scored = [], 0, 0
+    set_cache = {}
     for entry in entries:
         rid = int(entry['rowid'])
         row, ev, _dt_windows, wants_scores = _guideline_row_base(
             entry, stored.get(rid, []), lengths, index=index_by_rowid.get(rid))
+        # Hover only. Resolved on every load from ``results`` and the profiles,
+        # so it is deliberately not part of the cached score payload and cannot
+        # move a fingerprint.
+        row['sets'] = _guideline_row_sets(entry, set_cache)
         if wants_scores:
             hit = cached.get(rid)
             if hit and hit[0] == _guideline_score_fingerprint(stored.get(rid, []), buffer_s):
@@ -14606,10 +14716,13 @@ _interval_dev_cfg_mtime = -1.0
 def load_interval_deviations_config() -> dict:
     """Interval settings from config/interval_deviations.json (re-read on change).
 
-    Holds the ΔCOP limit and slice length, which intervals have bands at all,
-    the D/S individual half-widths, and the ``mean_*`` half-widths of the draft
-    mean columns. The **individual** H bands are not duplicated here: H,
-    equilibrium and evaluation read them from ``permissible_deviations.json``.
+    Holds the ΔCOP limit and slice length, the D/S/H individual half-widths,
+    and the ``mean_*`` half-widths of the draft mean columns. Interval H carries
+    its own individual DB / WB / flow / dTreturn here, and equilibrium and
+    evaluation reuse the H keys for DB / WB / flow while keeping their own
+    dTreturn. Nothing in here is read from ``permissible_deviations.json``: that
+    file is the full-cycle parent band set that Configure Deviation Bands
+    writes, and saving it must not retune a guideline interval.
     """
     global _interval_dev_cfg_cache, _interval_dev_cfg_mtime
     path = os.path.join(unit_config.config_dir(), 'interval_deviations.json')
@@ -15051,15 +15164,10 @@ def deviations():
         init_hp_design_table()
         hp_key = column_name_map.get('HP')
         flow_key = column_name_map.get('Flow')
-        # Design parameters panel: one row per unit, resolved the same way the
-        # calculations resolve it, so the numbers shown are the effective ones.
-        unit_design_rows, unresolved_entry_count = get_unit_design_rows(
-            results=results, hp_key=hp_key, flow_key=flow_key, conn=conn
-        )
-        units_without_pdesign = [
-            row['unit_label'] for row in unit_design_rows
-            if row['entry_count'] > 0 and row['pdesign_kw'] is None
-        ]
+        # No Design parameters panel here any more: Pdesign, the flow mode and
+        # the fixed-flow set are edited on Profiles, so this page does not
+        # resolve one row per unit on every load. `get_unit_design_rows` and the
+        # profile APIs are untouched — Profiles still uses them.
         
         # Convert database columns to the format expected by template
         deviation_stats = []
@@ -15185,6 +15293,15 @@ def deviations():
                 entry, flow_config=entry.get(flow_key) if flow_key else None
             )
             stats['tmean_setpoint'] = _tmean_setpoint_from_entry(entry, stats.get('test_condition'))
+
+            # Which Table 3 slice the setpoints above were read from. The
+            # Setpoint column is gone; the letter badge's hover names the
+            # letter and this slice instead, so the sets stay auditable
+            # without a column. Same resolution as the setpoints themselves,
+            # so the hover can never name a slice they were not read from.
+            stats['climate_label'], stats['application_label'] = _entry_climate_application(entry)
+            stats['slice_from_entry'] = bool(
+                str(entry.get('climate') or '').strip() and str(entry.get('application') or '').strip())
             avg_t_mean_log = safe_float(entry.get('avg_t_mean_log'))
             if (stats['tmean_is_variable_flow'] and avg_t_mean_log is not None
                     and stats['tmean_setpoint'] is not None):
@@ -15263,9 +15380,6 @@ def deviations():
                              calculated_entries=calculated_entries,
                              column_name_map=column_name_map,
                              deviations=deviations_config,
-                             unit_design_rows=unit_design_rows,
-                             units_without_pdesign=units_without_pdesign,
-                             unresolved_entry_count=unresolved_entry_count,
                              flow_modes=FLOW_MODES)
     finally:
         conn.close()
@@ -15513,6 +15627,31 @@ def _period_stat_row_colours(pivot, setpoints, bands) -> dict:
             out[key] = {'cls': cls, 'title': title}
     return out
 
+def _period_stat_set_label(quantity, setpoints) -> str:
+    """The set one mean cell was read against, ready for the hover, or ``''``.
+
+    Audit, not a check: the page shows mean − set, and this names the set that
+    was subtracted so the analyst does not have to open another page to see it.
+    ``dtreturn`` has none — that series is already a deviation, scored against
+    0 K. A set that is missing simply does not appear; the cell then carries the
+    "no setpoint" reason it already had.
+    """
+    sp = setpoints or {}
+    if quantity == 'dtreturn':
+        return ''
+    if quantity == 'flow':
+        value = _guideline_num(sp.get('flow_set'))
+        if value is None:
+            return ''
+        unit = 'kg/s' if sp.get('flow_set_type') == 'mass' else 'm³/h'
+        return 'set %g %s' % (value, unit)
+    if quantity == 'q':
+        value = _guideline_num(sp.get('q_set'))
+        return '' if value is None else 'Qset %.2f kW' % value
+    value = _guideline_num(sp.get(quantity))
+    return '' if value is None else 'set %g °C' % value
+
+
 def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
     """``(css class, hover)`` for one mean cell. Pure — no database, no config.
 
@@ -15564,8 +15703,10 @@ def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
         dev = val - ref
 
     inside = abs(dev) <= float(band)
-    title = ('%+.2f %s from %s, draft mean band ±%g %s — %s'
+    set_label = _period_stat_set_label(quantity, sp)
+    title = ('%+.2f %s from %s%s, draft mean band ±%g %s — %s'
              % (dev, unit, PERIOD_STAT_COLOUR_AGAINST[quantity],
+                (' (%s)' % set_label) if set_label else '',
                 float(band), unit, 'inside' if inside else 'outside'))
     return ((PERIOD_STAT_IN_BAND_CLASS if inside else PERIOD_STAT_OUT_BAND_CLASS),
             title)
@@ -17343,14 +17484,12 @@ _INTERVAL_STEP_SPEC_KEY = {
     'flow': 'flow_instantaneous_pct',
 }
 
-# Interval H (and equilibrium / evaluation, which reuse H) keeps its individual
-# DB / WB / flow widths in permissible_deviations.json. dTreturn is absent on
-# purpose: the -2...+2 K there is the full-cycle parent width, never an H step.
-_INTERVAL_STEP_PARENT_KEY = {
-    'db': 'DB',
-    'wb': 'WB',
-    'flow': 'flow_instantaneous_pct',
-}
+# equilibrium and evaluation sit inside H and are scored with the H widths.
+# They carry only their own dtreturn_k, so DB / WB / flow fall through to the H
+# spec rather than being duplicated as a second H table. Nothing falls through
+# to permissible_deviations.json: that file is the full-cycle parent width and
+# Configure Deviation Bands must not retune an interval.
+_INTERVAL_STEP_H_REUSE = ('equilibrium', 'evaluation')
 
 # cycle_periods type -> interval, in coverage order: D wins over S, D/S win over
 # H. equilibrium and evaluation are absent - they sit inside H and reuse the H
@@ -17407,31 +17546,22 @@ def _interval_individual_half(quantity, interval, cfg=None, parent_bands=None):
 
     A draft n/a cell (D wet bulb, D flow, Tsup anywhere) has no key, so the
     answer is ``None``: that span simply gets no step. It never falls back to
-    the Interval H width and it never becomes 0. Only intervals that declare
-    ``bands: permissible_deviations`` (H, equilibrium, evaluation) read the
-    shipped Interval H widths; D and S must not.
+    the Interval H width and it never becomes 0. equilibrium and evaluation are
+    the one fall-through there is - they reuse the **H** spec for DB / WB / flow
+    and keep their own dtreturn_k - so D and S can never be scored with H's
+    +/-1 K. ``parent_bands`` is kept for call-site compatibility and is
+    deliberately not read: the parent band file is the full-cycle width, and
+    saving Configure Deviation Bands must not move an interval.
     """
     if quantity not in INTERVAL_STEP_QUANTITIES:
         return None
     cfg = cfg if cfg is not None else load_interval_deviations_config()
-    spec = (cfg.get('intervals') or {}).get(interval)
-    half = _interval_spec_half(spec, _INTERVAL_STEP_SPEC_KEY[quantity])
-    if half is not None:
-        return half
-    if not _interval_pd_has_bands(cfg, interval):
-        return None
-    parent_key = _INTERVAL_STEP_PARENT_KEY.get(quantity)
-    if not parent_key:
-        return None
-    parent_bands = parent_bands if parent_bands is not None else load_permissible_deviations()
-    raw = (parent_bands or {}).get(parent_key)
-    if isinstance(raw, dict):
-        raw = raw.get('value')
-    try:
-        half = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return half if np.isfinite(half) and half > 0 else None
+    intervals = cfg.get('intervals') or {}
+    key = _INTERVAL_STEP_SPEC_KEY[quantity]
+    half = _interval_spec_half(intervals.get(interval), key)
+    if half is None and interval in _INTERVAL_STEP_H_REUSE:
+        half = _interval_spec_half(intervals.get('H'), key)
+    return half
 
 
 def _interval_individual_band_steps(periods, quantity, parent_start=None, parent_end=None,
@@ -17476,7 +17606,6 @@ def _interval_individual_band_steps(periods, quantity, parent_start=None, parent
     if not by_interval:
         return []
     cfg = cfg if cfg is not None else load_interval_deviations_config()
-    parent_bands = parent_bands if parent_bands is not None else load_permissible_deviations()
 
     steps = []
     taken = []
@@ -17605,7 +17734,7 @@ def _entry_flow_set(entry, hp_id, file_name):
         return None, None, (
             f'No flow set point configured for this unit '
             f'(HP "{hp_id}", profile "{profile}"). '
-            'Set volume-flow or mass-flow on Design parameters / the unit profile. '
+            'Set volume-flow or mass-flow on the unit profile (Profiles page). '
             'A missing mass-flow column in the sheet is not the cause — '
             'the plot uses the configured set type (volume or mass).')
     return flow_type, flow_set_value, ''

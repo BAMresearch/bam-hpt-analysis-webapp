@@ -332,16 +332,41 @@
     return gwCell(text, cls, gwDeltaTitle(r));
   }
 
+  /** The set one mean cell was read against, for the hover. Audit, not a
+   *  column: the number already is mean - set, and this names the set that was
+   *  subtracted. Resolved server-side on every load from the same helpers that
+   *  scored the row, so it is never part of the cached score payload. Empty
+   *  when the set could not be resolved -- the cell then keeps the band-only
+   *  hover. dTreturn has no set: that series is already a deviation. */
+  function gwSetLabel(r, quantity) {
+    var s = (r && r.sets) || {};
+    if (quantity === 'dtreturn') { return ''; }
+    var slice = '';
+    if (s.climate && s.application) {
+      slice = ' (' + (r.test_cond ? r.test_cond + ' · ' : '')
+              + s.climate + ' / ' + s.application + ')';
+    }
+    if (quantity === 'flow') {
+      if (s.flow === null || s.flow === undefined) { return ''; }
+      return 'set ' + s.flow + ' ' + (s.flow_type === 'mass' ? 'kg/s' : 'm³/h') + slice;
+    }
+    var v = s[quantity];
+    if (v === null || v === undefined) { return ''; }
+    return 'set ' + v + ' °C' + slice;
+  }
+
   /** One signed mean deviation of an interval against its setpoint.
    *  Colour is a reading aid when the mean leaves its mean band, not a pass/fail.
-   *  A number's hover names the band it was read against; n/a holds the reason. */
-  function gwMeanCell(v, reason, band, unit) {
+   *  A number's hover names the set it was read against and the band; n/a holds
+   *  the reason. There is no Setpoint column here and none is wanted. */
+  function gwMeanCell(v, reason, band, unit, setLabel) {
     if (v === null || v === undefined) { return gwNa(reason); }
     var n = Number(v);
     var cls = (band != null && Math.abs(n) > band) ? 'gw-num gw-red' : 'gw-num gw-green';
     var text = (n >= 0 ? '+' : '') + n.toFixed(2);
-    var title = (band == null) ? 'mean of the interval minus its setpoint'
-                               : ('mean of the interval minus its setpoint, band ±' + band + ' ' + unit);
+    var title = 'mean of the interval minus its setpoint';
+    if (setLabel) { title += ', ' + setLabel; }
+    if (band != null) { title += ', band ±' + band + ' ' + unit; }
     return gwCell(text, cls, title);
   }
 
@@ -458,18 +483,18 @@
       // The three mean groups carry one class so the checkbox can hide them as
       // whole groups. `h_mean_tsup_k` stays here: it is hidden with the group,
       // never deleted from the table.
-      [[r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K'],
-       [r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K'],
-       [r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K'],
-       [r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K'],
-       [r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set'],
-       [r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K'],
-       [r.d_mean_wb_k, dmR.wb, _gwMeta.mean_d_wb_k, 'K'],
-       [r.s_mean_db_k, smR.db, _gwMeta.mean_s_db_k, 'K'],
-       [r.s_mean_wb_k, smR.wb, _gwMeta.mean_s_wb_k, 'K'],
-       [r.s_mean_flow_pct, smR.flow, _gwMeta.mean_s_flow_pct, '% of set']
+      [[r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K', 'db'],
+       [r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K', 'wb'],
+       [r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K', 'tsup'],
+       [r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K', 'dtreturn'],
+       [r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set', 'flow'],
+       [r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K', 'db'],
+       [r.d_mean_wb_k, dmR.wb, _gwMeta.mean_d_wb_k, 'K', 'wb'],
+       [r.s_mean_db_k, smR.db, _gwMeta.mean_s_db_k, 'K', 'db'],
+       [r.s_mean_wb_k, smR.wb, _gwMeta.mean_s_wb_k, 'K', 'wb'],
+       [r.s_mean_flow_pct, smR.flow, _gwMeta.mean_s_flow_pct, '% of set', 'flow']
       ].forEach(function (m) {
-        var td = gwMeanCell(m[0], m[1], m[2], m[3]);
+        var td = gwMeanCell(m[0], m[1], m[2], m[3], gwSetLabel(r, m[4]));
         td.classList.add('gw-mean-dev');
         tr.appendChild(td);
       });
