@@ -50,7 +50,7 @@
   <div class="card mb-3">
     <div class="card-body pb-2">
       <div class="row align-items-end">
-        <div class="col-md-5">
+        <div class="col-md-6">
           <label class="font-weight-bold mb-1">Excel file</label>
           <select id="fileSelect" class="form-control form-control-sm">
             <option value="" selected>Select a file…</option>
@@ -59,36 +59,28 @@
             {% endfor %}
           </select>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-2">
           <button id="loadBtn" class="btn btn-dark btn-sm mt-4" type="button">
             <i class="fas fa-chart-line"></i> Load data
           </button>
         </div>
-        <div class="col-md-2">
-          <label class="font-weight-bold mb-1">Min gap (s)</label>
-          <input id="gapInput" class="form-control form-control-sm" type="number" step="1" value="900">
-        </div>
-        <div class="col-md-2 text-right">
+        <div class="col-md-4 text-right">
           <button id="suggestBtn" class="btn btn-primary btn-sm mt-4" type="button">
             <i class="fas fa-magic"></i> Suggest cycles
           </button>
         </div>
       </div>
       <p class="small-help mb-0 mt-2">
-        <strong>Suggest cycles</strong> uses <strong>uncorrected</strong> electric power (e.g. <span class="mono">Electric Power Input (without correction)</span> or <span class="mono">Pel_el (uncorr)</span>), finds compressor “off” boundaries, then merges nearby drop shoulders using <strong>Min gap</strong>.
-        Min gap is <em>not</em> a minimum cycle length—it controls merging of timestamps that belong to the same electrical drop; set it shorter than typical pulse spacing if suggestions lump runs together or disappear.
+        <strong>Suggest cycles</strong> is one click. It cuts the file <strong>drop to drop</strong> on <strong>uncorrected</strong> electric power: a cycle starts at the <strong>first leave of a long heating plateau</strong>. The later collapse inside a defrost is not the start. Short blinks that return to the plateau are ignored.
+        <br>You can still click the plot to add a cycle by hand, and every suggested start and end stays editable.
       </p>
       <details class="small-help mt-2">
-        <summary class="text-muted" style="cursor:pointer;">Detector details (optional)</summary>
+        <summary class="text-muted" style="cursor:pointer;">How Suggest picks Start (optional)</summary>
         <div class="mt-2 pl-3" style="border-left: 3px solid #dee2e6;">
           <ul class="mb-2 pl-3">
-            <li><strong>Sampling:</strong> on ~10&nbsp;s grids, split mainly on sustained true-off stretches; on 1&nbsp;Hz files, sustained off must be longer (linked to Min gap) so brief defrost-length dips don’t become their own cycles.</li>
-            <li><strong>Start of file:</strong> if the trace clearly starts mid-pulse (high median power before the first long off), the incomplete leading block is skipped.</li>
-            <li><strong>Fallback slopes:</strong> if off-based splitting isn’t enough, scan forward slopes <span class="mono">(P[i]−P[i−1])/Δt</span> on median-smoothed power; look ~40&nbsp;s ahead for a minimum (“trough-ahead”). Effective drop = max(one step, <span class="mono">P[i−1]−trough</span>) so slow 1&nbsp;Hz ramps are still detected.</li>
-            <li><strong>Keep/reject:</strong> a candidate is kept only if power before the step is clearly “on” and either the trough sits in the file’s idle/off band or the pattern looks like staged shut-down (large cumulative drop vs a high-percentile load scale; trough below pre-plateau and nominal on). That filters most high→intermediate dips but keeps gradual ramps.</li>
-            <li><strong>Min gap:</strong> merges nearby shoulder times from the same drop. Among slopes within ~8% of the steepest, the <em>earliest</em> shoulder wins (pure “steepest only” would pick the last step of a staircase). Starts are merged if raw power between them never reaches true idle/off (drops shallow standby wiggles).</li>
-            <li><strong>Stored times:</strong> <strong>Start</strong> is the last plateau point before the drop (<span class="mono">time[i−1]</span>), nudged one median <span class="mono">Δt</span> earlier to line up with the raw chart; the previous cycle’s <strong>End</strong> is the last timestamp strictly before the next start (e.g. 2720&nbsp;s vs 2730&nbsp;s on a 10&nbsp;s grid).</li>
-            <li><strong>Tuning:</strong> if real cycles sit closer than Min gap, they may merge—reduce the gap. If Min gap ≫ shortest off/on spacing, neighbouring shoulders collapse and you may get few suggestions—use a gap well below pulse spacing.</li>
+            <li>Start is the first leave of a long heating plateau, read from uncorrected electric power.</li>
+            <li>If power hardly moves, Start follows supply temperature and heating.</li>
+            <li>A later drop inside the defrost is not the start. Short blinks that return to the plateau are ignored. If fewer than two starts remain, nothing is suggested.</li>
           </ul>
         </div>
       </details>
@@ -1511,11 +1503,10 @@
   async function suggestCycles() {
     _fileName = document.getElementById('fileSelect').value || _fileName;
     if (!_fileName) { status('Select a file first. Load data optional for suggestions.'); return; }
-    var gap = parseFloat(document.getElementById('gapInput').value || '900');
     status('Detecting cycles…');
     var resp = await fetch('/api/cycle_extract/suggest', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet, min_gap_s: gap })
+      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet, min_gap_s: 900, min_cycle_s: 0 })
     });
     var d = await resp.json();
     if (!d.success) { status('Error: '+d.message); return; }

@@ -136,7 +136,7 @@ Open `import_hpt.ipynb` with working directory = the cloned folder (§3).
 
 1. Pick the Plotdaten file.
 2. **Select a unit profile** (required). HP ID fills itself.
-3. Confirm or add cycles. Set **ds** per cycle (1, 2, 3, …) *before* Apply.
+3. **Suggest cycles** is one click (first leave of the long heating plateau). Confirm or add cycles. Set **ds** per cycle (1, 2, 3, …) *before* Apply.
 4. Apply. Entries appear on **Data**. Review shows auto-filled Test cond, Lab ID and HP ID (HP ID from the profile). Test label is stored as the letter plus flow (for example `B fixed`) and is not on the modal. Apply also stores default guideline clocks (D/H or S/H, plus equilibrium and evaluation when they fit). **Period Statistics** reads those clocks — **Notes** no longer need `drop` or `ramp` for the split.
 
 5. (Optional — needed for evaluation-window means and interval checks.) **Edit clocks** → confirm kind → **Save all clocks** or **Save clocks**. **Edit clocks** only opens the clocks; nothing is stored until you save. Check them on **Guideline Windows**. Definitions: [Analysis Guide](ANALYSIS_GUIDE.md) §1 / §5.1.

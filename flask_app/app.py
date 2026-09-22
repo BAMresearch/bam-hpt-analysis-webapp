@@ -8187,6 +8187,352 @@ def _merge_consecutive_cycle_starts_if_gap_never_truly_off(
     return out_s, out_m
 
 
+def _high_plateau_floor_kw(p_raw: np.ndarray, *, off_kw: float = 0.15,
+                           high_frac_of_ref: float = 0.55) -> float:
+    """kW at or above which a sample counts as “on the **high** heating plateau”.
+
+    Referenced to the file’s own upper load band (Q₉₀ of raw Pelec), so a 3 kW frost
+    plateau and a smaller unit both get a sensible cut. Mid-load staging steps
+    (~1.2 kW under a 3 kW plateau) and everything in a defrost trough fall below it.
+    """
+    arr = np.asarray(p_raw, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float(off_kw) * 2.0
+    ref = float(np.nanpercentile(finite, 90))
+    if not np.isfinite(ref) or ref <= 1e-9:
+        ref = float(np.nanmax(finite))
+    if not np.isfinite(ref) or ref <= 1e-9:
+        return float(off_kw) * 2.0
+    return float(max(float(off_kw) * 2.0, float(high_frac_of_ref) * ref))
+
+
+def _high_stretch_seconds_ending_at(i_hi: int, t_arr: np.ndarray, p_raw: np.ndarray,
+                                    *, high_kw: float, dt_grid: float,
+                                    gap_tol_s: float = 60.0) -> float:
+    """Duration (s) of the **high** stretch that ends at sample ``i_hi``.
+
+    ``0.0`` when ``i_hi`` itself is not on the high plateau — that is a drop out of a
+    trough or a mid-load step, not out of a heating plateau.
+
+    Sub-high excursions shorter than ``gap_tol_s`` do **not** end the stretch: a 5 s
+    logging blink or a 20 s part-load dip in the middle of a 40 min plateau is the same
+    plateau. ``gap_tol_s`` stays below the true-off floor (75 s dense / 88 s coarse), so
+    the walk can never run back across an off that is itself a cycle boundary.
+
+    Used by the internal **120 s min on-plateau** gate: a 10 s spike then off is not a cycle.
+    """
+    n = int(np.asarray(p_raw).size)
+    if i_hi < 0 or i_hi >= n:
+        return 0.0
+    if not (float(p_raw[i_hi]) >= float(high_kw)):
+        return 0.0
+    step = float(dt_grid) if np.isfinite(float(dt_grid)) and float(dt_grid) > 0 else 0.0
+    k = _high_stretch_start_index(i_hi, t_arr, p_raw, high_kw=high_kw,
+                                  dt_grid=step, gap_tol_s=gap_tol_s)
+    return float(t_arr[i_hi] - t_arr[k]) + step
+
+
+def _high_stretch_start_index(i_hi: int, t_arr: np.ndarray, p_raw: np.ndarray,
+                              *, high_kw: float, dt_grid: float,
+                              gap_tol_s: float = 60.0) -> int:
+    """First index of the **high** stretch that ends at ``i_hi`` (``i_hi`` itself must be high).
+
+    Same walk as :func:`_high_stretch_seconds_ending_at`, kept separate because the
+    plateau-departure search needs the *extent* of the stretch, not only its length.
+    Sub-high excursions shorter than ``gap_tol_s`` are part of the same stretch;
+    ``gap_tol_s`` stays under the true-off floor (75 s dense / 88 s coarse), so the
+    returned span can never reach back across an off run that is itself a cycle break.
+    """
+    step = float(dt_grid) if np.isfinite(float(dt_grid)) and float(dt_grid) > 0 else 0.0
+    k = int(i_hi)
+    while k - 1 >= 0:
+        if float(p_raw[k - 1]) >= float(high_kw):
+            k -= 1
+            continue
+        j = k - 1
+        while j - 1 >= 0 and float(p_raw[j - 1]) < float(high_kw):
+            j -= 1
+        if j - 1 < 0:
+            break
+        gap_s = float(t_arr[k - 1] - t_arr[j]) + step
+        if gap_s + 1e-6 >= float(gap_tol_s):
+            break
+        k = j - 1
+    return int(k)
+
+
+def _plateau_departure_time_before(
+    i_hi: int,
+    t_arr: np.ndarray,
+    p_raw: np.ndarray,
+    *,
+    high_kw: float,
+    dt_grid: float,
+    min_on_plateau_s: float = 120.0,
+    plateau_frac: float = 0.90,
+    plateau_dip_min_s: float = 5.0,
+    gap_tol_s: float = 60.0,
+    tsup_arr=None,
+    q_arr=None,
+) -> float | None:
+    """Time of the **last sample of the last long heating plateau** at or before ``i_hi``.
+
+    The cycle starts where power *first leaves the long plateau*, not at the
+    bigger electrical collapse that follows once the unit is already in the
+    defrost. A true-off run proves there was a cycle; it is not the start time.
+
+    ``i_hi`` must be on the high band (:func:`_high_plateau_floor_kw`). The search never
+    leaves the high stretch that ends there, so it cannot walk back across a true off.
+
+    **Plateau level, not a file-wide cut.** “Left the plateau” is measured against *this*
+    plateau’s own level — the median of the high samples in the stretch — so a 3.0 → 2.6 kW
+    notch counts as leaving a 3 kW plateau even though 2.6 kW is nowhere near true off and
+    sits well above the file’s high floor. A *small* first notch (a few tens of watts)
+    also counts: the cut is ``level`` minus about 0.5 % / 0.015 kW, not only
+    ``plateau_frac`` × level.
+
+    **Short recoveries are walked through.** After the first notch power often comes back up
+    for a stretch before the collapse. A high stretch shorter than ``min_on_plateau_s`` is a
+    recovery, not a new plateau: keep walking back. Stop on the first stretch that held the
+    plateau for ``min_on_plateau_s`` or more, and return its last sample — the drop-to-drop
+    shoulder of the notch that ends it.
+
+    **Pelec that comes back during a defrost is not a new plateau.** When T_supply and/or
+    uncorrected heating are present, a long Pelec-high stretch after the first notch is
+    still the same event if those traces have already left *their* plateaus
+    (Pelec notches, Heating and T_supply start to move, Pelec returns to high
+    while the defrost runs). Only a stretch where Pelec *and* the available companions
+    are still settled is a real plateau. Without those columns the Pelec-only blurp rule
+    stands.
+
+    **Companions are judged at the end of the stretch, not by its median.** A 40 min
+    heating plateau plus a few minutes of defrost still has a high median T_supply, so
+    that median cannot mark the leave. If the last ~30 s have already left, walk back
+    sample by sample to the last settled T_supply / heating sample — that is the Start
+    even when Pelec never notches enough to split the stretch — then snap to a nearby
+    Pelec drop if there is one.
+
+    **Blurps stay invisible.** A dip that *returns* to the plateau and is followed by another
+    ``min_on_plateau_s`` on it — companions still settled — is never reached. Dips shorter
+    than ``plateau_dip_min_s`` are logging noise and do not split the plateau at all.
+
+    ``None`` when no long-enough plateau is inside the stretch (e.g. a 10 s spike then off) —
+    the caller then keeps its previous shoulder and lets the 120 s gate judge it.
+    """
+    n = int(np.asarray(p_raw).size)
+    if i_hi < 0 or i_hi >= n:
+        return None
+    if not (float(p_raw[i_hi]) >= float(high_kw)):
+        return None
+    step = float(dt_grid) if np.isfinite(float(dt_grid)) and float(dt_grid) > 0 else 0.0
+    a_run = _high_stretch_start_index(i_hi, t_arr, p_raw, high_kw=high_kw,
+                                      dt_grid=step, gap_tol_s=gap_tol_s)
+
+    seg = np.asarray(p_raw[a_run:i_hi + 1], dtype=float)
+    band = seg[np.isfinite(seg) & (seg >= float(high_kw))]
+    if band.size == 0:
+        return None
+    level = float(np.nanmedian(band))
+    if not np.isfinite(level) or level <= 0.0:
+        return None
+    # Sensitive enough for a small first Pelec notch (≈0.5 % / 0.015 kW).
+    # ``plateau_frac`` is unused for the cut (kept so callers do not change).
+    _ = plateau_frac
+    tight = float(level) - float(max(0.015, 0.005 * level))
+    thr = float(max(float(high_kw), tight))
+    if not np.isfinite(thr) or thr <= 0.0:
+        return None
+
+    tsup_lvl = None
+    q_lvl = None
+    t_hi = float(t_arr[i_hi])
+    t_lo = float(t_arr[a_run])
+    t_cut = t_lo + 0.50 * max(0.0, t_hi - t_lo)
+    early = (np.asarray(t_arr) >= t_lo) & (np.asarray(t_arr) <= t_cut) & np.isfinite(p_raw) & (
+        np.asarray(p_raw, dtype=float) >= float(high_kw)
+    )
+    if tsup_arr is not None:
+        ts = np.asarray(tsup_arr, dtype=float)
+        if ts.shape[0] == n:
+            sl = ts[early & np.isfinite(ts)]
+            if sl.size:
+                tsup_lvl = float(np.nanpercentile(sl, 75))
+    if q_arr is not None:
+        qq = np.asarray(q_arr, dtype=float)
+        if qq.shape[0] == n:
+            sl = qq[early & np.isfinite(qq)]
+            if sl.size:
+                q_lvl = float(np.nanpercentile(sl, 75))
+
+    def _on(idx: int) -> bool:
+        v = float(p_raw[idx])
+        return bool(np.isfinite(v)) and v + 1e-9 >= thr
+
+    def _sample_disturbed(idx: int) -> bool:
+        if tsup_lvl is None and q_lvl is None:
+            return False
+        if tsup_lvl is not None and tsup_arr is not None:
+            v = float(np.asarray(tsup_arr, dtype=float)[idx])
+            if np.isfinite(v) and v < float(tsup_lvl) - 0.25:
+                return True
+        if q_lvl is not None and q_arr is not None:
+            v = float(np.asarray(q_arr, dtype=float)[idx])
+            if np.isfinite(v) and v < 0.90 * float(q_lvl):
+                return True
+        return False
+
+    def _companions_settled(s0: int, k: int) -> bool:
+        """True when T_supply / heating are still on the plateau at the end of this stretch."""
+        if tsup_lvl is None and q_lvl is None:
+            return True
+        n_tail = max(1, int(round(30.0 / max(float(step), 1e-9)))) if step else 1
+        a = max(int(s0), int(k) - n_tail + 1)
+        sl = slice(a, int(k) + 1)
+        if tsup_lvl is not None and tsup_arr is not None:
+            med = float(np.nanmedian(np.asarray(tsup_arr, dtype=float)[sl]))
+            if np.isfinite(med) and med < float(tsup_lvl) - 0.25:
+                return False
+        if q_lvl is not None and q_arr is not None:
+            med = float(np.nanmedian(np.asarray(q_arr, dtype=float)[sl]))
+            if np.isfinite(med) and med < 0.90 * float(q_lvl):
+                return False
+        return True
+
+    def _last_companion_settled(s0: int, k: int):
+        j = int(k)
+        while j > int(s0) and _sample_disturbed(j):
+            j -= 1
+        if _sample_disturbed(j):
+            return None
+        return int(j)
+
+    def _snap_pelec_near(idx: int, s0: int) -> float:
+        t_k = float(t_arr[idx])
+        i = int(idx)
+        while i > int(s0) and (t_k - float(t_arr[i])) <= 90.0:
+            if not _on(i):
+                while i > int(s0) and not _on(i):
+                    i -= 1
+                return float(t_arr[i])
+            i -= 1
+        return float(t_arr[idx])
+
+    k = int(i_hi)
+    while k >= a_run:
+        if not _on(k):
+            while k >= a_run and not _on(k):
+                k -= 1
+            continue
+        # First sample of the on-plateau stretch ending at k; short dips do not split it.
+        s0 = int(k)
+        while s0 - 1 >= a_run:
+            if _on(s0 - 1):
+                s0 -= 1
+                continue
+            j = s0 - 1
+            while j - 1 >= a_run and not _on(j - 1):
+                j -= 1
+            if j - 1 < a_run:
+                break
+            dip_s = float(t_arr[s0 - 1] - t_arr[j]) + step
+            if dip_s + 1e-6 >= float(plateau_dip_min_s):
+                break
+            s0 = j - 1
+        held_s = float(t_arr[k] - t_arr[s0]) + step
+        if held_s + 1e-6 >= float(min_on_plateau_s):
+            if _companions_settled(s0, k):
+                return float(t_arr[k])
+            settled = _last_companion_settled(s0, k)
+            if settled is not None:
+                held2 = float(t_arr[settled] - t_arr[s0]) + step
+                if held2 + 1e-6 >= float(min_on_plateau_s):
+                    return _snap_pelec_near(settled, s0)
+        if s0 - 1 < a_run:
+            return None
+        k = s0 - 1                       # a short recovery, or Pelec-high during defrost
+    return None
+
+
+def _snap_suggestion_starts_to_plateau_edge(
+    suggestions,
+    t_arr,
+    p_raw,
+    *,
+    dt_grid: float,
+    tsup_arr=None,
+    q_arr=None,
+    off_kw: float = 0.15,
+):
+    """Move each suggested Start to the first Pelec drop off the last settled plateau.
+
+    The slope fallback never calls :func:`_plateau_departure_time_before`. On a frost file
+    where Pelec stays high through the defrost, that path parks Start on a later wiggle
+    even after the long-off shoulder was fixed. Snap both paths the same way. Windows
+    whose Start cannot be walked back are left as they are. Ends are rebuilt from the
+    snapped starts.
+    """
+    sugg = list(suggestions or [])
+    if len(sugg) < 1:
+        return sugg
+    t_arr = np.asarray(t_arr, dtype=float)
+    p_raw = np.asarray(p_raw, dtype=float)
+    n = int(p_raw.size)
+    if n < 2:
+        return sugg
+    try:
+        step = float(dt_grid)
+    except (TypeError, ValueError):
+        step = float('nan')
+    if not np.isfinite(step) or step <= 0:
+        step = float(_median_time_step_seconds(t_arr))
+    high_kw = _high_plateau_floor_kw(p_raw, off_kw=off_kw)
+
+    snapped = []
+    for st, et, conf, mag in sugg:
+        i_st = int(np.searchsorted(t_arr, float(st), side='left'))
+        i_st = int(min(max(i_st, 0), n - 1))
+        i_hi = int(i_st)
+        while i_hi > 0 and float(p_raw[i_hi]) < float(high_kw):
+            i_hi -= 1
+        ts = None
+        if float(p_raw[i_hi]) >= float(high_kw):
+            ts = _plateau_departure_time_before(
+                i_hi, t_arr, p_raw,
+                high_kw=high_kw,
+                dt_grid=step,
+                tsup_arr=tsup_arr,
+                q_arr=q_arr,
+            )
+        if ts is not None and np.isfinite(float(ts)) and float(ts) + 1e-9 < float(et):
+            snapped.append((float(ts), float(et), float(conf), float(mag)))
+        else:
+            snapped.append((float(st), float(et), float(conf), float(mag)))
+
+    uniq = [snapped[0]]
+    for row in snapped[1:]:
+        if abs(float(row[0]) - float(uniq[-1][0])) < max(1.0, 0.5 * step):
+            continue
+        uniq.append(row)
+    if len(uniq) < 1:
+        return sugg
+
+    e_last = float(sugg[-1][1])
+    after = t_arr[np.isfinite(t_arr) & (t_arr > e_last + 1e-9)]
+    closer = float(after[0]) if after.size else float(e_last + step)
+    out = []
+    for i, (st, _et, conf, mag) in enumerate(uniq):
+        nxt = float(uniq[i + 1][0]) if i + 1 < len(uniq) else closer
+        et = _last_time_on_axis_before(t_arr, nxt, st)
+        if et is None:
+            gap = step if (nxt - st) >= step else max(1.0, 0.5 * (nxt - st))
+            et = float(nxt) - float(gap)
+        if et <= st:
+            continue
+        out.append((float(st), float(et), float(conf), float(mag)))
+    return out if out else sugg
+
+
 def _shoulder_time_before_long_off_run(
     i0: int,
     t_arr: np.ndarray,
@@ -8195,15 +8541,38 @@ def _shoulder_time_before_long_off_run(
     off_kw: float = 0.15,
     shallow_hi: float = 0.85,
     staged_drop_min_kw: float = 0.10,
+    high_kw: float | None = None,
+    walk_back_max_s: float = 180.0,
+    min_on_plateau_s: float = 120.0,
+    plateau_frac: float = 0.90,
+    plateau_dip_min_s: float = 5.0,
+    dt_grid: float | None = None,
+    tsup_arr=None,
+    q_arr=None,
 ) -> float:
     """Return stored *shoulder* time for an off run whose first sample is index ``i0`` (``P[i0] <= off_kw``).
 
     Normally this is ``t[i0-1]`` (last timestep still clearly above deep off).
 
-    When the next long off is reached via a **two-step** descent
-    ``high → shallow staging (> off_kw but <= shallow_hi) → deep off``,
-    Lab viewers place the cycle break **one grid step earlier** than ``t[i0-1]`` —
-    before the shallow dip (a ``t[i0-2] → t[i0-1] → t[i0]`` descent breaks at ``t[i0-2]``).
+    **Staged descent (``high_kw`` given).** When the compressor steps down through one or
+    more mid-load samples before it truly goes off (``high → ~1.2 kW → deep off``), the cycle
+    break belongs on the **high** edge, not on the last mid sample. Walk **back** from
+    ``i0-1`` while the samples stay below ``high_kw`` and stop on the first sample that is
+    still on the high plateau. That walk is **not** capped in seconds: a mid-load hold
+    after the first drop is still the same event. The walk stops on the first high sample,
+    so it cannot cross a second high stretch. ``walk_back_max_s`` is kept only as an unused
+    compatibility argument.
+
+    **Leaving the plateau (``high_kw`` given).** From that high edge
+    :func:`_plateau_departure_time_before` walks back over short recoveries — high again for
+    less than ``min_on_plateau_s`` — to the last stretch that really held the plateau, and
+    returns the sample where power first left it. The long plateau is the cap. A dip that
+    returns to the plateau and holds it again is ignored. If no long plateau is inside the
+    stretch, the high edge stands and the on-plateau gate judges it.
+
+    **Today’s rule (no ``high_kw``, or the cap ran out).** A **two-step** descent
+    ``high → shallow staging (> off_kw but <= shallow_hi) → deep off`` breaks one grid step
+    earlier than ``t[i0-1]`` (``t[i0-2] → t[i0-1] → t[i0]`` breaks at ``t[i0-2]``).
 
     Tiny one-grid “wiggles” (``P[i-2] → P[i-1]`` drop ≪ ``staged_drop_min_kw``) are **not** staging —
     keep ``t[i0-1]`` (on a dense 1 Hz grid a single-second dip must not pull the break earlier).
@@ -8213,6 +8582,45 @@ def _shoulder_time_before_long_off_run(
     pr0 = float(p_raw[i0])
     if pr0 > float(off_kw):
         return float(t_arr[i0])
+
+    if high_kw is not None and np.isfinite(float(high_kw)) and float(high_kw) > float(off_kw):
+        hi = float(high_kw)
+        if dt_grid is not None and np.isfinite(float(dt_grid)) and float(dt_grid) > 0:
+            step = float(dt_grid)
+        else:
+            step = float(_median_time_step_seconds(t_arr))
+        if not np.isfinite(step) or step <= 0:
+            step = 0.0
+
+        i_hi: int | None = None
+        if float(p_raw[i0 - 1]) >= hi:
+            i_hi = int(i0 - 1)                   # no staging: on the high band already
+        else:
+            # Do not cap this walk. A mid-load hold after the first drop is still
+            # the same event. The long high plateau is the stop.
+            k = int(i0 - 1)
+            while k - 1 >= 0 and float(p_raw[k - 1]) < hi:
+                k -= 1
+            if k - 1 >= 0 and float(p_raw[k - 1]) >= hi:
+                i_hi = int(k - 1)
+            elif float(p_raw[k]) >= hi:
+                i_hi = int(k)
+
+        if i_hi is not None:
+            ts = _plateau_departure_time_before(
+                i_hi, t_arr, p_raw,
+                high_kw=hi,
+                dt_grid=step,
+                min_on_plateau_s=min_on_plateau_s,
+                plateau_frac=plateau_frac,
+                plateau_dip_min_s=plateau_dip_min_s,
+                tsup_arr=tsup_arr,
+                q_arr=q_arr,
+            )
+            if ts is not None and np.isfinite(float(ts)):
+                return float(ts)
+            return float(t_arr[i_hi])
+
     p_prev = float(p_raw[i0 - 1])
     staged = float(max(0.0, float(p_raw[i0 - 2]) - p_prev))
     if (
@@ -8234,6 +8642,9 @@ def _detect_cycle_boundaries_long_off_runs(
     shallow_hi: float = 0.85,
     staged_drop_min_kw: float = 0.10,
     leading_prefix_on_median_kw: float = 2.65,
+    min_on_plateau_s: float = 120.0,
+    walk_back_max_s: float = 180.0,
+    diag: dict | None = None,
 ) -> list[tuple[float, float, float, float]]:
     """Cycles from long *true off* runs on raw uncorrected Pelec (coarse VarFl-style exports).
 
@@ -8241,21 +8652,50 @@ def _detect_cycle_boundaries_long_off_runs(
     ``off_kw`` for at least ``min_off_sec`` (glitch single-step offs are ignored). Boundaries never
     come from partial mid-load dips that never reach deep off (cf. slope-based false splits at ~7589 s).
 
+    **Min on-plateau (internal, no UI).** A kept start must come off a **high** heating plateau
+    (:func:`_high_plateau_floor_kw`) that lasted at least ``min_on_plateau_s``. A 10 s spike then off
+    is not a cycle; a frost plateau and a BAM ~4 min pulse both pass. Shoulders are walked back over a
+    staged descent first (``walk_back_max_s``), so the gate reads the plateau, not the staging step.
+
+    **Start is the plateau edge, not the off.** The off run proves a cycle happened; the shoulder is
+    the *first drop that leaves the last long plateau* before it (:func:`_plateau_departure_time_before`).
+    Short recoveries between that first notch and the collapse are walked through, so Start cannot land
+    on a later, bigger drop that is already inside the defrost.
+
     If the file **starts while the unit is already at full load** (no prior true-off in the series),
     the first shoulder–shoulder segment is an incomplete “tail”: drop the first boundary when the
     median power before the first long off is clearly in the on band (see ``leading_prefix_on_median_kw``).
 
+    ``diag`` (optional dict) is filled with ``off_runs`` (long true-off runs found) and
+    ``gate_dropped`` (starts the plateau gate removed). The caller uses it to tell “this file has no
+    cycles” from “this path found nothing, try slopes” — a gate-emptied result must **not** fall
+    through to the slope search, which would park Start on a notch inside the trough.
+
     Returns ``(start, end, confidence, pelec_drop_mag)`` matching :func:`_detect_cycle_boundaries_drop_to_drop`.
     """
+    if diag is not None:
+        diag['off_runs'] = 0
+        diag['gate_dropped'] = 0
     if df_full is None or "time_elapsed" not in df_full.columns:
         return []
     pelec_col = _find_uncorrected_pelec_column(df_full)
     if not pelec_col:
         return []
 
-    df = df_full[["time_elapsed", pelec_col]].copy()
+    tsup_col = _suggest_tsupply_column(df_full)
+    heat_col = _suggest_heating_column(df_full)
+    keep_cols = ["time_elapsed", pelec_col]
+    if tsup_col and tsup_col not in keep_cols:
+        keep_cols.append(tsup_col)
+    if heat_col and heat_col not in keep_cols:
+        keep_cols.append(heat_col)
+    df = df_full[keep_cols].copy()
     df.loc[:, "time_elapsed"] = pd.to_numeric(df["time_elapsed"], errors="coerce")
     df.loc[:, pelec_col] = pd.to_numeric(df[pelec_col], errors="coerce")
+    if tsup_col:
+        df.loc[:, tsup_col] = pd.to_numeric(df[tsup_col], errors="coerce")
+    if heat_col:
+        df.loc[:, heat_col] = pd.to_numeric(df[heat_col], errors="coerce")
     df = df.dropna(subset=["time_elapsed", pelec_col])
     if df.empty or len(df) < 20:
         return []
@@ -8263,6 +8703,8 @@ def _detect_cycle_boundaries_long_off_runs(
     df = df.sort_values("time_elapsed", kind="mergesort")
     t_arr = df["time_elapsed"].to_numpy(dtype=float)
     p_raw = df[pelec_col].to_numpy(dtype=float)
+    tsup_arr = df[tsup_col].to_numpy(dtype=float) if tsup_col else None
+    q_arr = df[heat_col].to_numpy(dtype=float) if heat_col else None
 
     dt_grid = float(_median_time_step_seconds(t_arr))
     if not np.isfinite(dt_grid) or dt_grid <= 0:
@@ -8283,26 +8725,64 @@ def _detect_cycle_boundaries_long_off_runs(
             run_starts.append(int(i))
         i = j
 
-    b_times: list[float] = []
-    for i0 in run_starts:
-        b_times.append(
-            _shoulder_time_before_long_off_run(
-                i0,
-                t_arr,
-                p_raw,
-                off_kw=off_kw,
-                shallow_hi=shallow_hi,
-                staged_drop_min_kw=staged_drop_min_kw,
-            )
-        )
+    if diag is not None:
+        diag['off_runs'] = len(run_starts)
 
-    boundaries = sorted({float(x) for x in b_times if np.isfinite(x)})
+    # A cycle start is the first power drop that leaves a long *high* heating plateau. The walk-back
+    # puts the shoulder on the high edge of a staged descent, then on the edge of the last stretch
+    # that really held the plateau; the gate then throws away drops that did not come off a high
+    # plateau at all (mid-trough notch) or off one that was too short.
+    high_kw = _high_plateau_floor_kw(p_raw, off_kw=off_kw)
+
+    kept: list[tuple[float, int]] = []
+    gate_dropped = 0
+    for i0 in run_starts:
+        ts = _shoulder_time_before_long_off_run(
+            i0,
+            t_arr,
+            p_raw,
+            off_kw=off_kw,
+            shallow_hi=shallow_hi,
+            staged_drop_min_kw=staged_drop_min_kw,
+            high_kw=high_kw,
+            walk_back_max_s=walk_back_max_s,
+            min_on_plateau_s=min_on_plateau_s,
+            dt_grid=dt_grid,
+            tsup_arr=tsup_arr,
+            q_arr=q_arr,
+        )
+        if not np.isfinite(ts):
+            continue
+        i_sh = int(np.searchsorted(t_arr, float(ts) - 1e-6, side='left'))
+        i_sh = int(min(max(i_sh, 0), n - 1))
+        plateau_s = _high_stretch_seconds_ending_at(
+            i_sh, t_arr, p_raw, high_kw=high_kw, dt_grid=dt_grid)
+        if plateau_s + 1e-6 < float(min_on_plateau_s):
+            gate_dropped += 1
+            continue
+        kept.append((float(ts), int(i0)))
+
+    if diag is not None:
+        diag['gate_dropped'] = int(gate_dropped)
+
+    seen: set[float] = set()
+    boundaries: list[float] = []
+    first_i0 = None
+    for ts, i0 in sorted(kept):
+        if ts in seen:
+            continue
+        seen.add(ts)
+        if first_i0 is None:
+            first_i0 = int(i0)
+        boundaries.append(float(ts))
     if len(boundaries) < 2:
         return []
 
     # Drop leading boundary when logging began mid–on-cycle: everything before the first *long* off has
     # median P clearly at or above ``leading_prefix_on_median_kw`` (FixFl / mid-test start), not a lower cold-start ramp.
-    if len(boundaries) >= 3 and run_starts:
+    # Only when that first boundary is still the one the first long off produced — if the plateau gate
+    # already removed it, there is no incomplete leading block left to drop.
+    if len(boundaries) >= 3 and run_starts and first_i0 == int(run_starts[0]):
         i0f = int(run_starts[0])
         if i0f > 0:
             med_pre = float(np.nanmedian(p_raw[0:i0f]))
@@ -8361,18 +8841,134 @@ def _find_uncorrected_pelec_column(df: pd.DataFrame):
     return None
 
 
+def _suggest_tsupply_column(df: pd.DataFrame):
+    """Supply temperature used to confirm the first Pelec notch is a defrost start.
+
+    Prefer the plotted ``T_supply`` column. Ts Buh is the fallback when that name
+    is absent — using it first hid the leave on files that carry both.
+    """
+    if df is None or df.empty:
+        return None
+    for key in ('T_supply', 'Ts Buh', 'Ts_buh', 'T_supply_afterBUH'):
+        if key in df.columns:
+            return key
+    low = {str(c).strip().lower(): c for c in df.columns}
+    for key in ('t_supply', 'ts buh', 'tsupply'):
+        if key in low:
+            return low[key]
+    for c in df.columns:
+        s = str(c).strip().lower().replace(' ', '')
+        if 't_supply' in s or s == 'tsupply':
+            return c
+    return None
+
+
+def _suggest_heating_column(df: pd.DataFrame):
+    """Uncorrected heating capacity (same role as the red trace on Cycle Extract)."""
+    if df is None or df.empty:
+        return None
+    low = {str(c).strip().lower(): c for c in df.columns}
+    for key in (
+        'heating capacity (without corr)',
+        'heating capacity (w/o corr)',
+        'heating capacity (without correction)',
+        'heating (uncorr)',
+    ):
+        if key in low:
+            return low[key]
+    for c in df.columns:
+        s = str(c).strip().lower().replace(' ', '')
+        if 'heating' in s and 'without' in s:
+            return c
+        if 'heating' in s and 'uncorr' in s:
+            return c
+    return None
+
+
+def _enforce_min_cycle_suggestions(suggestions,
+                                   t_arr,
+                                   *,
+                                   min_cycle_s: float = 0.0,
+                                   dt_grid=None):
+    """Drop suggested cycle **starts** that sit closer together than ``min_cycle_s`` (0 = off).
+
+    **Min cycle is not Min gap.** ``min_gap_s`` merges timestamps that belong to the *same*
+    electrical drop inside the slope path; ``min_cycle_s`` is the minimum spacing between the
+    **kept** cycle starts and applies to **every** path (long-off runs as well as slopes).
+
+    ``suggestions`` are ``(start, end, confidence, pelec_drop_mag)`` windows whose ends already read
+    "last ``time_elapsed`` strictly before the next start". The boundary that closes the **last**
+    window is recovered from the time axis, pruned together with the starts, and the surviving
+    windows are rebuilt with :func:`_last_time_on_axis_before`. A kept start keeps its own drop
+    magnitude / confidence; the drops it swallowed are discarded. Fewer than two boundaries left
+    means the file holds no cycle spaced that far apart, so the result is ``[]``.
+    """
+    sugg = list(suggestions or [])
+    try:
+        mc = float(min_cycle_s)
+    except (TypeError, ValueError):
+        mc = 0.0
+    if not np.isfinite(mc) or mc <= 0.0 or not sugg:
+        return sugg
+
+    t_arr = np.asarray(t_arr, dtype=float)
+    try:
+        dt_use = float(dt_grid)
+    except (TypeError, ValueError):
+        dt_use = float('nan')
+    if not np.isfinite(dt_use) or dt_use <= 0:
+        dt_use = float(_median_time_step_seconds(t_arr))
+
+    # Every window start, plus the boundary that closes the last window (next sample after its end).
+    bounds = [float(s[0]) for s in sugg]
+    carry = [(float(s[2]), float(s[3])) for s in sugg]
+    e_last = float(sugg[-1][1])
+    after = t_arr[np.isfinite(t_arr) & (t_arr > e_last + 1e-9)]
+    bounds.append(float(after[0]) if after.size else float(e_last + dt_use))
+
+    keep = [0]
+    for k in range(1, len(bounds)):
+        if bounds[k] - bounds[keep[-1]] + 1e-9 >= mc:
+            keep.append(k)
+    if len(keep) < 2:
+        return []
+
+    out = []
+    for a, b in zip(keep[:-1], keep[1:]):
+        st = bounds[a]
+        nxt = bounds[b]
+        et = _last_time_on_axis_before(t_arr, nxt, st)
+        if et is None:
+            step = dt_use if (nxt - st) >= dt_use else max(1.0, 0.5 * (nxt - st))
+            et = float(nxt) - float(step)
+        if et <= st:
+            continue
+        conf, mag = carry[a]
+        out.append((st, float(et), conf, mag))
+    return out
+
+
 def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
                                          min_gap_s: float = 600.0,
                                          high_frac: float = 0.60,
                                          low_frac: float = 0.20,
-                                         smooth_window: int = 3):
+                                         smooth_window: int = 3,
+                                         min_cycle_s: float = 0.0):
     """Drop→drop markers on uncorrected Pelec (**cliffs = steep negative slope**, shoulder timestamp).
 
     0. **Segmentation preference:** on raw uncorrected Pelec, detect long stretches at or below ~0.15 kW
        (true off). **Coarse** grids (median Δt ≥ ~4 s) use a short minimum off duration (~88 s). **Dense**
-       1 Hz logs use a higher floor derived from **Min gap** (typically ~250 s) so brief defrost-length offs
-       do not create extra cycles, while ~4 min inter-pulse gaps still break segments. Shoulder times use a
-       two-step ``high → shallow → deep off`` rule only when the shallow step drops by at least ~0.10 kW; keep the shoulder at ``t[i0-1]``.
+       1 Hz logs use a **fixed 75 s** floor, so a normal ~2 min defrost off **is** a cycle boundary while a
+       1–5 s logging glitch is not. That floor is **no longer tied to Min gap** (it used to be ~200–252 s,
+       which skipped defrost-length offs and let the slope fallback park Start on a later, steeper notch
+       inside the defrost trough). Shoulder times walk **back** from the first off sample through a
+       staged descent (not capped in seconds: the long high plateau is the stop) to the last sample still on the **high** plateau, so a
+       ``high → ~1.2 kW → off`` staircase stores the high edge and not the part-load step; with no
+       staging the shoulder stays at ``t[i0-1]`` (two-step ``high → shallow → deep off`` rule, shallow
+       step ≥ ~0.10 kW). A kept start must also come off a high plateau that lasted at least **120 s**
+       (internal, no UI): a 10 s spike then off is not a cycle. If that gate empties the long-off
+       result, this returns ``[]`` — it does **not** fall through to the slopes below, which would cut
+       on exactly the notch the gate has just rejected.
 
     1. **Fallback (same function name):** causal median on ``pw`` then forward slope ``(P[i]-P[i-1])/Δt``.
 
@@ -8413,6 +9009,10 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
        dips into the file’s **true-off** kW band (idle spine + margin). That removes false splits from
        standby plateaus that are not near-zero off events. **Min gap does not set minimum cycle length.**
 
+    9. **Min cycle** (``min_cycle_s``, ``0`` = off): the minimum spacing between **kept** cycle starts,
+       applied to **both** paths once the boundaries are found (:func:`_enforce_min_cycle_suggestions`).
+       This — not Min gap — is what stops a second window from opening a few minutes after the last one.
+
     ``high_frac`` / ``low_frac``: unused (**API shim**).
 
     Ends: ``last time_elapsed < next_start``.
@@ -8423,9 +9023,20 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
     if not pelec_col:
         return []
 
-    df = df_full[['time_elapsed', pelec_col]].copy()
+    tsup_col = _suggest_tsupply_column(df_full)
+    heat_col = _suggest_heating_column(df_full)
+    keep_cols = ['time_elapsed', pelec_col]
+    if tsup_col and tsup_col not in keep_cols:
+        keep_cols.append(tsup_col)
+    if heat_col and heat_col not in keep_cols:
+        keep_cols.append(heat_col)
+    df = df_full[keep_cols].copy()
     df.loc[:, 'time_elapsed'] = pd.to_numeric(df['time_elapsed'], errors='coerce')
     df.loc[:, pelec_col] = pd.to_numeric(df[pelec_col], errors='coerce')
+    if tsup_col:
+        df.loc[:, tsup_col] = pd.to_numeric(df[tsup_col], errors='coerce')
+    if heat_col:
+        df.loc[:, heat_col] = pd.to_numeric(df[heat_col], errors='coerce')
     df = df.dropna(subset=['time_elapsed', pelec_col])
     if df.empty or len(df) < 20:
         return []
@@ -8434,6 +9045,8 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
 
     t = df['time_elapsed'].to_numpy(dtype=float)
     p_raw = df[pelec_col].to_numpy(dtype=float)
+    tsup_arr = df[tsup_col].to_numpy(dtype=float) if tsup_col else None
+    q_arr = df[heat_col].to_numpy(dtype=float) if heat_col else None
 
     glo_peak = float(np.nanmax(p_raw))
     if not np.isfinite(glo_peak) or glo_peak <= 1e-9:
@@ -8442,18 +9055,27 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
     dt_grid = float(_median_time_step_seconds(t))
     if not np.isfinite(dt_grid) or dt_grid <= 0:
         return []
-    # Prefer physical long true-off gaps on raw Pelec (VarFl): 10 s exports use a short min_off;
-    # 1 Hz logs need a higher floor so mid-test defrost-length offs (~2 min) do not become extra cycle
-    # boundaries, while normal ~4.3 min inter-pulse gaps remain. Tie loosely to Min gap (seconds).
+    # Prefer physical long true-off gaps on raw Pelec (VarFl): 10 s exports use a short min_off.
+    # 1 Hz logs use a fixed floor of about a minute (60-90 s band) so a normal ~2 min defrost off counts
+    # as a boundary while a 1-5 s glitch does not. This floor is NOT tied to Min gap or to Min cycle.
     if dt_grid >= 4.0:
         min_off_sec_use = 88.0
     else:
-        min_off_sec_use = float(
-            max(200.0, min(252.0, 0.42 * float(min_gap_s) + 12.0 * float(dt_grid)))
-        )
-    _lo = _detect_cycle_boundaries_long_off_runs(df_full, min_off_sec=min_off_sec_use)
+        min_off_sec_use = 75.0
+    _diag: dict = {}
+    _lo = _detect_cycle_boundaries_long_off_runs(df_full, min_off_sec=min_off_sec_use, diag=_diag)
     if len(_lo) >= 1:
-        return _lo
+        # Min cycle applies to this path too. Nothing left means "no cycle spaced that far apart",
+        # not "fall through to the slope fallback".
+        _lo = _snap_suggestion_starts_to_plateau_edge(
+            _lo, t, p_raw, dt_grid=dt_grid, tsup_arr=tsup_arr, q_arr=q_arr)
+        return _enforce_min_cycle_suggestions(_lo, t, min_cycle_s=min_cycle_s, dt_grid=dt_grid)
+    # The long-off path saw real compressor offs but the 120 s on-plateau gate (or a shoulder that
+    # two offs share) left fewer than two starts. That reads "no drop-to-drop cycle here", not
+    # "try harder": letting slopes run would cut on a notch inside the trough that the gate has
+    # just rejected. One lone off keeps the old fallback - nothing was thrown away there.
+    if int(_diag.get('gate_dropped', 0)) >= 1 or int(_diag.get('off_runs', 0)) >= 2:
+        return []
 
     w_smooth = int(smooth_window) if smooth_window is not None else 3
     w_smooth = max(1, w_smooth)
@@ -8635,7 +9257,9 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
         mag = dedup_mags[i]
         conf = float(min(1.0, max(0.0, mag / max(1e-6, 0.5 * pk_ref))))
         suggestions.append((st, et, conf, mag))
-    return suggestions
+    suggestions = _snap_suggestion_starts_to_plateau_edge(
+        suggestions, t, p_raw, dt_grid=dt_grid, tsup_arr=tsup_arr, q_arr=q_arr)
+    return _enforce_min_cycle_suggestions(suggestions, t, min_cycle_s=min_cycle_s, dt_grid=dt_grid)
 
 
 def _detect_pelec_rampup(pelec_series, time_series):
@@ -10347,6 +10971,14 @@ def api_cycle_extract_suggest():
         except Exception:
             min_gap_s = 900.0
         min_gap_s = max(60.0, min(7200.0, min_gap_s))
+        # Min cycle: minimum spacing between kept cycle starts. 0 = off (today's density),
+        # which is also what a client that does not send the key gets.
+        try:
+            _mc = payload.get('min_cycle_s', 0.0)
+            min_cycle_s = float(_mc) if _mc is not None and str(_mc).strip() != '' else 0.0
+        except Exception:
+            min_cycle_s = 0.0
+        min_cycle_s = max(0.0, min(14400.0, min_cycle_s))
 
         if not file_name:
             return jsonify({'success': False, 'message': 'file_name required'})
@@ -10361,7 +10993,8 @@ def api_cycle_extract_suggest():
         if df_full is None:
             return jsonify({'success': False, 'message': f'Cannot read {file_name}'})
 
-        sugg = _detect_cycle_boundaries_drop_to_drop(df_full, min_gap_s=min_gap_s)
+        sugg = _detect_cycle_boundaries_drop_to_drop(df_full, min_gap_s=min_gap_s,
+                                                    min_cycle_s=min_cycle_s)
         # Same drop→drop list, minus the windows an A/B/E/F file never defrosted in.
         sugg = _filter_defrost_suggestions_with_dt_hp(df_full, sugg, test_cond)
         conn = get_db_connection()
