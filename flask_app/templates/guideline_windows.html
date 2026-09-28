@@ -64,8 +64,9 @@
   #gwTable th.gw-freeze-7, #gwTable td.gw-freeze-7 { left: var(--gw-left-7, 0px); }
   #gwTable th.gw-freeze-8, #gwTable td.gw-freeze-8 { left: var(--gw-left-8, 0px); }
   #gwTable th.gw-freeze-9, #gwTable td.gw-freeze-9 { left: var(--gw-left-9, 0px); }
+  #gwTable th.gw-freeze-10, #gwTable td.gw-freeze-10 { left: var(--gw-left-10, 0px); }
   /* The last frozen column carries the edge against the score columns. */
-  #gwTable th.gw-freeze-9, #gwTable td.gw-freeze-9, #gwTable th.gw-freeze-entry {
+  #gwTable th.gw-freeze-10, #gwTable td.gw-freeze-10, #gwTable th.gw-freeze-entry {
     box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.25);
   }
   /* The three mean-deviation groups behind one display-only checkbox, off on
@@ -170,7 +171,7 @@
   <table class="table table-sm table-bordered table-hover gw-hide-mean" id="gwTable" style="display:none;">
     <thead>
       <tr class="gw-groups">
-        <th colspan="10">Entry</th>
+        <th colspan="11">Entry</th>
         <th colspan="8">D / S spans</th>
         <th colspan="6">H, equilibrium, evaluation</th>
         <th colspan="4">Entry means</th>
@@ -187,7 +188,7 @@
       <tr class="gw-cols">
         <th id="gwHdrIndex">#</th><th>File</th><th>Data set</th><th>Test</th><th>Profile</th><th>HP</th>
         <th id="gwHdrCop">COP dataset</th>
-        <th>Start s</th><th>End s</th><th>Kind</th>
+        <th>Start s</th><th>End s</th><th>Duration (h)</th><th>Kind</th>
         <th>D1 start</th><th>D1 end</th><th>D2 start</th><th>D2 end</th>
         <th>S1 start</th><th>S1 end</th><th>S2 start</th><th>S2 end</th>
         <th>H start</th><th>H end</th><th>eq start</th><th>eq end</th><th>eval start</th><th>eval end</th>
@@ -236,7 +237,7 @@
 {% block extra_js %}
 <script type="application/json" id="gwPreselected">{{ (preselected_rowids or []) | tojson }}</script>
 <script>
-  var GW_FREEZE_COLS = 10;       // the Entry block: # through Kind, frozen left
+  var GW_FREEZE_COLS = 11;       // the Entry block: # through Kind, frozen left
   var _gwPreselected = JSON.parse(document.getElementById('gwPreselected').textContent || '[]');
   var _gwSelector = null;        // the rowids the table was loaded with (null = whole database)
   var _gwLoaded = false;
@@ -270,6 +271,13 @@
   }
 
   function gwSeconds(v) { return (v === null || v === undefined) ? '' : Math.round(v); }
+
+  /** Full-cycle hours from the start and end already on the row. No extra lookup. */
+  function gwDurationHours(start, end) {
+    if (start === null || start === undefined || end === null || end === undefined) { return ''; }
+    var hours = (Number(end) - Number(start)) / 3600;
+    return isFinite(hours) ? hours.toFixed(2) : '';
+  }
 
   function gwValue(v, digits) {
     // Empty, never 0: a missing evaluation window has no number at all.
@@ -447,6 +455,7 @@
       tr.appendChild(gwCell(r.cop_dataset || ''));
       tr.appendChild(gwCell(gwSeconds(r.start_time), 'gw-num'));
       tr.appendChild(gwCell(gwSeconds(r.end_time), 'gw-num'));
+      tr.appendChild(gwCell(gwDurationHours(r.start_time, r.end_time), 'gw-num'));
       tr.appendChild(gwCell(r.kind === 'on_off' ? 'on–off' : r.kind,
                             r.kind === 'unknown' ? 'gw-kind gw-kind-unknown' : 'gw-kind'));
       ['d1_start', 'd1_end', 'd2_start', 'd2_end', 's1_start', 's1_end', 's2_start', 's2_end',

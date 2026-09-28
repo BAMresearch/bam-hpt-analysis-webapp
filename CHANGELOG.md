@@ -26,6 +26,7 @@ Version numbers match `flask_app/VERSION` and the `tool_version` column on summa
 
 ### Changed
 
+- **Guideline Windows shows the full-cycle duration in hours.**
 - **Guideline Windows no longer scores mean supply temperature on the heating interval.** The ±0.5 K supply limit is the whole-test check on Deviations only. The **H mean Tsup** column is gone from the table and the CSV. The other interval scores are unchanged, and **Compute missing scores** is not needed.
 - **Suggest cycles is one click.** Cycle Extract’s toolbar is now the file, **Load data** and **Suggest cycles**. A cycle starts at the **first leave of the long heating plateau** on uncorrected electric power; if power hardly moves, Start follows T_supply and heating. The later collapse inside a defrost is not the start. Short blinks that return to the plateau are ignored. Suggested times stay editable, and the defrost check that drops a window in which no defrost happened still runs afterwards.
 - **Review new entries no longer shows Test label.** The review modal keeps **Test cond** as the condition letter; **Test label** is stored automatically as the letter plus flow (for example `B fixed` / `A std`) and is not an extra box. Indicator and Notes stay as optional reminders — they are not required for Period Statistics. The old **dTreturn Insights** item is no longer in the navbar

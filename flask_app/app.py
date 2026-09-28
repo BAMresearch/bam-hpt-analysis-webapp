@@ -11906,7 +11906,8 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     ('index', '#'), ('file_name', 'file'), ('data_set', 'data_set'),
     ('test_cond', 'test_cond'), ('profile_id', 'profile'), ('hp_id', 'hp_id'),
     ('cop_dataset', 'COP_dataset'),
-    ('start_time', 'parent_start_s'), ('end_time', 'parent_end_s'), ('kind', 'kind'),
+    ('start_time', 'parent_start_s'), ('end_time', 'parent_end_s'),
+    ('duration_h', 'duration_h'), ('kind', 'kind'),
     ('d1_start', 'D1_start_s'), ('d1_end', 'D1_end_s'),
     ('d2_start', 'D2_start_s'), ('d2_end', 'D2_end_s'),
     ('s1_start', 'S1_start_s'), ('s1_end', 'S1_end_s'),
@@ -11956,6 +11957,18 @@ def _guideline_num(value):
     except (TypeError, ValueError):
         return None
     return val if np.isfinite(val) else None
+
+
+def _full_cycle_duration_h(start, end):
+    """Full-cycle length in hours, from the stored start and end. None if either is missing."""
+    start = _guideline_num(start)
+    end = _guideline_num(end)
+    if start is None or end is None:
+        return None
+    hours = (end - start) / 3600.0
+    if not np.isfinite(hours):
+        return None
+    return round(hours, 2)
 
 
 def _guideline_kind_from_stored(period_types) -> str:
@@ -12913,6 +12926,7 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         'cop_dataset': _guideline_cop_dataset(entry),
         'start_time': _guideline_num(entry.get('start_time')),
         'end_time': _guideline_num(entry.get('end_time')),
+        'duration_h': _full_cycle_duration_h(entry.get('start_time'), entry.get('end_time')),
         'kind': kind,
         'h_start': _guideline_num(h['start_time']) if h else None,
         'h_end': _guideline_num(h['end_time']) if h else None,

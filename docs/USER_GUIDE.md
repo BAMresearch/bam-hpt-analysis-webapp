@@ -323,7 +323,7 @@ Two ways in:
 
 Opening the page does **not** read Plotdaten. Scores are stored when you **save** clocks; they are read back here. You do not need Calculate on Deviations first.
 
-Each row: identity (**#** is the same number as on Data and Deviations, not the internal id; **COP dataset** is `YES` / `NO` / blank), kind, clock times, parent Tsup/Q/P/COP beside the same four on the **evaluation** window (means in °C / kW), then interval individual %, D/S %, eval ΔCOP, and H/D/S mean deviations. Kind comes from the stored periods, never from the test letter. The table scrolls sideways and down inside its own box: the two header rows and the identity block (**#** through **Kind**) stay put.
+Each row: identity (**#** is the same number as on Data and Deviations, not the internal id; **COP dataset** is `YES` / `NO` / blank), full-cycle **Duration (h)**, kind, clock times, parent Tsup/Q/P/COP beside the same four on the **evaluation** window (means in °C / kW), then interval individual %, D/S %, eval ΔCOP, and H/D/S mean deviations. Kind comes from the stored periods, never from the test letter. The table scrolls sideways and down inside its own box: the two header rows and the identity block (**#** through **Kind**) stay put.
 
 The page itself carries one short paragraph. What the stored scores are, when a cell is `n/a` and what **Compute missing scores** does is here and on that button’s hover, not on the page.
 
