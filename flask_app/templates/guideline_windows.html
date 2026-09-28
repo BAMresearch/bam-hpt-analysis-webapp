@@ -178,7 +178,7 @@
         <th colspan="12" id="gwIntervalGroup">H / eq / eval individual % (Interval H)</th>
         <th colspan="2" id="gwDGroup">D individual %</th>
         <th colspan="4" id="gwSGroup">S individual %</th>
-        <th colspan="5" class="gw-mean-dev" id="gwHMeanGroup">H mean deviation (K / % of set)</th>
+        <th colspan="4" class="gw-mean-dev" id="gwHMeanGroup">H mean deviation (K / % of set)</th>
         <th colspan="2" class="gw-mean-dev" id="gwDMeanGroup">D mean deviation (K)</th>
         <th colspan="3" class="gw-mean-dev" id="gwSMeanGroup">S mean deviation (K / % of set)</th>
         <th rowspan="2" id="gwHdrDcop">eval ΔCOP %</th>
@@ -201,7 +201,7 @@
         <th id="gwHdrSDb">S DB %</th><th id="gwHdrSWb">S WB %</th>
         <th id="gwHdrSFl">S flow %</th><th id="gwHdrSDt">S dTreturn %</th>
         <th class="gw-mean-dev" id="gwHdrHMeanDb">H mean DB K</th><th class="gw-mean-dev" id="gwHdrHMeanWb">H mean WB K</th>
-        <th class="gw-mean-dev" id="gwHdrHMeanTs">H mean Tsup K</th><th class="gw-mean-dev" id="gwHdrHMeanDt">H mean dTreturn K</th>
+        <th class="gw-mean-dev" id="gwHdrHMeanDt">H mean dTreturn K</th>
         <th class="gw-mean-dev" id="gwHdrHMeanFl">H mean flow % of set</th>
         <th class="gw-mean-dev" id="gwHdrDMeanDb">D mean DB K</th><th class="gw-mean-dev" id="gwHdrDMeanWb">D mean WB K</th>
         <th class="gw-mean-dev" id="gwHdrSMeanDb">S mean DB K</th><th class="gw-mean-dev" id="gwHdrSMeanWb">S mean WB K</th>
@@ -250,7 +250,7 @@
                   d_db_k: 5, d_dtreturn_k: 2,
                   s_db_k: 2, s_wb_k: 2, s_flow_pct_band: 2.5, s_dtreturn_k: 1,
                   // Mean half-widths — a different quantity from the % above.
-                  mean_h_db_k: 0.3, mean_h_wb_k: 0.4, mean_h_tsup_k: 0.5,
+                  mean_h_db_k: 0.3, mean_h_wb_k: 0.4,
                   mean_h_dtreturn_k: 0.3, mean_h_flow_pct: 1,
                   mean_d_db_k: 1.5, mean_d_wb_k: 1,
                   mean_s_db_k: 0.6, mean_s_wb_k: 0.6, mean_s_flow_pct: 2.5 };
@@ -376,7 +376,7 @@
      'db_pct_red', 'db_pct_yellow', 'wb_pct_red', 'wb_pct_yellow',
      'flow_pct_red', 'flow_pct_yellow',
      'd_db_k', 'd_dtreturn_k', 's_db_k', 's_wb_k', 's_flow_pct_band', 's_dtreturn_k',
-     'mean_h_db_k', 'mean_h_wb_k', 'mean_h_tsup_k', 'mean_h_dtreturn_k', 'mean_h_flow_pct',
+     'mean_h_db_k', 'mean_h_wb_k', 'mean_h_dtreturn_k', 'mean_h_flow_pct',
      'mean_d_db_k', 'mean_d_wb_k', 'mean_s_db_k', 'mean_s_wb_k', 'mean_s_flow_pct'
     ].forEach(function (k) {
       if (d[k] != null) { _gwMeta[k] = d[k]; }
@@ -413,7 +413,6 @@
     setTitle('gwSMeanGroup', 'Arithmetic mean over the union of the saved S spans minus its setpoint');
     setTitle('gwHdrHMeanDb', 'Saved H window: mean dry-bulb minus setpoint, band ±' + _gwMeta.mean_h_db_k + ' K (not the individual ±1 K and not the parent mean 0.6 K)');
     setTitle('gwHdrHMeanWb', 'Saved H window: mean wet-bulb minus setpoint, band ±' + _gwMeta.mean_h_wb_k + ' K');
-    setTitle('gwHdrHMeanTs', 'Saved H window: mean supply temperature minus setpoint, band ±' + _gwMeta.mean_h_tsup_k + ' K (there is no individual Tsup band)');
     setTitle('gwHdrHMeanDt', 'Saved H window: mean of T_return,emu − T_return,calc against 0, band ±' + _gwMeta.mean_h_dtreturn_k + ' K');
     setTitle('gwHdrHMeanFl', 'Saved H window: mean flow against set, band ±' + _gwMeta.mean_h_flow_pct + ' % of set (fixed flow only)');
     setTitle('gwHdrDMeanDb', 'Union of saved D spans: mean dry-bulb minus setpoint, band ±' + _gwMeta.mean_d_db_k + ' K');
@@ -481,11 +480,10 @@
       tr.appendChild(gwPctCell(r.s_flow_pct, sR.flow, 'flow'));
       tr.appendChild(gwPctCell(r.s_dtreturn_pct, sR.dtreturn, 'dtreturn'));
       // The three mean groups carry one class so the checkbox can hide them as
-      // whole groups. `h_mean_tsup_k` stays here: it is hidden with the group,
-      // never deleted from the table.
+      // whole groups. H has no mean supply temperature column: the ±0.5 K
+      // supply band applies to the whole test only, not to the H window.
       [[r.h_mean_db_k, hmR.db, _gwMeta.mean_h_db_k, 'K', 'db'],
        [r.h_mean_wb_k, hmR.wb, _gwMeta.mean_h_wb_k, 'K', 'wb'],
-       [r.h_mean_tsup_k, hmR.tsup, _gwMeta.mean_h_tsup_k, 'K', 'tsup'],
        [r.h_mean_dtreturn_k, hmR.dtreturn, _gwMeta.mean_h_dtreturn_k, 'K', 'dtreturn'],
        [r.h_mean_flow_pct, hmR.flow, _gwMeta.mean_h_flow_pct, '% of set', 'flow'],
        [r.d_mean_db_k, dmR.db, _gwMeta.mean_d_db_k, 'K', 'db'],

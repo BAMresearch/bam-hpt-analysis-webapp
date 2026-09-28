@@ -11929,7 +11929,7 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     # Mean deviations: one number per interval, K or % of set — not a
     # share of samples, so every header carries its unit.
     ('h_mean_db_k', 'H_mean_DB_K'), ('h_mean_wb_k', 'H_mean_WB_K'),
-    ('h_mean_tsup_k', 'H_mean_Tsup_K'), ('h_mean_dtreturn_k', 'H_mean_dTreturn_K'),
+    ('h_mean_dtreturn_k', 'H_mean_dTreturn_K'),
     ('h_mean_flow_pct', 'H_mean_flow_pct_of_set'),
     ('d_mean_db_k', 'D_mean_DB_K'), ('d_mean_wb_k', 'D_mean_WB_K'),
     ('s_mean_db_k', 'S_mean_DB_K'), ('s_mean_wb_k', 'S_mean_WB_K'),
@@ -12337,14 +12337,14 @@ MEAN_DEV_SPEC_KEYS = {
 # What each interval is allowed to score. A draft "—" cell is simply absent, so
 # a series that exists on the sheet cannot invent a number for it.
 MEAN_DEV_QUANTITIES = {
-    'H': ('db', 'wb', 'tsup', 'dtreturn', 'flow'),
+    'H': ('db', 'wb', 'dtreturn', 'flow'),
     'D': ('db', 'wb'),
     'S': ('db', 'wb', 'flow'),
 }
 # Row field per interval and quantity. The suffix names the unit, so a mean in K
 # can never be read as one of the individual shares in %.
 MEAN_DEV_ROW_KEYS = {
-    'H': {'db': 'h_mean_db_k', 'wb': 'h_mean_wb_k', 'tsup': 'h_mean_tsup_k',
+    'H': {'db': 'h_mean_db_k', 'wb': 'h_mean_wb_k',
           'dtreturn': 'h_mean_dtreturn_k', 'flow': 'h_mean_flow_pct'},
     'D': {'db': 'd_mean_db_k', 'wb': 'd_mean_wb_k'},
     'S': {'db': 's_mean_db_k', 'wb': 's_mean_wb_k', 'flow': 's_mean_flow_pct'},
@@ -12560,7 +12560,7 @@ GUIDELINE_SCORE_VALUE_KEYS = (
     'h_flow_pct', 'eq_flow_pct', 'eval_flow_pct',
     'd_db_pct', 'd_dtreturn_pct',
     's_db_pct', 's_wb_pct', 's_flow_pct', 's_dtreturn_pct',
-    'h_mean_db_k', 'h_mean_wb_k', 'h_mean_tsup_k', 'h_mean_dtreturn_k', 'h_mean_flow_pct',
+    'h_mean_db_k', 'h_mean_wb_k', 'h_mean_dtreturn_k', 'h_mean_flow_pct',
     'd_mean_db_k', 'd_mean_wb_k',
     's_mean_db_k', 's_mean_wb_k', 's_mean_flow_pct',
     'eval_delta_cop',
@@ -12680,12 +12680,16 @@ def _guideline_score_fingerprint(periods, buffer_s, intervals_digest=None) -> st
 # the ones in force today. Interval H's individual DB / WB / flow moved off
 # permissible_deviations.json and onto explicit H keys at the same numbers
 # (1.0 K / 1.0 K / 2.5 %), so every score computed against the digest below is
-# still correct — only the file bytes changed. Without this list the analyst
+# still correct — only the file bytes changed. The second digest is the file
+# before H's mean_tsup_k was deleted: H has no mean supply band (the ±0.5 K
+# applies to the whole test only), and that key fed only the h_mean_tsup_k
+# column, which is no longer scored or shown — every other width is unchanged. Without this list the analyst
 # would have to re-run Compute missing scores over the whole database for no
 # change in any percentage. Never add a digest here whose widths really differ:
 # that would show an old number against a new band.
 GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS = (
     'c4a50572573481baa55144ab90cb114d199fc5c9',
+    '332463da0f991a27ff1a23d9aeade38e4af8d678',
 )
 
 # Databases this process has already swept, so the pass costs one scan per file
@@ -12937,7 +12941,7 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         # One signed **mean** per interval — K for DB / WB /
         # Tsup / dTreturn, % of set for flow. A different quantity from the
         # individual shares above, with its own mean half-widths.
-        'h_mean_db_k': None, 'h_mean_wb_k': None, 'h_mean_tsup_k': None,
+        'h_mean_db_k': None, 'h_mean_wb_k': None,
         'h_mean_dtreturn_k': None, 'h_mean_flow_pct': None,
         'd_mean_db_k': None, 'd_mean_wb_k': None,
         's_mean_db_k': None, 's_mean_wb_k': None, 's_mean_flow_pct': None,
