@@ -149,7 +149,7 @@ def normalize_application(value: Optional[str]) -> Optional[str]:
 
 
 def condition_letter(test_condition: Optional[str]) -> Optional[str]:
-    """Extract A–G from 'A', 'A real BUH', 'C70min', etc."""
+    """Extract A–G from 'A', 'A real BUH' etc."""
     if test_condition is None:
         return None
     s = str(test_condition).strip()

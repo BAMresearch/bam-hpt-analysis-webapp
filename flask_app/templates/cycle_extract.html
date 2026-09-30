@@ -71,17 +71,21 @@
         </div>
       </div>
       <p class="small-help mb-0 mt-2">
-        <strong>Suggest cycles</strong> is one click. It cuts the file <strong>drop to drop</strong> on <strong>uncorrected</strong> electric power: a cycle starts at the <strong>first leave of a long heating plateau</strong>. The later collapse inside a defrost is not the start. Short blinks that return to the plateau are ignored.
-        <br>You can still click the plot to add a cycle by hand, and every suggested start and end stays editable.
+        <strong>Suggest cycles</strong> cuts frost tests from one <strong>defrost termination</strong> to the next, and on/off tests from one <strong>standby termination</strong> to the next. A defrost ends at the moment <strong>ΔT_HP</strong> (supply − return) rises through 0.2&nbsp;K, once that rise has held for 2 minutes; a standby ends when electric power (uncorrected) climbs again. A file with no defrost and no standby is <strong>one window</strong>.
       </p>
       <details class="small-help mt-2">
         <summary class="text-muted" style="cursor:pointer;">How Suggest picks Start (optional)</summary>
         <div class="mt-2 pl-3" style="border-left: 3px solid #dee2e6;">
           <ul class="mb-2 pl-3">
-            <li>Start is the first leave of a long heating plateau, read from uncorrected electric power.</li>
-            <li>If power hardly moves, Start follows supply temperature and heating.</li>
-            <li>A later drop inside the defrost is not the start. Short blinks that return to the plateau are ignored. If fewer than two starts remain, nothing is suggested.</li>
+            <li>Start is the first leave of a long heating plateau, read from uncorrected electric power: the power drop that begins the defrost or standby. Power falls below 90&nbsp;% of its level over the 2 minutes before and does not come back to heating before the stop.</li>
+            <li>A later drop inside the defrost is not the start. Short blinks that return to the plateau are ignored, and so are a brief spike above heating power, a slow slide, or a burst after a restart.</li>
+            <li>On a frost file every start belongs to a defrost; ΔT_HP says which one, but never places a start. A drop with no defrost after it, such as the heating a file opens with, is not a start. A standby start is the drop into the compressor stop.</li>
+            <li>The default cut looks for a termination between one start and the next. Two successive terminations make a row, which ends at the later one.</li>
           </ul>
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="startToStartChk" autocomplete="off">
+            <label class="form-check-label" for="startToStartChk">Use defrost start to defrost start (standby the same way).</label>
+          </div>
         </div>
       </details>
       <div id="statusMsg" class="small-help mt-2"></div>
@@ -1506,10 +1510,22 @@
     status('Detecting cycles…');
     var resp = await fetch('/api/cycle_extract/suggest', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet, min_gap_s: 900, min_cycle_s: 0 })
+      body: JSON.stringify({ file_name: _fileName, data_set: _dataSet, min_gap_s: 900, min_cycle_s: 0,
+                             start_to_start: !!document.getElementById('startToStartChk').checked })
     });
     var d = await resp.json();
     if (!d.success) { status('Error: '+d.message); return; }
+    var emptyReason = (!d.count && d.reason) ? d.reason : '';
+    var cutWords = {
+      defrost_end: 'defrost termination to defrost termination',
+      on_start: 'standby termination to standby termination',
+      defrost_start: 'defrost start to defrost start',
+      off_start: 'standby start to standby start',
+      continuous: 'one window',
+      drop: 'start to start (kind not known)'
+    };
+    var cutNote = d.cut ? (' Cut: ' + (cutWords[d.cut] || d.cut) + ', test condition '
+                           + (d.test_cond || 'none (read from the trace)') + '.') : '';
     status('Detection done ('+( d.count||0)+' cycles). Loading list…');
     var resp2 = await fetch('/api/cycle_extract/list', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1527,7 +1543,7 @@
       });
     });
     renderCycleTable(); renderChart();
-    status('Found '+sugg.length+' auto suggestions'+(_cycles.length>sugg.length?' + '+(_cycles.length-sugg.length)+' manual':'')+'.');
+    status((emptyReason ? emptyReason+' ' : '')+'Found '+sugg.length+' auto suggestions'+(_cycles.length>sugg.length?' + '+(_cycles.length-sugg.length)+' manual':'')+'.'+cutNote);
   }
 
   /* ── Render cycle table ── */
@@ -1723,6 +1739,8 @@
     document.getElementById('cycleProfileSelect').addEventListener('change', function() {
       this.classList.remove('is-invalid');
     });
+    // The start → start switch is not remembered: every page open is termination → termination.
+    document.getElementById('startToStartChk').checked = false;
     document.getElementById('suggestBtn').addEventListener('click', function(){ suggestCycles(); });
     document.getElementById('addManualBtn').addEventListener('click', function(){ addManualCycleEmpty(); });
     document.getElementById('applyBtn').addEventListener('click', function(){ applySelected(); });

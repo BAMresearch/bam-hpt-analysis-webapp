@@ -5,7 +5,9 @@
   "eval_min": 70,
   "_defrost_indicator_columns": "Optional list of column names in the Plotdaten sheet that flag an active defrost. Leave empty when the export has none; kind then comes from the stored cycle_type or the analyst dropdown.",
   "defrost_indicator_columns": [],
-  "_dt_hp_comment": "End of a defrost: dT_HP = T_supply (Ts Buh when present) - T_return_emu must cross up through dt_hp_recover_k and stay there for dt_hp_hold_s without going negative again. This is not dTreturn. The hold is a tool choice so a one-sample flicker cannot end a defrost.",
+  "_dt_hp_comment": "dT_HP = T_supply (Ts Buh when present) - T_return_emu; this is not dTreturn. A defrost happened when dT_HP stays below dt_hp_recover_k for dt_hp_hold_s (the cold-side test). The hold is a tool choice so a one-sample flicker does not count as a defrost.",
   "dt_hp_recover_k": 0.2,
-  "dt_hp_hold_s": 60
+  "dt_hp_hold_s": 60,
+  "_dt_hp_recovery_hold_comment": "The defrost termination watch: after the upward crossing of dt_hp_recover_k, dT_HP must stay at or above it for dt_hp_recovery_hold_s. A dip below cancels that crossing; the last crossing that passes is the termination and the stored time is the crossing itself. dt_hp_hold_s stays the cold-side test (dT_HP below the threshold for that long means a defrost happened).",
+  "dt_hp_recovery_hold_s": 120
 }

@@ -2308,7 +2308,7 @@ def analysis_wbuh_fields(means: dict) -> dict:
     return out
 
 
-def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None):
+def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None, cycle_marking=None):
 
     try:
         rowid = None
@@ -2430,8 +2430,21 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
             # only; the decision it returns (kind, veto verdict, interior event)
             # is what the clock step below reuses, so the veto runs once.
             decision = None
+            kind_hint = None
+            trans_hint = None
+            if cycle_marking and not update_existing:
+                # A Suggest cut: set cycle_type / marker **before** the stamp,
+                # which reads the marker to know where the window opens.
+                ct, marker, kind_hint = cycle_marking[:3]
+                trans_hint = cycle_marking[3] if len(cycle_marking) > 3 else None
+                if ct and marker:
+                    cursor.execute(
+                        "UPDATE results SET cycle_type=?, cycle_start_marker=? WHERE rowid=?",
+                        (ct, marker, rowid))
             try:
-                decision = store_pelec_transition_on_insert(cursor, df_filtered, rowid, file_name)
+                decision = store_pelec_transition_on_insert(cursor, df_filtered, rowid, file_name,
+                                                            kind_hint=kind_hint,
+                                                            trans_hint=trans_hint)
             except Exception as exc:
                 print(f"[pelec_transition] rowid={rowid}: not stored ({exc})")
             # The same path also writes the **default** guideline
@@ -2659,11 +2672,16 @@ def index():
     finally:
         conn.close()
 
-def process_new_data(file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, return_rowid: bool = False, notices_out=None):
+def process_new_data(file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, return_rowid: bool = False, notices_out=None, cycle_marking=None, exclude_end_sample=False):
     """Process new data and update database if needed.
 
     If notices_out is a list, user-facing processing notes (mass-flow derivation,
     BAM-corr fallback, …) are appended for the caller / UI.
+
+    ``cycle_marking`` is ``(cycle_type, cycle_start_marker, kind_hint, interior_time)``
+    from a Suggest cut (``SUGGEST_CUT_APPLY``); only a new row uses it.
+    ``exclude_end_sample`` leaves the sample at ``end_time`` to the row that starts
+    there; the stored end stays ``end_time``.
     """
     print(f"=== PROCESS_NEW_DATA CALLED ===")
     print(f"Processing file: {file_name}, dataset: {data_set}, time range: {start_time}-{end_time}, update_existing={update_existing}")
@@ -2673,6 +2691,11 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
     try:
         df_filtered = process_file(file_name, data_set, start_time, end_time)
         print(f"process_file returned: {df_filtered is not None}")
+        if df_filtered is not None and exclude_end_sample and 'time_elapsed' in df_filtered.columns:
+            _te = pd.to_numeric(df_filtered['time_elapsed'], errors='coerce')
+            df_filtered = df_filtered[_te < float(end_time)].copy()
+            if df_filtered.empty:
+                df_filtered = None
         
         if df_filtered is not None:
             print(f"DataFrame shape: {df_filtered.shape}")
@@ -2694,7 +2717,7 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
                     cur, df_filtered, file_name, data_set, start_time, end_time,
                     update_existing=update_existing, old_start_time=old_start_time,
                     old_end_time=old_end_time, notices_out=local_notices,
-                    clocked_out=clocked,
+                    clocked_out=clocked, cycle_marking=cycle_marking,
                 )
                 tagged = [_tag_notice_with_file(file_name, n) for n in local_notices]
                 if notices_out is not None:
@@ -7039,7 +7062,7 @@ def get_tsup_setpoint(test_condition, file_name=None, condition_set_id=None,
                       climate=None, application=None):
     """Get supply temperature setpoint based on test condition (from condition_sets.json).
 
-    Variations like "A real BUH" / "C70min" use the same setpoint as the base letter.
+    Variations like "A real BUH" use the same setpoint as the base letter.
     climate / application select the Table 3 slice; omitted values default to Average / MT.
     """
     value = unit_config.get_tsup_setpoint_for(
@@ -7997,10 +8020,14 @@ def ensure_cycle_extraction_suggestions_table() -> None:
                 confidence REAL,
                 notes_auto TEXT,
                 pelec_drop_mag REAL,
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now')),
+                interior_time REAL -- frost termination cut: the closing defrost start
             )
             """
         )
+        have = {r[1] for r in conn.execute("PRAGMA table_info(cycle_extraction_suggestions)")}
+        if 'interior_time' not in have:
+            conn.execute("ALTER TABLE cycle_extraction_suggestions ADD COLUMN interior_time REAL")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cycle_sugg_file_ds ON cycle_extraction_suggestions(file_name, data_set)"
         )
@@ -8018,7 +8045,7 @@ BUFFER_OPTIONS = [600, 900, 1200]  # used for sensitivity; cached in parallel
 DEFROST_TEST_CONDS = {'A', 'B', 'E', 'F',
                       'E real BUH', 'E virtual BUH',
                       'A real BUH', 'A virtual BUH'}
-ON_OFF_TEST_CONDS = {'C', 'D', 'C70min'}
+ON_OFF_TEST_CONDS = {'C', 'D'}
 
 PELEC_COL = 'Electric Power Input (without correction)'
 
@@ -8036,6 +8063,10 @@ CYCLE_PERIODS_CONFIG_DEFAULTS = {
     # timer), so the hold is a tool choice: a one-sample flicker must not win.
     'dt_hp_recover_k': 0.2,
     'dt_hp_hold_s': 60.0,
+    # The defrost **termination** watch, separate from the cold-side 60 s above:
+    # after the upward crossing, dT_HP stays at or above dt_hp_recover_k for this
+    # long or the crossing does not count. The stored time is still the crossing.
+    'dt_hp_recovery_hold_s': 120.0,
 }
 _cycle_periods_cfg_cache = None
 _cycle_periods_cfg_mtime = -1.0
@@ -8060,7 +8091,8 @@ def load_cycle_periods_config() -> dict:
             cfg.update({k: v for k, v in raw.items() if k in CYCLE_PERIODS_CONFIG_DEFAULTS})
         except Exception as exc:
             print(f"[cycle_periods] cannot read {path}: {exc}")
-    for key in ('buffer_min', 'eq_min', 'eval_min', 'dt_hp_recover_k', 'dt_hp_hold_s'):
+    for key in ('buffer_min', 'eq_min', 'eval_min', 'dt_hp_recover_k', 'dt_hp_hold_s',
+                'dt_hp_recovery_hold_s'):
         try:
             cfg[key] = max(0.0, float(cfg[key]))
         except (TypeError, ValueError):
@@ -8533,6 +8565,440 @@ def _snap_suggestion_starts_to_plateau_edge(
     return out if out else sugg
 
 
+def _power_level_before(t, p, span_s):
+    """(level, covered): median power over the ``span_s`` before each sample (that sample
+    excluded), and whether the trace already runs that long there."""
+    ps = pd.Series(np.asarray(p, dtype=float), index=pd.to_timedelta(t - t[0], unit='s'))
+    lvl = ps.rolling(f'{int(round(span_s))}s').median().shift(1).to_numpy(dtype=float)
+    return lvl, (t - t[0]) >= float(span_s)
+
+
+def _longest_power_run(t, p, j0, j1, thr, *, gap_s, step, cap_s):
+    """Longest stretch (s) in (j0, j1] with power >= ``thr``; gaps shorter than ``gap_s``
+    do not break it. Stops counting once ``cap_s`` is reached."""
+    best = 0.0
+    run0 = None
+    last_on = None
+    for i in range(int(j0) + 1, int(j1) + 1):
+        if p[i] >= thr:
+            if run0 is None or (last_on is not None
+                                and float(t[i] - t[last_on]) - step >= float(gap_s)):
+                run0 = i
+            last_on = i
+            best = max(best, float(t[i] - t[run0]) + step)
+            if best >= float(cap_s):
+                return best
+    return best
+
+
+def _earliest_power_drop(t, p, lvl, covered, lo, i_sh, *, plateau_frac, min_on_plateau_s,
+                         gap_s, step, reject=None, note=None):
+    """Index of the earliest power drop in [lo, i_sh) that starts the stop at ``i_sh``, or None.
+
+    The same rule for a defrost and for a standby stop. A drop is a sample still at its
+    own level (``lvl``) whose next sample falls below ``plateau_frac`` of it. It starts
+    the stop when, before ``i_sh``, power gets back for ``min_on_plateau_s`` neither to
+    ``plateau_frac`` of that own level nor to ``plateau_frac`` of the median power of the
+    whole on-period / heating in [lo, i_sh]. A brief spike does not count; a blurp that
+    returns to the plateau does, and so does the end of a burst of higher power after a
+    restart (power then runs on at the on-period's median). ``reject(j)`` may return a
+    reason to skip a drop; ``note(j, why)`` hears about every skipped one.
+    """
+    js = np.arange(int(lo), int(i_sh))
+    if not js.size:
+        return None
+    seg = p[int(lo):int(i_sh) + 1]
+    seg = seg[np.isfinite(seg)]
+    ref = float(np.nanmedian(seg)) if seg.size else float('nan')
+    lv = lvl[js]
+    ok = (covered[js] & np.isfinite(lv) & (p[js] >= plateau_frac * lv)
+          & (p[js + 1] < plateau_frac * lv))
+    for j in js[ok]:
+        thr = float(plateau_frac * lvl[j])
+        if _longest_power_run(t, p, j, i_sh, thr, gap_s=gap_s, step=step,
+                              cap_s=min_on_plateau_s) >= float(min_on_plateau_s):
+            if note:
+                note(int(j), 'power back at its level for 2 min')
+            continue
+        if np.isfinite(ref) and _longest_power_run(
+                t, p, j, i_sh, float(plateau_frac * ref), gap_s=gap_s, step=step,
+                cap_s=min_on_plateau_s) >= float(min_on_plateau_s):
+            if note:
+                note(int(j), 'power back at the on-period median for 2 min')
+            continue
+        why = reject(int(j)) if reject else None
+        if why:
+            if note:
+                note(int(j), why)
+            continue
+        return int(j)
+    return None
+
+
+def _standby_starts(suggestions, t_arr, p_raw, *, dt_grid, off_kw=0.15,
+                    min_on_plateau_s=120.0, plateau_frac=0.90, gap_s=30.0):
+    """On/off files: each start-to-start edge on the power drop into its stop. Power only.
+
+    The finder's plateau walk reads a single noisy sample 0.5 % under the plateau as
+    leaving it, and on a coarse grid that can pull a standby start minutes back into the
+    on-period. Here each finder start keeps its stop and moves to the earliest power
+    drop into that stop (:func:`_earliest_power_drop`) that reaches it within
+    ``min_on_plateau_s``, else to the last on-sample before it. No temperature is read.
+
+    The stop is the compressor off: the first sample from the finder start at or below
+    ``off_kw`` (the finder's own true-off level). A lower phase of the on-period, however
+    far below the high phase, is still on. Only when a standby never reaches true off is
+    the stop the first sample below the on-period's high band
+    (:func:`_high_plateau_floor_kw`).
+    """
+    sugg = list(suggestions or [])
+    if not sugg:
+        return sugg
+    t = np.asarray(t_arr, dtype=float)
+    p = np.asarray(p_raw, dtype=float)
+    n = int(p.size)
+    if n < 10:
+        return sugg
+    step = float(dt_grid) if np.isfinite(float(dt_grid)) and float(dt_grid) > 0 else 1.0
+    lvl, covered = _power_level_before(t, p, min_on_plateau_s)
+    file_hi = _high_plateau_floor_kw(p, off_kw=off_kw)
+
+    bounds = [float(s_[0]) for s_ in sugg]
+    after = t[np.isfinite(t) & (t > float(sugg[-1][1]) + 1e-9)]
+    bounds.append(float(after[0]) if after.size else float(sugg[-1][1]) + step)
+    carry = [(float(s_[2]), float(s_[3])) for s_ in sugg] + [(float('nan'), float('nan'))]
+
+    moved = []
+    floor = -np.inf
+    for i_b, (b, cr) in enumerate(zip(bounds, carry)):
+        seg = (t > floor) & (t <= b) & np.isfinite(p)
+        hi = (float(_high_plateau_floor_kw(p[seg], off_kw=off_kw))
+              if float(seg.sum()) * step >= float(min_on_plateau_s) else float(file_hi))
+        nxt = bounds[i_b + 1] if i_b + 1 < len(bounds) else float('inf')
+        k = np.where((t >= b) & (t < nxt) & (p <= off_kw))[0]
+        stop_kw = off_kw
+        if not k.size:
+            k = np.where((t >= b) & (p < hi))[0]
+            stop_kw = hi
+        if not k.size:
+            moved.append((b, cr))
+            continue
+        k0 = int(k[0])
+        lo = int(np.searchsorted(t, floor, side='right'))
+        i_sh = k0 - 1
+        while i_sh > lo and not p[i_sh] > stop_kw:
+            i_sh -= 1
+        if i_sh < lo or not p[i_sh] > stop_kw:
+            moved.append((b, cr))
+            continue
+        # Only a drop that reaches the stop within min_on_plateau_s starts it.
+        lo_drop = max(lo, int(np.searchsorted(t, float(t[k0]) - float(min_on_plateau_s), side='left')))
+        j = _earliest_power_drop(t, p, lvl, covered, lo_drop, i_sh, plateau_frac=plateau_frac,
+                                 min_on_plateau_s=min_on_plateau_s, gap_s=gap_s, step=step)
+        moved.append((float(t[j] if j is not None else t[i_sh]), cr))
+        back_on = np.where((t > t[k0]) & (p >= hi))[0]
+        floor = float(t[back_on[0]]) if back_on.size else float(t[-1])
+
+    out = []
+    for (a, cr), (b, _c) in zip(moved[:-1], moved[1:]):
+        et = _last_time_on_axis_before(t, b, a)
+        if et is None or et <= a:
+            continue
+        out.append((float(a), float(et), cr[0], cr[1]))
+    return out
+
+
+def _frost_defrost_starts(
+    suggestions,
+    t_arr,
+    p_raw,
+    *,
+    dt_grid: float,
+    dt_v,
+    dt_t,
+    off_kw: float = 0.15,
+    min_on_plateau_s: float = 120.0,
+    plateau_frac: float = 0.90,
+    gap_s: float = 30.0,
+    trace: list | None = None,
+):
+    """Frost files: every start is the power drop that begins a defrost.
+
+    Supply − return only says **which** defrost and where the previous one ended; it
+    never places a start, so a wander of supply − return during heating cannot move
+    one. Heating power itself may slide slowly (frost building up); that is not a drop.
+
+    * **Defrost** — dT_HP below ``dt_hp_recover_k`` for ``dt_hp_hold_s`` (the cold-side
+      test). Cold stretches with no termination between them (``dt_hp_recovery_hold_s``
+      watch) are one defrost, and so are cold stretches with a termination between them
+      when power did not get back to heating for ``min_on_plateau_s`` in between. When supply − return goes cold while power is still at
+      heating level, the defrost's power drop is the first one after that in the same
+      defrost — a cold stretch without a power drop never places a start.
+    * **A drop** — a sample where power is still at its own level (the median of the
+      ``min_on_plateau_s`` before it) and the next sample falls below ``plateau_frac`` of
+      that level (the finder's own "left the plateau" fraction). A slow slide never
+      falls that far within ``min_on_plateau_s``, so it makes no drop.
+    * **Start** — the earliest drop after the previous termination from which, before
+      this defrost, neither power gets back to ``plateau_frac`` of that level nor
+      supply − return gets back to its heating median (from the D/S buffer after the
+      previous termination) for ``min_on_plateau_s``. A brief spike above heating power,
+      and supply − return jumping during it, do not count (dips shorter than ``gap_s``
+      do not break it); a blurp that returns to heating does, and so does a step down in
+      heating power after which heating goes on. Supply − return never places a start.
+      When no earlier drop qualifies, the start is the collapse edge itself.
+
+    A finder start that has no defrost after it — heating that starts with no defrost —
+    is not a start. A finder start inside one defrost group after power held the group's
+    heating level for ``min_on_plateau_s`` again is a new defrost (so a defrost that never
+    recovers is not bridged). A file that ends inside a drop out of heating gets that
+    drop as its last start, so the last full cycle closes there. The head of the file
+    before the first defrost start is never a start. Without a dT_HP series the finder's
+    starts are kept.
+
+    ``trace`` (a list, diagnostics only) receives one dict per decision.
+    """
+    sugg = list(suggestions or [])
+
+    def _note(**kw):
+        if trace is not None:
+            trace.append(kw)
+
+    if dt_v is None or dt_t is None:
+        _note(step='skip', why='no supply − return series')
+        return sugg
+    t = np.asarray(t_arr, dtype=float)
+    p = np.asarray(p_raw, dtype=float)
+    dv = np.asarray(dt_v, dtype=float)
+    dtt = np.asarray(dt_t, dtype=float)
+    n = int(p.size)
+    if n < 10 or dv.size < 10:
+        return sugg
+    order = np.argsort(dtt, kind='mergesort')
+    dv, dtt = dv[order], dtt[order]
+    step = float(dt_grid) if np.isfinite(float(dt_grid)) and float(dt_grid) > 0 else 1.0
+    high_kw = _high_plateau_floor_kw(p, off_kw=off_kw)
+    cfg = load_cycle_periods_config()
+    recover_k = float(cfg['dt_hp_recover_k'])
+    cold_s = float(cfg['dt_hp_hold_s'])
+    rec_s = float(cfg['dt_hp_recovery_hold_s'])
+    buffer_s = float(_guideline_lengths()['buffer_s'])
+
+    # Power's own level just before each sample: median of the min_on_plateau_s before it.
+    lvl, covered = _power_level_before(t, p, min_on_plateau_s)
+
+    # 1. Defrost groups: (cold onset, termination or None).
+    groups = []
+    pos = float(dtt[0])
+    while True:
+        sub = dtt >= pos
+        if int(sub.sum()) < 3:
+            break
+        c = _dt_hp_low_hold_start(dv[sub], dtt[sub], recover_k, cold_s)
+        if c is None:
+            break
+        holds = _dt_hp_accepted_holds(dv, dtt, c, float('inf'), recover_k, rec_s)
+        h = next((x for x in holds if x > c), None)
+        groups.append((float(c), h))
+        if h is None:
+            break
+        pos = float(h) + 1e-6
+
+    def _local_high(floor, c):
+        """The high band for one defrost, from its own heating.
+
+        Same rule as the file-wide band (:func:`_high_plateau_floor_kw`), but on the
+        heating before this defrost (from the D/S buffer after ``floor``): heating power
+        can fall a long way over one file, and a band from the file's early, stronger
+        cycles would put the late heating itself below it.
+        """
+        for lo in (floor + buffer_s, floor):
+            m = (t > lo) & (t <= c) & np.isfinite(p)
+            if float(m.sum()) * step >= float(min_on_plateau_s):
+                return float(_high_plateau_floor_kw(p[m], off_kw=off_kw))
+        return float(high_kw)
+
+    def _shoulder(floor, c, hi=None):
+        """Index of the last high sample before ``c`` (the edge of the collapse), or None."""
+        hi = _local_high(floor, c) if hi is None else hi
+        cand = np.where((t > floor) & (t <= c) & (p >= hi))[0]
+        return int(cand[-1]) if cand.size else None
+
+    def _longest_at(j0, j1, thr):
+        return _longest_power_run(t, p, j0, j1, thr, gap_s=gap_s, step=step,
+                                  cap_s=min_on_plateau_s)
+
+    def _dt_heating_level(floor, c):
+        """Median dT_HP over the heating before ``c`` (from the D/S buffer after ``floor``)."""
+        for lo in (floor + buffer_s, floor):
+            m = (dtt > lo) & (dtt <= c) & np.isfinite(dv)
+            if int(m.sum()) >= 3 and float(dtt[m][-1] - dtt[m][0]) >= float(min_on_plateau_s):
+                return float(np.nanmedian(dv[m]))
+        return None
+
+    def _dt_back_at_heating(t0, t1, level):
+        """True when dT_HP sat at or above its heating level for min_on_plateau_s in (t0, t1]."""
+        run0 = None
+        last_on = None
+        for i in np.where((dtt > t0) & (dtt <= t1))[0]:
+            if np.isfinite(dv[i]) and dv[i] >= level:
+                if run0 is None or (last_on is not None
+                                    and float(dtt[i] - dtt[last_on]) >= float(gap_s)):
+                    run0 = i
+                last_on = i
+                if float(dtt[i] - dtt[run0]) >= float(min_on_plateau_s):
+                    return True
+        return False
+
+    def _leave(floor, c):
+        """(start time, heating level there) for the defrost that collapses before ``c``.
+
+        A power drop after which supply − return still sits at its heating level for
+        min_on_plateau_s is a step inside heating (for example the end of a higher
+        stretch after a restart), not the start of this defrost.
+        """
+        hi_loc = _local_high(floor, c)
+        i_sh = _shoulder(floor, c, hi_loc)
+        if i_sh is None:
+            return None, None
+        lo = int(np.searchsorted(t, floor, side='right'))
+        dt_level = _dt_heating_level(floor, c)
+
+        def _reject(j):
+            if dt_level is not None and _dt_back_at_heating(float(t[j]), c, dt_level):
+                return 'supply − return back at heating level for 2 min'
+            return None
+
+        j = _earliest_power_drop(
+            t, p, lvl, covered, lo, i_sh, plateau_frac=plateau_frac,
+            min_on_plateau_s=min_on_plateau_s, gap_s=gap_s, step=step, reject=_reject,
+            note=lambda jj, why: _note(step='drop rejected', t=float(t[jj]), why=why))
+        if j is not None:
+            _note(step='start placed', t=float(t[j]), how='power drop',
+                  level_kw=float(lvl[j]), next_kw=float(p[j + 1]), shoulder=float(t[i_sh]))
+            return float(t[j]), float(lvl[j])
+        lv_sh = float(lvl[i_sh]) if np.isfinite(lvl[i_sh]) else float(p[i_sh])
+        _note(step='start placed', t=float(t[i_sh]), how='collapse edge (no earlier drop)',
+              level_kw=lv_sh, next_kw=float(p[i_sh + 1]) if i_sh + 1 < n else None,
+              shoulder=float(t[i_sh]))
+        return float(t[i_sh]), lv_sh
+
+    def _collapse(floor, c, h):
+        """Where power really drops into this defrost.
+
+        ``c`` when power is already below the high band there (the usual case: the
+        compressor stops, then supply − return goes cold). When power is still at
+        heating level at ``c`` — supply − return went cold during heating, for example
+        with the return climbing up to a capped supply — the start is not there: it is
+        the first power drop below the high band later in this same defrost.
+        """
+        hi_loc = _local_high(floor, c)
+        i_sh = _shoulder(floor, c, hi_loc)
+        i_c = int(np.searchsorted(t, c, side='right')) - 1
+        if i_sh is None or i_sh < i_c:
+            return c
+        t_hi = float(h) if h is not None else float(t[-1])
+        k = np.where((t > c) & (t <= t_hi) & (p < hi_loc))[0]
+        return float(t[k[0]]) if k.size else c
+
+    # A cold stretch after a termination is a new defrost only when power was back at
+    # heating for min_on_plateau_s in between. Supply − return can climb over 0.2 K for
+    # the recovery watch while the compressor is still off and then go cold again; power
+    # has not left the defrost, so that is one defrost and its last termination counts.
+    merged = []
+    m_floor = -np.inf
+    for c, h in groups:
+        if merged and merged[-1][1] is not None:
+            pc, ph = merged[-1]
+            hi_prev = _local_high(m_floor, pc)
+            i0 = int(np.searchsorted(t, ph, side='left'))
+            i1 = int(np.searchsorted(t, c, side='right')) - 1
+            if i1 <= i0 or _longest_at(i0, i1, hi_prev) < float(min_on_plateau_s):
+                _note(step='merged', cold_onset=float(c), into=float(pc),
+                      why='power not back at heating between the two cold stretches')
+                merged[-1] = (pc, h)
+                continue
+            m_floor = ph
+        merged.append((c, h))
+    groups = merged
+
+    starts = []          # start times, one per defrost
+    floor = -np.inf
+    thr_of = {}
+    for gi, (c, h) in enumerate(groups):
+        _note(step='defrost', group=gi, cold_onset=float(c), termination=h,
+              power_drop=_collapse(floor, c, h), high_kw=_local_high(floor, c))
+        L, level = _leave(floor, _collapse(floor, c, h))
+        if L is not None and L > floor:
+            starts.append(L)
+            thr_of[gi] = (plateau_frac * level, L)
+        floor = h if h is not None else c
+
+    # 2. A finder start inside one defrost group, after power held heating again.
+    bounds = [float(s_[0]) for s_ in sugg]
+    if sugg:
+        e_last = float(sugg[-1][1])
+        after = t[np.isfinite(t) & (t > e_last + 1e-9)]
+        bounds.append(float(after[0]) if after.size else float(e_last + step))
+    for b in bounds:
+        for gi, (c, h) in enumerate(groups):
+            if not (c < b and (h is None or b < h)) or gi not in thr_of:
+                continue
+            thr, _L = thr_of[gi]
+            # Only a real power drop can start a defrost: the first one at or after b.
+            t_hi = float(h) if h is not None else float(t[-1])
+            k_off = np.where((t >= b) & (t <= t_hi) & (p < _local_high(c, b)))[0]
+            if not k_off.size:
+                continue
+            back, _lv = _leave(c, float(t[k_off[0]]))
+            if back is None or not back > c:
+                continue
+            # Only after power held this defrost's heating level again is it a new one.
+            i_c = int(np.searchsorted(t, c, side='left'))
+            i_b = int(np.searchsorted(t, back, side='left'))
+            if _longest_at(i_c, i_b, thr) >= float(min_on_plateau_s):
+                _note(step='extra start (finder start inside a defrost)', t=float(back),
+                      finder_start=float(b), group=gi)
+                starts.append(back)
+
+    # 3. The file ends inside a drop out of heating.
+    t_end = float(t[-1])
+    tail_floor = floor if groups else -np.inf
+    L_tail, _thr = _leave(tail_floor, t_end)
+    if (L_tail is not None and L_tail > tail_floor
+            and bool(np.any((t > L_tail) & (p < _local_high(tail_floor, t_end))))):
+        if not groups or groups[-1][1] is not None:
+            _note(step='extra start (file ends in a drop)', t=float(L_tail))
+            starts.append(L_tail)
+
+    starts = sorted(set(round(float(x), 6) for x in starts))
+    if not groups:
+        return sugg
+    dedup = []
+    for x in starts:
+        if dedup and x - dedup[-1] < max(step, 1.0) * 1.5:
+            continue
+        dedup.append(x)
+    if len(dedup) < 2:
+        return []
+
+    carry = [(float(s_[0]), float(s_[2]), float(s_[3])) for s_ in sugg]
+
+    def _carry(x):
+        if not carry:          # the finder saw no drop: no confidence to carry over
+            return float('nan'), float('nan')
+        best = min(carry, key=lambda z: abs(z[0] - x))
+        return best[1], best[2]
+
+    out = []
+    for a, b in zip(dedup[:-1], dedup[1:]):
+        et = _last_time_on_axis_before(t, b, a)
+        if et is None or et <= a:
+            continue
+        conf, mag = _carry(a)
+        out.append((float(a), float(et), conf, mag))
+    return out
+
+
 def _shoulder_time_before_long_off_run(
     i0: int,
     t_arr: np.ndarray,
@@ -8645,6 +9111,7 @@ def _detect_cycle_boundaries_long_off_runs(
     min_on_plateau_s: float = 120.0,
     walk_back_max_s: float = 180.0,
     diag: dict | None = None,
+    keep_leading_boundary: bool = False,
 ) -> list[tuple[float, float, float, float]]:
     """Cycles from long *true off* runs on raw uncorrected Pelec (coarse VarFl-style exports).
 
@@ -8670,6 +9137,10 @@ def _detect_cycle_boundaries_long_off_runs(
     ``gate_dropped`` (starts the plateau gate removed). The caller uses it to tell “this file has no
     cycles” from “this path found nothing, try slopes” — a gate-emptied result must **not** fall
     through to the slope search, which would park Start on a notch inside the trough.
+
+    ``keep_leading_boundary=True`` skips that leading drop. The termination cut on Suggest
+    needs every defrost / standby start, because its windows run from one termination to the
+    next and never include the head of the file.
 
     Returns ``(start, end, confidence, pelec_drop_mag)`` matching :func:`_detect_cycle_boundaries_drop_to_drop`.
     """
@@ -8782,7 +9253,8 @@ def _detect_cycle_boundaries_long_off_runs(
     # median P clearly at or above ``leading_prefix_on_median_kw`` (FixFl / mid-test start), not a lower cold-start ramp.
     # Only when that first boundary is still the one the first long off produced — if the plateau gate
     # already removed it, there is no incomplete leading block left to drop.
-    if len(boundaries) >= 3 and run_starts and first_i0 == int(run_starts[0]):
+    if (not keep_leading_boundary and len(boundaries) >= 3 and run_starts
+            and first_i0 == int(run_starts[0])):
         i0f = int(run_starts[0])
         if i0f > 0:
             med_pre = float(np.nanmedian(p_raw[0:i0f]))
@@ -8953,7 +9425,9 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
                                          high_frac: float = 0.60,
                                          low_frac: float = 0.20,
                                          smooth_window: int = 3,
-                                         min_cycle_s: float = 0.0):
+                                         min_cycle_s: float = 0.0,
+                                         keep_leading_boundary: bool = False,
+                                         diag: dict | None = None):
     """Drop→drop markers on uncorrected Pelec (**cliffs = steep negative slope**, shoulder timestamp).
 
     0. **Segmentation preference:** on raw uncorrected Pelec, detect long stretches at or below ~0.15 kW
@@ -9015,6 +9489,10 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
 
     ``high_frac`` / ``low_frac``: unused (**API shim**).
 
+    ``keep_leading_boundary`` / ``diag``: passed to the long-off path. The defaults are the
+    drop→drop cut the Suggest switch uses; the termination cut keeps the leading start and
+    reads ``diag['off_runs']`` to know whether power showed a compressor stop at all.
+
     Ends: ``last time_elapsed < next_start``.
     """
     if df_full is None or 'time_elapsed' not in df_full.columns:
@@ -9022,6 +9500,7 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
     pelec_col = _find_uncorrected_pelec_column(df_full)
     if not pelec_col:
         return []
+
 
     tsup_col = _suggest_tsupply_column(df_full)
     heat_col = _suggest_heating_column(df_full)
@@ -9062,8 +9541,9 @@ def _detect_cycle_boundaries_drop_to_drop(df_full: pd.DataFrame,
         min_off_sec_use = 88.0
     else:
         min_off_sec_use = 75.0
-    _diag: dict = {}
-    _lo = _detect_cycle_boundaries_long_off_runs(df_full, min_off_sec=min_off_sec_use, diag=_diag)
+    _diag: dict = diag if diag is not None else {}
+    _lo = _detect_cycle_boundaries_long_off_runs(df_full, min_off_sec=min_off_sec_use, diag=_diag,
+                                                 keep_leading_boundary=keep_leading_boundary)
     if len(_lo) >= 1:
         # Min cycle applies to this path too. Nothing left means "no cycle spaced that far apart",
         # not "fall through to the slope fallback".
@@ -9558,10 +10038,13 @@ def _defrost_end_from_dt_hp(df_slice, pelec, p_time, window_start, window_end, p
     held, we wait rather than stamp the early ramp; if the ramp detector sits
     after a crossing that already held, the hold caps it. A sheet without the
     temperature series keeps the power time.
+
+    The watch is ``dt_hp_recovery_hold_s`` (120 s), not the cold-side
+    ``dt_hp_hold_s``: a crossing that dips back below within the watch is dropped.
     """
     cfg = load_cycle_periods_config()
     recover_k = float(cfg['dt_hp_recover_k'])
-    hold_s = float(cfg['dt_hp_hold_s'])
+    hold_s = float(cfg['dt_hp_recovery_hold_s'])
     dt_v, dt_t = _dt_hp_series(df_slice)
     if dt_v is None:
         return power_time, 'power ramp-up (no dT_HP series on this sheet)'
@@ -9909,7 +10392,8 @@ def _guideline_kind_veto(kind, kind_source, df_slice, pelec, p_time,
 def _filter_defrost_suggestions_with_dt_hp(df_full, suggestions, test_cond):
     """Post-filter on Suggest: a defrost letter keeps only windows that defrosted.
 
-    Suggest stays **drop→drop**. ``_detect_cycle_boundaries_drop_to_drop``
+    Runs on the **start → start** switch only (the default cut is termination →
+    termination, see ``_suggest_cycles``). ``_detect_cycle_boundaries_drop_to_drop``
     — Min gap, the shoulder rule, the true-off merge — is still the only finder;
     this runs on its result and can only remove windows, never move or add one.
 
@@ -9966,11 +10450,349 @@ def _filter_defrost_suggestions_with_dt_hp(df_full, suggestions, test_cond):
     return kept
 
 
+# --- Suggest cycles: termination → next termination -------------------------
+# The default Suggest cut. A frost file runs defrost termination → next defrost
+# termination, an on/off file standby termination → next standby termination.
+# The starts are still the plateau leaves of ``_detect_cycle_boundaries_drop_to_drop``;
+# only the cut moves. The switch on Cycle Extract brings back start → start.
+
+SUGGEST_EMPTY_DEFROST = 'Defrost termination was not found.'
+SUGGEST_EMPTY_STANDBY = 'Standby termination was not found.'
+SUGGEST_EMPTY_UNTOLD = 'The series could not be told.'
+
+# The cut a suggestion carries (``cycle_extraction_suggestions.marker_type``) and
+# what Apply sets on the new results row from it: (cycle_type, cycle_start_marker,
+# kind hint for the clock stamp). An old row ('drop') is not listed, so Apply
+# treats it exactly as before.
+SUGGEST_CUT_APPLY = {
+    'defrost_end': ('defrost_cycle', 'defrost_end', None),
+    'on_start': ('on_off_cycle', 'on_start', None),
+    'defrost_start': ('defrost_cycle', 'defrost_start', None),
+    'off_start': ('on_off_cycle', 'off_start', None),
+    # cycle_type 'other' means unknown, never continuous, so the kind goes to
+    # the clock stamp directly and the row keeps no cycle_type.
+    'continuous': (None, None, 'continuous'),
+}
+
+SUGGEST_CUT_NOTES = {
+    'defrost_end': 'auto defrost end→defrost end',
+    'on_start': 'auto standby end→standby end',
+    'defrost_start': 'auto drop→drop',
+    'off_start': 'auto drop→drop',
+    'drop': 'auto drop→drop',
+    'continuous': 'auto one window (no defrost, no standby)',
+}
+
+
+def _suggest_file_has_cold_stretch(df_full):
+    """True/False/None: dT_HP below ``dt_hp_recover_k`` for ``dt_hp_hold_s`` somewhere.
+
+    The same cold-side test the kind veto uses, on the whole file. ``None`` means
+    supply and return cannot be read, which is not the same as "no defrost".
+    """
+    cfg = load_cycle_periods_config()
+    dt_v, dt_t = _dt_hp_series(df_full)
+    if dt_v is None:
+        return None
+    return _dt_hp_low_hold_start(
+        dt_v, dt_t, float(cfg['dt_hp_recover_k']), float(cfg['dt_hp_hold_s'])) is not None
+
+
+def _suggest_power_axis(df_full):
+    """(power, time) of uncorrected electric power in time order, or (None, None)."""
+    col = _find_uncorrected_pelec_column(df_full)
+    if not col or 'time_elapsed' not in df_full.columns:
+        return None, None
+    p = pd.to_numeric(df_full[col], errors='coerce')
+    t = pd.to_numeric(df_full['time_elapsed'], errors='coerce')
+    keep = p.notna() & t.notna()
+    if int(keep.sum()) < 20:   # the finder's own minimum
+        return None, None
+    frame = pd.DataFrame({'t': t[keep], 'p': p[keep]}).sort_values('t', kind='mergesort')
+    return frame['p'].reset_index(drop=True), frame['t'].reset_index(drop=True)
+
+
+def _frost_starts_for_sheet(df_full, windows, min_cycle_s=0.0, trace=None):
+    """Frost file: the finder's windows re-anchored on its defrosts (:func:`_frost_defrost_starts`).
+
+    Runs after ``_detect_cycle_boundaries_drop_to_drop``, which is not changed; Min
+    cycle is applied again to the anchored starts. Without a readable power or
+    supply / return series the finder's windows come back as they are.
+    """
+    col = _find_uncorrected_pelec_column(df_full)
+    if df_full is None or not col or 'time_elapsed' not in df_full.columns:
+        return windows
+    pw = pd.DataFrame({'t': pd.to_numeric(df_full['time_elapsed'], errors='coerce'),
+                       'p': pd.to_numeric(df_full[col], errors='coerce')})
+    pw = pw.dropna().sort_values('t', kind='mergesort')
+    if len(pw) < 20:
+        return windows
+    t = pw['t'].to_numpy(dtype=float)
+    step = float(_median_time_step_seconds(t))
+    dt_v, dt_t = _dt_hp_series(df_full)
+    out = _frost_defrost_starts(windows, t, pw['p'].to_numpy(dtype=float),
+                                dt_grid=step, dt_v=dt_v, dt_t=dt_t, trace=trace)
+    return _enforce_min_cycle_suggestions(out, t, min_cycle_s=min_cycle_s, dt_grid=step)
+
+
+def _suggest_cycle_starts(df_full, t_axis, min_gap_s, min_cycle_s, diag, defrost_dt=False):
+    """[(start, confidence, drop_mag)] for every plateau leave on the file.
+
+    ``_detect_cycle_boundaries_drop_to_drop`` with the leading start kept: the
+    termination cut never uses the head of the file, so the first defrost start
+    is needed to find the first termination. The boundary that closes the last
+    drop→drop window is read back from the time axis (the next sample after its
+    end), the same way ``_enforce_min_cycle_suggestions`` does.
+    """
+    windows = _detect_cycle_boundaries_drop_to_drop(
+        df_full, min_gap_s=min_gap_s, min_cycle_s=min_cycle_s,
+        keep_leading_boundary=True, diag=diag)
+    if defrost_dt:
+        windows = _frost_starts_for_sheet(df_full, windows, min_cycle_s)
+    if not windows:
+        return []
+    starts = [(float(w[0]), float(w[2]), float(w[3])) for w in windows]
+    t = np.asarray(t_axis, dtype=float)
+    after = t[np.isfinite(t) & (t > float(windows[-1][1]) + 1e-9)]
+    if after.size:
+        starts.append((float(after[0]), None, None))
+    return starts
+
+
+def _suggest_defrost_terminations(df_full, start_times):
+    """Defrost termination after each start, or None, from dT_HP alone.
+
+    The upward crossing of ``dt_hp_recover_k`` that then stays at or above it for
+    ``dt_hp_recovery_hold_s`` (a dip below cancels that crossing). The last one
+    that passes between this start and the next start is the termination, and the
+    stored time is the crossing itself.
+    """
+    cfg = load_cycle_periods_config()
+    recover_k = float(cfg['dt_hp_recover_k'])
+    hold_s = float(cfg['dt_hp_recovery_hold_s'])
+    dt_v, dt_t = _dt_hp_series(df_full)
+    if dt_v is None:
+        return [None] * len(start_times)
+    out = []
+    for k, st in enumerate(start_times):
+        until = start_times[k + 1] - 1e-9 if k + 1 < len(start_times) else float('inf')
+        holds = _dt_hp_accepted_holds(dt_v, dt_t, st, until, recover_k, hold_s)
+        out.append(holds[-1] if holds else None)
+    return out
+
+
+def _suggest_standby_terminations(pelec, p_time, start_times):
+    """Standby termination after each start, or None, from power alone.
+
+    ``_detect_pelec_rampup`` on the stretch between this start and the next one,
+    read from its lowest power sample so a notch on the way down cannot pass for
+    the restart. After the last standby, power must climb back into the on-period's
+    high band (:func:`_high_plateau_floor_kw` on the on-period before that standby):
+    a file that ends in standby has no termination there, one that ends just after
+    the restart does.
+    """
+    p = np.asarray(pelec, dtype=float)
+    t = np.asarray(p_time, dtype=float)
+    out = []
+    for k, st in enumerate(start_times):
+        last = k + 1 >= len(start_times)
+        nxt = float('inf') if last else start_times[k + 1]
+        idx = np.where((t > st) & (t < nxt))[0]
+        if idx.size < 10:
+            out.append(None)
+            continue
+        idx = idx[int(np.nanargmin(p[idx])):]
+        if idx.size < 10:
+            out.append(None)
+            continue
+        if last:
+            # The file may end soon after this restart. Power must climb back into the
+            # on-period's band, and the ramp-up detector gets as much standby before the
+            # climb as there is on-period after it, so a short tail still shows its level.
+            prev = start_times[k - 1] if k else float(t[0]) - 1.0
+            on = (t > prev) & (t <= st) & np.isfinite(p)
+            hi = _high_plateau_floor_kw(p[on] if on.any() else p)
+            up = np.where(p[idx] >= hi)[0]
+            if not up.size:
+                out.append(None)
+                continue
+            after = int(idx.size - up[0])
+            idx = idx[max(0, int(up[0]) - max(after, 10)):]
+        seg_p, seg_t = pd.Series(p[idx]), pd.Series(t[idx])
+        onset = _detect_pelec_rampup(seg_p, seg_t)
+        out.append(onset)
+    return out
+
+
+def _suggest_head_termination(kind, df_full, pelec, p_time, first_start, off_kw=0.15):
+    """The termination of a defrost / standby the file **opens inside**, or None.
+
+    Its start is before the file (or too close to the file start for the finder to
+    keep it), but its termination is in it, so the stretch from there to the next
+    termination is a whole cycle. Standby (power only): before the first standby start
+    power is at true off (``off_kw``, the finder's own level) — or the file opens below
+    the first on-period's high band — and then ramps up into that band
+    (``_detect_pelec_rampup`` from the first off sample). Defrost: the file opens with supply −
+    return below ``dt_hp_recover_k`` and the last crossing that passes the recovery
+    watch before the first defrost start is the termination. A file that opens in
+    heating has no head termination.
+    """
+    if first_start is None:
+        return None
+    if kind == 'on_off':
+        p = np.asarray(pelec, dtype=float)
+        t = np.asarray(p_time, dtype=float)
+        head = np.where(t < float(first_start))[0]
+        if head.size < 10:
+            return None
+        hi = _high_plateau_floor_kw(p[head])
+        off = np.where(p[head] <= off_kw)[0]
+        if off.size:
+            head = head[int(off[0]):]          # from the first true-off sample
+        elif not float(p[head[0]]) < hi:
+            return None
+        if head.size < 10:
+            return None
+        onset = _detect_pelec_rampup(pd.Series(p[head]), pd.Series(t[head]))
+        if onset is None or not bool(np.any((t > onset) & (t < float(first_start)) & (p >= hi))):
+            return None
+        return float(onset)
+    cfg = load_cycle_periods_config()
+    recover_k = float(cfg['dt_hp_recover_k'])
+    dt_v, dt_t = _dt_hp_series(df_full)
+    if dt_v is None:
+        return None
+    order = np.argsort(dt_t, kind='mergesort')
+    dv, dtt = np.asarray(dt_v, dtype=float)[order], np.asarray(dt_t, dtype=float)[order]
+    if not float(dv[0]) < recover_k:
+        return None
+    holds = _dt_hp_accepted_holds(dv, dtt, float(dtt[0]), float(first_start) - 1e-9, recover_k,
+                                  float(cfg['dt_hp_recovery_hold_s']))
+    return float(holds[-1]) if holds else None
+
+
+def _suggest_pair_terminations(terms, starts):
+    """(start, end, confidence, drop_mag, closing start) for each pair of terminations.
+
+    Only successive starts that both have a termination make a row; a missing
+    termination is never bridged. The row ends **at** the next termination; when
+    the next row starts there, Apply gives that shared sample to the later row.
+    The closing start is the start of the defrost / standby between the two
+    terminations — on a frost row Apply uses it as the interior power event.
+    """
+    rows = []
+    for k in range(len(terms) - 1):
+        a, b = terms[k], terms[k + 1]
+        if a is None or b is None or not (b > a):
+            continue
+        rows.append((float(a), float(b), starts[k][1], starts[k][2], float(starts[k + 1][0])))
+    return rows
+
+
+def _suggest_cut_kind(letter, cold, stop):
+    """'defrost' / 'on_off' / 'continuous' for the cut, or None when it cannot be told.
+
+    A listed letter decides; a frost letter with no 60 s cold stretch, or an
+    on/off letter with no compressor stop, is one window. An empty or unlisted
+    letter is read from the trace: a cold stretch is frost, else a stop is
+    standby, else one window. Supply/return that cannot be read is not
+    "continuous" — power is checked next, and without either it is not told.
+    """
+    if letter == 'defrost':
+        return 'continuous' if cold is False else 'defrost'
+    if letter == 'on_off':
+        return 'continuous' if stop is False else 'on_off'
+    if cold:
+        return 'defrost'
+    if stop:
+        return 'on_off'
+    if cold is False and stop is False:
+        return 'continuous'
+    return None
+
+
+def _suggest_cycles(df_full, test_cond, start_to_start=False,
+                    min_gap_s=900.0, min_cycle_s=0.0):
+    """(suggestions, cut, reason) for one Suggest click.
+
+    ``cut`` is what the rows are (a ``SUGGEST_CUT_APPLY`` key, or ``'drop'`` for a
+    start → start row whose kind could not be told), ``reason`` is the status text
+    when the list is empty. The kind comes from ``_suggest_cut_kind``.
+
+    ``start_to_start`` is the switch: the drop→drop finder, then its starts re-anchored
+    on the defrosts (``_frost_starts_for_sheet``) or on the power drop into each stop
+    (``_standby_starts``), then the cold-side filter; the cut label tells Apply where
+    the window opens.
+    """
+    letter = _guideline_kind_from_test_cond(test_cond)
+    cold = _suggest_file_has_cold_stretch(df_full)
+    pelec, p_time = _suggest_power_axis(df_full)
+    diag = {}
+    # Frost is known before power is read (letter, else a cold stretch), so the
+    # finder can keep a rise-and-drop inside one defrost on the first plateau leave.
+    # Standby stays power only.
+    frost = (letter == 'defrost' and cold is not False) or (letter is None and cold is True)
+
+    if start_to_start:
+        sugg = _detect_cycle_boundaries_drop_to_drop(
+            df_full, min_gap_s=min_gap_s, min_cycle_s=min_cycle_s, diag=diag)
+        if frost and pelec is not None:
+            sugg = _frost_starts_for_sheet(df_full, sugg, min_cycle_s)
+        stop = None if pelec is None else (bool(sugg) or int(diag.get('off_runs', 0)) >= 1)
+        kind = _suggest_cut_kind(letter, cold, stop)
+        if kind == 'on_off' and pelec is not None and sugg:
+            # Standby: power only — each edge on the power drop into its stop.
+            sugg = _standby_starts(sugg, p_time.to_numpy(dtype=float),
+                                   pelec.to_numpy(dtype=float),
+                                   dt_grid=float(_median_time_step_seconds(p_time.to_numpy(dtype=float))))
+            sugg = _enforce_min_cycle_suggestions(sugg, p_time.to_numpy(dtype=float),
+                                                  min_cycle_s=min_cycle_s)
+        sugg = _filter_defrost_suggestions_with_dt_hp(df_full, sugg, test_cond)
+        cut = {'defrost': 'defrost_start', 'on_off': 'off_start'}.get(kind, 'drop')
+        return sugg, cut, None
+
+    starts = []
+    stop = None
+    if pelec is not None:
+        starts = _suggest_cycle_starts(df_full, p_time, min_gap_s, min_cycle_s, diag,
+                                       defrost_dt=frost)
+        stop = bool(starts) or int(diag.get('off_runs', 0)) >= 1
+
+    kind = _suggest_cut_kind(letter, cold, stop)
+    if kind is None:
+        return [], None, SUGGEST_EMPTY_UNTOLD
+
+    if kind == 'continuous':
+        t = (pd.to_numeric(df_full['time_elapsed'], errors='coerce').dropna()
+             if 'time_elapsed' in df_full.columns else pd.Series(dtype=float))
+        if len(t) < 2 or not float(t.max()) > float(t.min()):
+            return [], None, SUGGEST_EMPTY_UNTOLD
+        return [(float(t.min()), float(t.max()), None, None)], 'continuous', None
+
+    start_times = [s_[0] for s_ in starts]
+    # A file that opens inside a defrost / standby: that one's termination counts too.
+    head = _suggest_head_termination(kind, df_full, pelec, p_time,
+                                     start_times[0] if start_times else None)
+    head_start = [(float(p_time.iloc[0]), starts[0][1], starts[0][2])] if head is not None else []
+    if kind == 'defrost':
+        terms = _suggest_defrost_terminations(df_full, start_times)
+        if head is not None:
+            terms, starts = [head] + terms, head_start + starts
+        rows = _suggest_pair_terminations(terms, starts)
+        return rows, 'defrost_end', (None if rows else SUGGEST_EMPTY_DEFROST)
+    terms = _suggest_standby_terminations(pelec, p_time, start_times) if start_times else []
+    if head is not None:
+        terms, starts = [head] + terms, head_start + starts
+    # Standby is power only: Apply finds the drop itself, so no closing start is carried.
+    rows = [r[:4] for r in _suggest_pair_terminations(terms, starts)]
+    return rows, 'on_start', (None if rows else SUGGEST_EMPTY_STANDBY)
+
+
 def _guideline_kind_from_test_cond(test_cond):
     """``defrost`` / ``on_off`` from the test-condition letter, else None.
 
     The same letters dTreturn Insights already uses: A/B/E/F (and the BUH
-    variants) are defrost, C/D and ``C70min`` are on–off. G, an empty cell and
+    variants) are defrost, C/D are on–off. G, an empty cell and
     any letter we do not know fall through — a letter must never be read as
     ``continuous``, and it never outranks a stored kind (see the fill order in
     ``_resolve_guideline_kind``). Notes ``drop`` / ``ramp`` play no part.
@@ -10165,7 +10987,8 @@ PELEC_TRANSITION_COLUMNS = {
 }
 
 
-def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
+def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name, kind_hint=None,
+                                     trans_hint=None):
     """Detect and store ``pelec_transition_time`` as the parent row is written.
 
     Cycle Extract owns this field, so **Apply** must not leave it empty
@@ -10192,6 +11015,15 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
     ``store_default_guideline_clocks_on_insert`` takes that dict rather than
     deciding a second time, so a row cannot be read one way for the time and
     another way for the clocks.
+
+    ``kind_hint='continuous'`` comes from a Suggest cut of one whole-file window:
+    the row keeps no cycle_type (``other`` is unknown, not continuous), so the
+    kind is handed in here and the continuous decision goes to the clock step.
+
+    ``trans_hint`` is the closing defrost start a frost termination row carries
+    from Suggest (the first leave of the heating plateau). On a defrost window
+    that opens in H it is the interior power event, inside the window; the
+    last-sharp-drop detector is not asked.
     """
     if rowid is None or df_window is None or getattr(df_window, 'empty', True):
         return
@@ -10233,7 +11065,9 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
         pass   # no cycle_periods table yet — a new row has no saved clocks anyway
     kind, kind_source = _resolve_guideline_kind(
         None, row.get('cycle_type'), flag, ind_col, saved_types, None, test_cond=test_cond)
-    if kind == 'continuous':
+    if kind_hint == 'continuous':
+        kind, kind_source = 'continuous', 'Suggest cut: one window, no defrost and no standby'
+    elif kind == 'continuous':
         return   # H is the parent window; there is no interior event to stamp
 
     t_all = pd.to_numeric(df_window['time_elapsed'], errors='coerce')
@@ -10241,6 +11075,18 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
         return
     window_start = float(t_all.min())
     window_end = float(t_all.max())
+
+    if kind_hint == 'continuous':
+        # No interior event and nothing that failed: H is the whole row.
+        cursor.execute(
+            "UPDATE results SET pelec_transition_time=NULL, pelec_transition_source='auto', "
+            "pelec_detect_failed=NULL WHERE rowid=?", (rowid,))
+        print(f"[pelec_transition] rowid={rowid} kind=continuous ({kind_source}) "
+              f"- no interior event, time left empty")
+        return {'row': row, 'kind': 'continuous', 'kind_source': kind_source,
+                'begins_in': None, 'trans': None, 'trace': None,
+                'pelec': None, 'p_time': None,
+                'window_start': window_start, 'window_end': window_end}
 
     pcol = _find_uncorrected_pelec_column(df_window)
     pelec, p_time = None, None
@@ -10289,8 +11135,13 @@ def store_pelec_transition_on_insert(cursor, df_window, rowid, file_name):
                 'pelec': pelec, 'p_time': p_time,
                 'window_start': window_start, 'window_end': window_end}
 
-    trans, note = _detect_pelec_transition(
-        df_window, pelec, p_time, kind, begins_in, window_start, window_end)
+    hint = _guideline_num(trans_hint)
+    if (kind == 'defrost' and begins_in == 'h' and hint is not None
+            and window_start < hint < window_end):
+        trans, note = hint, 'Suggest start: first leave of the heating plateau'
+    else:
+        trans, note = _detect_pelec_transition(
+            df_window, pelec, p_time, kind, begins_in, window_start, window_end)
     if trans is not None and not np.isfinite(float(trans)):
         trans, note = None, 'transition time is not a finite number'
 
@@ -10983,35 +11834,47 @@ def api_cycle_extract_suggest():
         if not file_name:
             return jsonify({'success': False, 'message': 'file_name required'})
 
-        # The letter is only used to decide whether the dT_HP post-filter applies;
-        # the review modal fills the same cell from the file name (see Apply).
+        # The letter decides frost / on-off; an empty or unlisted one is read from
+        # the trace. The review modal fills the same cell from the file name (see Apply).
         test_cond = payload.get('test_cond')
         if test_cond is None or str(test_cond).strip() == '':
             test_cond = (infer_metadata_from_filename(file_name) or {}).get('test_cond')
+        # The switch under "How Suggest picks Start": start → start instead of the
+        # default termination → termination. Never stored; the page sends it each click.
+        start_to_start = payload.get('start_to_start') is True
 
         df_full = _read_excel_sheet(file_name, data_set)
         if df_full is None:
             return jsonify({'success': False, 'message': f'Cannot read {file_name}'})
 
-        sugg = _detect_cycle_boundaries_drop_to_drop(df_full, min_gap_s=min_gap_s,
-                                                    min_cycle_s=min_cycle_s)
-        # Same drop→drop list, minus the windows an A/B/E/F file never defrosted in.
-        sugg = _filter_defrost_suggestions_with_dt_hp(df_full, sugg, test_cond)
+        sugg, cut, reason = _suggest_cycles(df_full, test_cond, start_to_start=start_to_start,
+                                            min_gap_s=min_gap_s, min_cycle_s=min_cycle_s)
+        marker = cut or 'drop'
+        note = SUGGEST_CUT_NOTES.get(marker, 'auto drop→drop')
+
+        def _num(v):
+            return float(v) if v is not None and np.isfinite(float(v)) else None
+
         conn = get_db_connection()
         try:
             conn.execute("DELETE FROM cycle_extraction_suggestions WHERE file_name=? AND (data_set IS ? OR data_set=?)",
                          (file_name, data_set, data_set if data_set is not None else None))
-            for (st, et, conf, mag) in sugg:
+            for item in sugg:
+                st, et, conf, mag = item[:4]
+                inner = item[4] if len(item) > 4 else None
                 conn.execute(
-                    "INSERT INTO cycle_extraction_suggestions(file_name, data_set, start_time, end_time, marker_type, confidence, notes_auto, pelec_drop_mag) "
-                    "VALUES (?, ?, ?, ?, 'drop', ?, ?, ?)",
-                    (file_name, data_set, float(st), float(et), float(conf), 'auto drop→drop', float(mag))
+                    "INSERT INTO cycle_extraction_suggestions(file_name, data_set, start_time, end_time, marker_type, confidence, notes_auto, pelec_drop_mag, interior_time) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (file_name, data_set, float(st), float(et), marker, _num(conf), note, _num(mag),
+                     _num(inner))
                 )
             conn.commit()
         finally:
             conn.close()
 
-        return jsonify({'success': True, 'count': len(sugg)})
+        tc_used = str(test_cond).strip() if test_cond is not None and str(test_cond).strip() else None
+        return jsonify({'success': True, 'count': len(sugg), 'cut': cut, 'test_cond': tc_used,
+                        'reason': reason if not sugg else None})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -13769,6 +14632,26 @@ def api_cycle_extract_list():
         return jsonify({'success': False, 'message': str(e)})
 
 
+def _row_starts_at(file_name, data_set, data_set_eff, t):
+    """True when a suggestion or a results row of this file / dataset starts at ``t``."""
+    conn = get_db_connection()
+    try:
+        if conn.execute(
+                "SELECT 1 FROM cycle_extraction_suggestions WHERE file_name=? "
+                "AND (data_set IS ? OR data_set=?) AND abs(start_time - ?) < 1e-6 LIMIT 1",
+                (file_name, data_set, data_set, float(t))).fetchone():
+            return True
+        try:
+            return conn.execute(
+                "SELECT 1 FROM results WHERE file_name=? AND data_set=? "
+                "AND abs(start_time - ?) < 1e-6 LIMIT 1",
+                (file_name, data_set_eff, float(t))).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
+    finally:
+        conn.close()
+
+
 @app.route('/api/cycle_extract/apply', methods=['POST'])
 def api_cycle_extract_apply():
     """Apply selected suggestions by inserting rows into results via process_new_data()."""
@@ -13786,7 +14669,7 @@ def api_cycle_extract_apply():
         try:
             placeholders = ",".join(["?"] * len(ids))
             rows = conn.execute(
-                f"SELECT id, file_name, data_set, start_time, end_time FROM cycle_extraction_suggestions WHERE id IN ({placeholders})",
+                f"SELECT id, file_name, data_set, start_time, end_time, marker_type, interior_time FROM cycle_extraction_suggestions WHERE id IN ({placeholders})",
                 ids
             ).fetchall()
             rows = [dict(r) for r in rows]
@@ -13858,9 +14741,23 @@ def api_cycle_extract_apply():
                 })
                 continue
 
+            # The cut Suggest stored on this row sets cycle_type / marker on the
+            # new results row, so the default clocks open where the cut does. A
+            # frost termination row also carries its closing defrost start.
+            marker_type = str(r.get('marker_type') or '')
+            cycle_marking = SUGGEST_CUT_APPLY.get(marker_type)
+            if cycle_marking is not None:
+                cycle_marking = tuple(cycle_marking) + (r.get('interior_time'),)
+            # A termination row ends at the termination. When another row starts at
+            # that same time, the shared sample belongs to the later row.
+            exclude_end = (marker_type in ('defrost_end', 'on_start')
+                           and _row_starts_at(fn, ds, ds_eff, et_eff))
+
             try:
                 cycle_notices = []
-                rowid = process_new_data(fn, ds_eff, st_eff, et_eff, return_rowid=True, notices_out=cycle_notices)
+                rowid = process_new_data(fn, ds_eff, st_eff, et_eff, return_rowid=True,
+                                         notices_out=cycle_notices, cycle_marking=cycle_marking,
+                                         exclude_end_sample=exclude_end)
                 for n in cycle_notices:
                     if n not in notices:
                         notices.append(n)
