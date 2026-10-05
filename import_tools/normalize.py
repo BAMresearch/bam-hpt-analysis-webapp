@@ -63,6 +63,58 @@ def _resolve_source_column(df: pd.DataFrame, source: str, aliases: Optional[list
     return None
 
 
+# Most likely template form first, so a uniform DD.MM.YYYY column stops after one pass.
+_DMY_FORMATS = (
+    "%d.%m.%Y",
+    "%d.%m.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    "%d.%m.%Y %H:%M:%S.%f",
+    "%d/%m/%Y",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d-%m-%Y",
+    "%d-%m-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M",
+)
+# Year last, so ISO ``2026-09-08`` does not match and is not read as day-first.
+_DMY_PREFIX = r"^\d{1,2}[./-]\d{1,2}[./-]\d{4}"
+
+
+def _parse_dmy_text(text: pd.Series) -> pd.Series:
+    """Day-first parse. Cells that are not DD.MM.YYYY text are NA in ``text``."""
+    parsed = pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
+    for fmt in _DMY_FORMATS:
+        pending = text.notna() & parsed.isna()
+        if not pending.any():
+            break
+        parsed = parsed.fillna(
+            pd.to_datetime(text.where(pending), format=fmt, errors="coerce")
+        )
+    return parsed
+
+
+def _parse_dates(values: pd.Series) -> pd.Series:
+    """Parse Date for elapsed time.
+
+    Excel date cells and ISO text (``2026-09-08``) stay as written.
+    Numeric text ``DD.MM.YYYY``, ``DD/MM/YYYY`` and ``DD-MM-YYYY`` is day-first,
+    so ``08.09.2026`` is 8 September. Those strings never use the default parser,
+    which reads ``08.09.2026`` as 9 August.
+    """
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return pd.to_datetime(values, errors="coerce")
+
+    text = values.astype("string").str.strip()
+    dmy = text.str.match(_DMY_PREFIX, na=False)
+    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    if dmy.any():
+        parsed = _parse_dmy_text(text.where(dmy))
+    other = ~dmy & text.notna()
+    if other.any():
+        parsed = parsed.fillna(pd.to_datetime(text.where(other), errors="coerce"))
+    return parsed
+
+
 def _add_time_elapsed(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "time_elapsed" in out.columns:
@@ -73,7 +125,7 @@ def _add_time_elapsed(df: pd.DataFrame) -> pd.DataFrame:
     # Prefer Date+Time combined (handles midnight / multi-day runs)
     if "Date" in out.columns:
         try:
-            dates = pd.to_datetime(out["Date"], errors="coerce")
+            dates = _parse_dates(out["Date"])
             times = out["Time"]
             # Time may be datetime.time, Timestamp, or string
             combined = []

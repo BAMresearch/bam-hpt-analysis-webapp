@@ -65,6 +65,7 @@ Version numbers match `flask_app/VERSION` and the `tool_version` column on summa
 
 ### Fixed
 
+- **Import elapsed time stays continuous when the date changes.** Text dates in day-month-year form (`DD.MM.YYYY`, `DD/MM/YYYY`, `DD-MM-YYYY`) are read day-first. Excel date cells and ISO dates (`YYYY-MM-DD`) are unchanged. Re-import any workbook that crosses midnight; Plotdaten files already written keep the old `time_elapsed`
 - A cycle cut from one defrost (or standby) **end** to the next now gets a **second D / S** span; a cut from start to start stays one span
 - Changing **Treat unknown rows as** updates Kind and the clocks immediately. If a clock button reports that the server did not answer with JSON, restart the app and reload the page
 - A missing outdoor dry-bulb setpoint no longer blanks Tsup, dTreturn or flow % on Deviations Calculate or Guideline Windows H / eq / eval
