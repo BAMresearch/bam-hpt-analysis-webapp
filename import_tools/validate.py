@@ -32,11 +32,14 @@ def validate_plotdaten(
             emptyish.append(c)
 
     warnings: list[str] = []
-    if "volume flow" in df.columns:
-        vf = pd.to_numeric(df["volume flow"], errors="coerce").dropna()
+    # Warning only: flows are converted solely from a declared m³/s unit row (normalize).
+    for flow_col in ("volume flow", "volume flow_source"):
+        if flow_col not in df.columns:
+            continue
+        vf = pd.to_numeric(df[flow_col], errors="coerce").dropna()
         if not vf.empty and float(vf.median()) < 0.05:
             warnings.append(
-                "volume flow median still < 0.05 after normalize — check m³/h vs m³/s"
+                f"{flow_col} median still < 0.05 after normalize — check m³/h vs m³/s"
             )
     if "Pressure difference" in df.columns:
         dp = pd.to_numeric(df["Pressure difference"], errors="coerce").dropna()

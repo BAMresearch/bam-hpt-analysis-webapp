@@ -1,0 +1,429 @@
+{
+  "map_id": "hpt_hybrid_rev1",
+  "version": "0.1.2",
+  "description": "HPT HYBRID Data Collection Template REV1 → Plotdaten / WebApp contract",
+  "template_family": "HYBRID",
+  "template_revision": "REV1",
+  "plotdaten_contract": "v0.1",
+  "changelog": [
+    "0.1.2: empty lab-corrected capacity and power are dropped, and Total Power Input (corrected) is renamed to Electric Power Input (corrected), same as hpt_aw_rev1",
+    "0.1.1: volume flow is ×3600 only when the unit row says m3/s; a small value without a unit is warned, not converted",
+    "0.1.0: initial REV1 map; sink side as hpt_aw_rev1; Heat input (at 15°C) kept as its own column; gas monitoring columns passthrough"
+  ],
+  "header_detection": {
+    "strategy": "scan_for_markers",
+    "marker_any_of": [
+      "Date",
+      "Time",
+      "T_out_sink",
+      "T_outdoor (DB)",
+      "volume flow_sink"
+    ],
+    "units_row_offset": 1,
+    "avg_row_offset": 2,
+    "data_row_offset": 3,
+    "fallback_header_row_0based": 3
+  },
+  "sheet_names_expected": [
+    "E",
+    "F",
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "webapp_required_columns": [
+    "time_elapsed",
+    "T_outdoor (DB)",
+    "T_outdoor (WB)",
+    "T_supply",
+    "T_return_emu",
+    "volume flow",
+    "Heating Capacity (without corr)",
+    "Electric Power Input (without correction)",
+    "Pressure difference",
+    "T_return_calc",
+    "T_B_calc",
+    "T_H_calc",
+    "Q_HB"
+  ],
+  "webapp_columns_not_auto_filled": [
+    "mass flow",
+    "Heating Capacity (corrected)",
+    "Electric Power Input (corrected)"
+  ],
+  "derived": [
+    {
+      "target": "time_elapsed",
+      "from": "Time",
+      "rule": "elapsed_seconds_from_first_row",
+      "notes": "Same behaviour as import_v2 / hp_tools.get_elapsed_time"
+    }
+  ],
+  "columns": [
+    {
+      "source": "Date",
+      "target": "Date",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Time",
+      "target": "Time",
+      "bucket": "A",
+      "required": true
+    },
+    {
+      "source": "Lab air temperature (DB)",
+      "target": "Lab air temperature (DB)",
+      "bucket": "C",
+      "required": false,
+      "aliases": [
+        "Air Temperature (DB)",
+        "Lab air Temperature (DB)"
+      ],
+      "notes": "Lab ambient — NEVER map to T_outdoor (DB)"
+    },
+    {
+      "source": "Lab atmospheric pressure",
+      "target": "Lab atmospheric pressure",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "Atmospheric pressure"
+      ],
+      "unit_in": "kPa",
+      "unit_out": "kPa",
+      "notes": "REV1 data sheets carry a trailing newline in this header cell; detect strips it"
+    },
+    {
+      "source": "T_outdoor (DB)",
+      "target": "T_outdoor (DB)",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_outdoor_DB inlet temperature, dry bulb  (DB)",
+        "T_outdoor_DB inlet temperature, dry bulb (DB)",
+        "T_outdoor_DB"
+      ],
+      "notes": "Machine inlet DB only; do not use Lab air temperature (DB)"
+    },
+    {
+      "source": "T_outdoor (WB)",
+      "target": "T_outdoor (WB)",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_outdoor_WB inlet temperature, wet bulb  (WB)",
+        "T_outdoor_WB inlet temperature, wet bulb (WB)",
+        "T_outdoor_WB"
+      ]
+    },
+    {
+      "source": "T_out_sink",
+      "target": "T_supply",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_out"
+      ],
+      "notes": "Sink outlet → WebApp supply"
+    },
+    {
+      "source": "T_in_sink",
+      "target": "T_return_emu",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_in"
+      ],
+      "notes": "Sink inlet → WebApp return emu"
+    },
+    {
+      "source": "cp_out_sink",
+      "target": "cp_out_sink",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "cp_out"
+      ],
+      "notes": "Keep the _sink suffix: water-to-water adds cp_out_source later"
+    },
+    {
+      "source": "cp_in_sink",
+      "target": "cp_in_sink",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "cp_in"
+      ],
+      "notes": "Keep the _sink suffix: water-to-water adds cp_in_source later"
+    },
+    {
+      "source": "volume flow_sink",
+      "target": "volume flow",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "volume flow"
+      ],
+      "unit_in": "m3/h",
+      "unit_out": "m3/h",
+      "legacy_unit_in": "m3/s",
+      "legacy_scale": 3600,
+      "notes": "REV1 unit row is m3/h; ×3600 only when the unit row says m3/s (a small value alone is warned, not converted)"
+    },
+    {
+      "source": "rho_sink",
+      "target": "density_sink",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "ρ",
+        "rho",
+        "density"
+      ],
+      "notes": "Keep the _sink suffix: water-to-water adds density_source later"
+    },
+    {
+      "source": "mass flow_sink",
+      "target": "mass flow",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "mass flow (if massic flow meter is used)",
+        "mass flow"
+      ],
+      "notes": "Optional; if absent/empty, fill_if_missing derives from volume flow"
+    },
+    {
+      "source": "Pressure difference_sink",
+      "target": "Pressure difference",
+      "bucket": "A",
+      "required": true,
+      "unit_in": "kPa",
+      "unit_out": "bar",
+      "scale": 0.01,
+      "aliases": [
+        "ΔP ext/int (P_out - P_in)",
+        "dP ext/int (P_out - P_in)",
+        "DeltaP ext/int (P_out - P_in)"
+      ],
+      "notes": "Template kPa → Plotdaten/WebApp bar (/100)"
+    },
+    {
+      "source": "Compressor Frequency",
+      "target": "Compressor Frequency",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Fan Speed",
+      "target": "Fan Speed",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "cos_phi (optional)",
+      "target": "cos_phi",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "cosФ   (if possible)",
+        "cosФ (if possible)",
+        "cos phi",
+        "cos_phi"
+      ]
+    },
+    {
+      "source": "Total Power Input (without corr)",
+      "target": "Electric Power Input (without correction)",
+      "bucket": "A",
+      "required": true,
+      "notes": "Must be filled by lab; importer does not invent this from BUH/Virtual Back-up"
+    },
+    {
+      "source": "Virtual Back-up",
+      "target": "Electrical power input BUH",
+      "bucket": "A",
+      "required": false,
+      "notes": "Virtual BUH only → WebApp BUH column. Not the same as real Backup heater Input. Absent on sheets B, C, D."
+    },
+    {
+      "source": "Backup heater Input (optional)",
+      "target": "Real BUH power input",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "Backup heater Input (optional - if possible and if A < F)",
+        "Backup heater Input",
+        "Backup heater Input (optional)"
+      ],
+      "notes": "REAL backup heater meter, monitoring mean only. Already inside Total Power Input (without corr), so it triggers no WebApp BUH correction. Do NOT map to Electrical power input BUH. Absent on sheets B, C, D."
+    },
+    {
+      "source": "Heating Capacity (without corr)",
+      "target": "Heating Capacity (without corr)",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "Heating Capacity              (without corr)"
+      ]
+    },
+    {
+      "source": "Heating Capacity (corrected)",
+      "target": "Heating Capacity (corrected)",
+      "bucket": "A",
+      "required": false,
+      "notes": "Only if lab provides it — importer does not copy from without-corr"
+    },
+    {
+      "source": "Electric Power Input (corrected)",
+      "target": "Electric Power Input (corrected)",
+      "bucket": "A",
+      "required": false,
+      "aliases": [
+        "Total Power Input (corrected)"
+      ],
+      "notes": "Only if lab provides it — importer does not invent"
+    },
+    {
+      "source": "T_return_calc",
+      "target": "T_return_calc",
+      "bucket": "A",
+      "required": true
+    },
+    {
+      "source": "T_B_calc",
+      "target": "T_B_calc",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_B_calc/t_water"
+      ]
+    },
+    {
+      "source": "T_H_calc",
+      "target": "T_H_calc",
+      "bucket": "A",
+      "required": true
+    },
+    {
+      "source": "Q_HB",
+      "target": "Q_HB",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "Q_HB/Q_fixed"
+      ]
+    },
+    {
+      "source": "Q_HP",
+      "target": "Q_HP",
+      "bucket": "A",
+      "required": false,
+      "notes": "Building-model heat-pump heat, stored as the sheet has it; never recomputed"
+    },
+    {
+      "source": "Q_BA",
+      "target": "Q_BA",
+      "bucket": "A",
+      "required": false,
+      "notes": "Older building-model output; mapped when present, not required"
+    },
+    {
+      "source": "Heat input (at 15°C)",
+      "target": "Heat input (at 15°C)",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas fuel energy (gross calorific value, 15 °C). Stored as its own mean only. Never added to electric power or heating capacity, never a BUH column"
+    },
+    {
+      "source": "Gas temperature at flowmeter",
+      "target": "Gas temperature at flowmeter",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Gas pressure at flowmeter",
+      "target": "Gas pressure at flowmeter",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Gas pressure at inlet of the unit",
+      "target": "Gas pressure at inlet of the unit",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Volumic mass of gas at 15°C",
+      "target": "Volumic mass of gas at 15°C",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Density of gas during test",
+      "target": "Density of gas during test",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Gross Calorific Value - Hs",
+      "target": "Gross Calorific Value - Hs",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Mass flowrate (at 15°C)",
+      "target": "Mass flowrate (at 15°C)",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    },
+    {
+      "source": "Volum flowrate (at 15°C)",
+      "target": "Volum flowrate (at 15°C)",
+      "bucket": "A",
+      "required": false,
+      "notes": "Gas monitoring passthrough; not averaged, not required"
+    }
+  ],
+  "fill_if_missing": [],
+  "do_not_auto_create": [
+    "mass flow",
+    "Heating Capacity (corrected)",
+    "Electric Power Input (corrected)",
+    "Electrical power input BUH",
+    "Real BUH power input"
+  ],
+  "skip_empty_targets": [
+    "mass flow",
+    "Heating Capacity (corrected)",
+    "Electric Power Input (corrected)",
+    "Electrical power input BUH",
+    "Real BUH power input"
+  ],
+  "notes_for_editors": [
+    "mass flow: leave absent if mass flow_sink empty; WebApp can derive later if needed",
+    "corrected Q/P: only pass through if present in template; no copy-from-uncorr",
+    "Virtual Back-up → Electrical power input BUH only when present with data",
+    "Do NOT invent BUH=0 column when Virtual Back-up absent (matches BAM: missing column → no power_BUH_from_Ts)",
+    "Real BUH power input: monitoring mean only; an all-empty column is dropped so it cannot read as a measured zero",
+    "skip_empty_targets lists the invent-risk targets; every other optional column is kept even when all-NaN, so the template field stays visible and the WebApp stores NULL",
+    "Heat input (at 15°C) is gas fuel energy: own column only, never Electric Power Input or either BUH column",
+    "Q_BA is mapped when present but not required"
+  ],
+  "passthrough_unmapped": true,
+  "output": {
+    "folder": "Plotdaten",
+    "filename_pattern": "{prefix}{sheet}.xlsx",
+    "engine": "openpyxl"
+  }
+}

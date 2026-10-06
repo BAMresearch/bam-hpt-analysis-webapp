@@ -182,11 +182,25 @@ OPTIONAL_MEAN_DB_COLUMNS = {
     'Frequency': 'avg_frequency',
     'cos_phi': 'avg_cos_phi',
     'Real BUH power input': 'avg_real_buh_power',
-    'T_in_cond': 'avg_t_in_cond',
-    'T_out_cond': 'avg_t_out_cond',
-    'T_in_evap': 'avg_t_in_evap',
-    'T_out_evap': 'avg_t_out_evap',
+    # Hybrid / water-to-water REV1. Stored only: not part of capacity, power or COP, and
+    # not scored. Gas heat input is fuel energy, never electric power or the BUH. The
+    # _source series are the source loop and never feed the sink mass flow or capacity.
+    'Q_HP': 'avg_q_hp',
+    'Heat input (at 15°C)': 'avg_gas_heat_input',
+    'T_in_source': 'avg_t_in_source',
+    'T_out_source': 'avg_t_out_source',
+    'volume flow_source': 'avg_volume_flow_source',
+    'mass flow_source': 'avg_mass_flow_source',
+    'density_source': 'avg_density_source',
+    'cp_in_source': 'avg_cp_in_source',
+    'cp_out_source': 'avg_cp_out_source',
+    'Pressure difference_source': 'avg_dp_source',
 }
+FAMILY_OPTIONAL_MEAN_COLUMNS = (
+    'Q_HP', 'Heat input (at 15°C)',
+    'T_in_source', 'T_out_source', 'volume flow_source', 'mass flow_source',
+    'density_source', 'cp_in_source', 'cp_out_source', 'Pressure difference_source',
+)
 
 
 def optional_average_columns():
@@ -196,7 +210,9 @@ def optional_average_columns():
     keeps working; unknown names in the config are ignored rather than raising.
     """
     configured = config.get('optional_average_columns', list(OPTIONAL_MEAN_DB_COLUMNS))
-    return [c for c in configured if c in OPTIONAL_MEAN_DB_COLUMNS]
+    columns = [c for c in configured if c in OPTIONAL_MEAN_DB_COLUMNS]
+    # A local config list written before the hybrid / water-to-water means must not hide them.
+    return columns + [c for c in FAMILY_OPTIONAL_MEAN_COLUMNS if c not in columns]
 
 
 def optional_mean_db_columns():
@@ -341,7 +357,7 @@ MEANS_BLOCK_B_COLUMNS = (
 MEANS_BLOCK_C_COLUMNS = (
     'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu', 'avg_t_return_calc',
     'avg_volume_flow', 'avg_mass_flow', 'avg_dp',
-    'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_ba',
+    'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_hp',
 )
 MEANS_DEFAULT_VISIBLE_COLUMNS = frozenset(
     MEANS_STANDARD_COLUMNS + MEANS_BLOCK_A_COLUMNS + MEANS_BLOCK_B_COLUMNS + MEANS_BLOCK_C_COLUMNS
@@ -976,6 +992,7 @@ def preserve_row_metadata_after_key_change(old_row, new_file_name, new_data_set,
             set(insert_cols)
             | {'rowid', 'time_series_data', 'has_time_series'}
             | set(dataset_manager.OPTIONAL_MONITORING_MEAN_COLUMNS)
+            | set(OPTIONAL_MEAN_DB_COLUMNS.values())
         )
         for col in pragma_cols:
             if col in skip or col.startswith('dev_'):
@@ -2097,6 +2114,10 @@ ANALYSIS_LAB_CORR_COLUMNS = ('Heating Capacity (corrected)', 'Electric Power Inp
 # filled from the BAM pump correction, and a file with no BUH gets a zero column.
 ANALYSIS_SUPPLIED_COLUMNS = ANALYSIS_LAB_CORR_COLUMNS + ('Electrical power input BUH',)
 
+# Sheet columns a template may not carry at all: water-to-water has no outdoor air, and
+# the one-mass building model no longer outputs Q_BA. Absent → mean None (n/a), never 0.
+ANALYSIS_OPTIONAL_SHEET_COLUMNS = ('T_outdoor (DB)', 'T_outdoor (WB)', 'Q_BA')
+
 # Plain period averages: sheet column → results column.
 ANALYSIS_AVERAGE_DB_COLUMNS = {
     'T_outdoor (DB)': 'avg_t_db',
@@ -2156,6 +2177,8 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
             avg_values[col] = df_window[col].mean()
         elif col in ANALYSIS_LAB_CORR_COLUMNS:
             avg_values[col] = None  # placeholder until BAM fallback
+        elif col in ANALYSIS_OPTIONAL_SHEET_COLUMNS:
+            avg_values[col] = None  # stored as n/a; nothing below reads these
         else:
             raise KeyError(col)
 
@@ -2557,10 +2580,14 @@ def index():
             'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
             'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu', 'avg_t_return_calc',
             'avg_t_mean_log', 't_mean_from_avgs', 'avg_dt_ln',
-            'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_ba', 'avg_volume_flow',
+            'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_hp', 'avg_q_ba', 'avg_volume_flow',
             'avg_mass_flow', 'avg_dp', 'avg_adj_dp', 'avg_P_hyd', 'avg_eff_pump',
             'avg_qcorr_bam', 'avg_pcorr_bam', 'avg_power_buh', 'avg_power_buh_from_ts', 'avg_t_sup_buh'
-        ] + list(dataset_manager.OPTIONAL_MONITORING_MEAN_COLUMNS)
+        ]
+        # avg_q_ba is also a monitoring column; keep its slot after avg_q_hp, listed once.
+        calculated_columns += [
+            c for c in dataset_manager.OPTIONAL_MONITORING_MEAN_COLUMNS if c not in calculated_columns
+        ]
         
         # Get all column names
         all_column_names = [col[1] for col in columns_info]
@@ -6834,7 +6861,7 @@ def save_column_order():
 
 @app.route('/toggle_monitoring_columns', methods=['POST'])
 def toggle_monitoring_columns():
-    """Show or hide the 16 optional monitoring extras on Means. Same JSON as Manage Columns."""
+    """Show or hide the optional monitoring extras on Means. Same JSON as Manage Columns."""
     try:
         data = request.get_json() or {}
         show = bool(data.get('show'))
@@ -12879,7 +12906,8 @@ def _prepare_sheet_for_analysis(df_full, file_name):
     df['T_supply_set'] = config['t_supply_set_mapping'].get(extract_letter(file_name), None)
 
     missing = [c for c in config['average_columns']
-               if c not in df.columns and c not in ANALYSIS_SUPPLIED_COLUMNS]
+               if c not in df.columns and c not in ANALYSIS_SUPPLIED_COLUMNS
+               and c not in ANALYSIS_OPTIONAL_SHEET_COLUMNS]
     if missing:
         return None, lab_corr_missing, f"sheet has no {', '.join(missing)}"
     return df, lab_corr_missing, ''

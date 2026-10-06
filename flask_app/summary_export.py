@@ -97,10 +97,6 @@ SUMMARY_COLUMNS: Tuple[str, ...] = (
     "avg_frequency",
     "avg_cos_phi",
     "avg_real_buh_power",
-    "avg_t_in_cond",
-    "avg_t_out_cond",
-    "avg_t_in_evap",
-    "avg_t_out_evap",
 )
 
 # Export names that are also the DB column names (optional monitoring means).
@@ -117,10 +113,6 @@ OPTIONAL_MONITORING_COLUMNS: Tuple[str, ...] = (
     "avg_frequency",
     "avg_cos_phi",
     "avg_real_buh_power",
-    "avg_t_in_cond",
-    "avg_t_out_cond",
-    "avg_t_in_evap",
-    "avg_t_out_evap",
 )
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))

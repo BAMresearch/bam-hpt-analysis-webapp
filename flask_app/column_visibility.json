@@ -34,7 +34,8 @@
   "avg_t_b_calc": true,
   "avg_t_h_calc": true,
   "avg_q_hb": true,
-  "avg_q_ba": true,
+  "avg_q_hp": true,
+  "avg_q_ba": false,
   "avg_lab_air_db": false,
   "avg_lab_atm_pressure": false,
   "avg_cp_out_sink": false,
@@ -86,5 +87,14 @@
   "cycle_start_marker": false,
   "pelec_transition_time": false,
   "pelec_transition_source": false,
-  "pelec_detect_failed": false
+  "pelec_detect_failed": false,
+  "avg_gas_heat_input": false,
+  "avg_t_in_source": false,
+  "avg_t_out_source": false,
+  "avg_volume_flow_source": false,
+  "avg_mass_flow_source": false,
+  "avg_density_source": false,
+  "avg_cp_in_source": false,
+  "avg_cp_out_source": false,
+  "avg_dp_source": false
 }

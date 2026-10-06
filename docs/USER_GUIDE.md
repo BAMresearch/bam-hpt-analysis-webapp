@@ -121,15 +121,20 @@ When the report is clean, uncheck **Dry-run** and press **Export!** again. It pr
 
 ## 4. Choosing the template — the only unit-type-specific step
 
-> **This section is the one place where the unit type matters.** Everything else in this guide is the same for every unit type. When hybrid and water-to-water templates arrive, this section gains rows; no other section changes.
+> **This section is the one place where the unit type matters.** Everything else in this guide is the same for every unit type.
 
-| Template family | Map id | Status in v0.1 |
-|-----------------|--------|----------------|
-| Air-to-water, template REV1 | `hpt_aw_rev1` | **Shipped — the only option** |
-| Hybrid | — | Not yet written — awaiting the REV1 template |
-| Water-to-water | — | Not yet written — awaiting the REV1 `_sink` / `_source` template |
+| Template family | Map id | Status |
+|-----------------|--------|--------|
+| Air-to-water, template REV1 | `hpt_aw_rev1` | Shipped |
+| Water-to-water, template REV1 | `hpt_ww_rev1` | Available |
+| Hybrid, template REV1 | `hpt_hybrid_rev1` | Available |
 
-The **Template:** dropdown lists only the maps that actually exist in `import_tools/maps/`, so hybrid and water-to-water appear there when their maps are added.
+The **Template:** dropdown lists only the maps that exist in `import_tools/maps/`.
+
+All three maps read the sink side the same way (§4.1): heating capacity, electric power and COP come from the same columns and use the same formulas for every family. `Q_HP` is kept when the sheet has it, and `Q_BA` is read when an older file still has it but is no longer required.
+
+- **Water-to-water** adds the source loop (`T_in_source`, `T_out_source`, flow, density, cp, pressure difference) under its own `_source` names. These are monitoring means only and never replace the sink flow, sink density or heating capacity. The template has no outdoor air, so none is required.
+- **Hybrid** adds `Heat input (at 15°C)`, the gas fuel energy, as its own column and stored mean. **Gas is not added to electric power**, not to heating capacity, and not to either back-up heater column. The other gas columns (flowmeter temperature and pressure, calorific value, flow rates) are kept in Plotdaten but are not averaged.
 
 If you pick the wrong template, the symptom is a long `missing required sources` list, because the template's headers do not match what the map is looking for. That is a safe failure — nothing is written in dry-run.
 
@@ -145,7 +150,7 @@ If you pick the wrong template, the symptom is a long `missing required sources`
 | No Virtual Back-up | The BUH column is **omitted** — zeros are not invented |
 | Mass flow, corrected Q/P, either back-up | Passed through only if the template contains them **and** they are not empty |
 | Sink properties | `cp_out_sink`, `cp_in_sink`, `density_sink` keep the `_sink` suffix, so water-to-water can later add the matching `_source` columns without renaming anything |
-| Other optional columns | Lab air / atmospheric pressure, compressor frequency, fan speed, voltage, current, frequency, cos phi, condenser and evaporator temperatures are kept even when the lab left them empty, so the field stays visible in Plotdaten |
+| Other optional columns | Lab air / atmospheric pressure, compressor frequency, fan speed, voltage, current, frequency and cos phi are kept even when the lab left them empty, so the field stays visible in Plotdaten |
 
 Default sheets are `E, F, A, B, C, D`. Sheets `B, C, D` have no back-up headers at all — that is normal, and both back-up columns are simply absent from their Plotdaten files.
 
@@ -290,9 +295,11 @@ Only `Electrical power input BUH` decides this. A file that has `Real BUH power 
 
 ### 6.4a Optional monitoring means
 
-The air-to-water REV1 template carries monitoring channels that are not part of the analysis contract: lab air temperature and atmospheric pressure, the sink `cp` and density, compressor frequency, fan speed, voltage, current, frequency, cos phi, the real back-up heater power, and the condenser / evaporator temperatures. Each one that is present in the Plotdaten file is averaged over the cycle window and stored next to the other means.
+The air-to-water REV1 template carries monitoring channels that are not part of the analysis contract: lab air temperature and atmospheric pressure, the sink `cp` and density, compressor frequency, fan speed, voltage, current, frequency, cos phi, and the real back-up heater power. Each one that is present in the Plotdaten file is averaged over the cycle window and stored next to the other means. The condenser and evaporator temperatures (`T_in_cond`, `T_out_cond`, `T_in_evap`, `T_out_evap`) are no longer imported or shown; an older database keeps its columns, hidden.
 
-On the **Mean Values** page they are **hidden by default**. Tick **Show monitoring columns** (next to the results table) to show all 16 extras, or use **Manage Columns** for a per-column override. The checkbox writes the same `column_visibility.json` as Manage Columns — it does not hide identity, energy or state columns (Blocks A–C), and it does not invent a second settings file. They can also be ticked into the summary export under **Optional monitoring (A/W)**.
+On the **Mean Values** page they are **hidden by default**. Tick **Show monitoring columns** (next to the results table) to show these extras, together with `Avg Q BA` and the source and gas means, or use **Manage Columns** for a per-column override. The checkbox writes the same `column_visibility.json` as Manage Columns — it does not hide identity, energy or state columns (Blocks A–C), and it does not invent a second settings file. They can also be ticked into the summary export under **Optional monitoring (A/W)**.
+
+Of the three building-model heat columns, `Avg Q HB` and `Avg Q HP` are always shown side by side and the box hides only `Avg Q BA`; hovering a column title shows a short note on the model-computed columns (`Avg T Ret Calc`, `Avg T B Calc`, `Avg T H Calc` and the three Q columns), the hybrid-only gas heat input and the water-to-water-only source columns.
 
 Three properties are worth remembering:
 

@@ -57,7 +57,7 @@ Over the analysis window:
 
 (arithmetic mean of the time-series column values over the window).
 
-Typical stored means: outdoor DB/WB, supply, return (emu/calc), heating capacity, electrical power (corrected, uncorrected, and BAM-pump-corrected variants as available). The importer raises on any missing `average_columns` entry except lab-corrected Q/P: outdoor DB/WB plus `Pressure difference`, `volume flow` and the buffer columns `T_return_calc` / `T_B_calc` / `T_H_calc` / `Q_HB` / `Q_BA` (this is why a water-to-water workbook cannot be imported yet, §12.8). The deviation stage is what tolerates a missing outdoor series.
+Typical stored means: outdoor DB/WB, supply, return (emu/calc), heating capacity, electrical power (corrected, uncorrected, and BAM-pump-corrected variants as available). The importer raises on any missing `average_columns` entry except lab-corrected Q/P, outdoor DB/WB and `Q_BA`: those three are stored as n/a (never 0) when the sheet has no such column, which is the normal case for water-to-water (no outdoor air) and for the one-mass building model (no `Q_BA`). `Pressure difference`, `volume flow`, supply, return, uncorrected Q and P, and `T_return_calc` / `T_B_calc` / `T_H_calc` / `Q_HB` are still required. Gas heat input (hybrid) and `Q_HP` are stored means only and are not part of COP.
 
 ### 2.1 Optional monitoring means
 
@@ -72,7 +72,6 @@ A second, **optional** group of means comes from the air-to-water REV1 template.
 | `Compressor Frequency` / `Fan Speed` | `avg_compressor_frequency` / `avg_fan_speed` |
 | `Voltage` / `Current` / `Frequency` / `cos_phi` | `avg_voltage` / `avg_current` / `avg_frequency` / `avg_cos_phi` |
 | `Real BUH power input` | `avg_real_buh_power` |
-| `T_in_cond` / `T_out_cond` / `T_in_evap` / `T_out_evap` | `avg_t_in_cond` / `avg_t_out_cond` / `avg_t_in_evap` / `avg_t_out_evap` |
 
 Rules that make them safe to read:
 

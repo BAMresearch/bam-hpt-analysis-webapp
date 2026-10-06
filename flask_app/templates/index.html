@@ -1015,6 +1015,7 @@
             'avg_t_b_calc': 'Avg T B Calc',
             'avg_t_h_calc': 'Avg T H Calc',
             'avg_q_hb': 'Avg Q HB',
+            'avg_q_hp': 'Avg Q HP',
             'avg_q_ba': 'Avg Q BA',
             'avg_volume_flow': 'Avg Vol Fl',
             'avg_mass_flow': 'Avg Mass Fl',
@@ -1039,10 +1040,6 @@
             'avg_frequency': 'Avg Frequency',
             'avg_cos_phi': 'Avg cos phi',
             'avg_real_buh_power': 'Avg Real BUH Power',
-            'avg_t_in_cond': 'Avg T In Cond',
-            'avg_t_out_cond': 'Avg T Out Cond',
-            'avg_t_in_evap': 'Avg T In Evap',
-            'avg_t_out_evap': 'Avg T Out Evap',
             'QCorrwBUH': 'Q corr w BUH',
             'PCorrwBUH': 'P corr w BUH',
             'COPCorrwBUH': 'COP corr w BUH',
@@ -1064,7 +1061,7 @@
                        {% if show_monitoring_columns %}checked{% endif %}>
                 <label class="form-check-label" for="showMonitoringColumns">Show monitoring columns</label>
             </div>
-            <small class="text-muted">Optional lab channels (air, electrical, condenser/evaporator). Same store as Manage Columns.</small>
+            <small class="text-muted">Optional lab channels (air, electrical), plus Avg Q BA and the source and gas means. Same store as Manage Columns.</small>
         </div>
         <div class="filter-status" id="filterStatus" style="display: none;">
             <div class="d-flex justify-content-between align-items-center">
@@ -1103,9 +1100,12 @@
                     <tr>
                         <th class="col-sticky col-sticky-check"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th>
                         <th class="col-sticky col-sticky-idx">#</th>
+                        {% set model_computed_cols = ['avg_t_return_calc', 'avg_t_b_calc', 'avg_t_h_calc', 'avg_q_hb', 'avg_q_hp', 'avg_q_ba'] %}
+                        {% set water_to_water_cols = ['avg_t_in_source', 'avg_t_out_source', 'avg_volume_flow_source', 'avg_mass_flow_source', 'avg_density_source', 'avg_cp_in_source', 'avg_cp_out_source', 'avg_dp_source'] %}
                         {% for col in ordered_columns %}
                         {% set sticky = 'col-sticky col-sticky-file' if col == 'file_name' else ('col-sticky col-sticky-ds' if col == 'data_set' else ('col-sticky col-sticky-start' if col == 'start_time' else ('col-sticky col-sticky-end' if col == 'end_time' else ''))) %}
-                        <th class="{{ sticky }}{% if 'test_condition' in col.lower() or 'notes' in col.lower() %} wide-column{% endif %}" data-column-name="{{ col }}">
+                        {% set header_note = 'Model-computed column' if col in model_computed_cols else ('Only applicable for hybrid units' if col == 'avg_gas_heat_input' else ('Only applicable for water-to-water units' if col in water_to_water_cols else '')) %}
+                        <th class="{{ sticky }}{% if 'test_condition' in col.lower() or 'notes' in col.lower() %} wide-column{% endif %}" data-column-name="{{ col }}"{% if header_note %} title="{{ header_note }}"{% endif %}>
                             {{ format_column_name(col) }}
                             {% if columns_info.get(col) and columns_info[col]['type'] in ['REAL', 'INTEGER'] and col not in ['data_set', 'start_time', 'end_time'] %}
                             <br><button type="button" class="btn btn-sm btn-outline-primary update-column-btn" data-column="{{ col }}" title="Update this column">Update</button>
@@ -1172,7 +1172,7 @@
                                 {% else %}
                                     <span class="text-muted">-</span>
                                 {% endif %}
-                            {% elif col in (optional_mean_columns or []) %}
+                            {% elif col in (optional_mean_columns or []) or col == 'avg_q_hp' %}
                                 {# Optional monitoring means: absent series stays n/a, never 0 #}
                                 {% if row.get(col) is not none %}
                                     {{ show_float(row.get(col)) }}

@@ -17,7 +17,7 @@ Lab template workbook  →  import notebook  →  Plotdaten Excel  →  WebApp  
 
 The WebApp understands **one** column layout (Plotdaten). The import notebook translates the lab template into that layout. Do not feed the raw lab workbook to the WebApp.
 
-Air-to-water templates use the **Template** dropdown (Air-to-water). Water-to-water and hybrid options appear there when those maps exist.
+Pick the lab template family in the **Template** dropdown: Air-to-water, Water-to-water or Hybrid.
 
 ---
 

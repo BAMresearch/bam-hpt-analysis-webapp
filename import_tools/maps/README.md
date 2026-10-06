@@ -8,9 +8,11 @@ MAPPING = load_map("hpt_aw_rev1")  # loads hpt_aw_rev1.json
 
 | File | Use for |
 |------|---------|
-| `hpt_aw_rev1.json` | **Current** AIR-TO-WATER template (only option until WW / hybrid maps exist) |
+| `hpt_aw_rev1.json` | AIR-TO-WATER template REV1 |
+| `hpt_ww_rev1.json` | WATER-TO-WATER template REV1 — sink as air-to-water, source loop kept under `_source` names, no outdoor air |
+| `hpt_hybrid_rev1.json` | HYBRID template REV1 — sink as air-to-water, `Heat input (at 15°C)` kept as its own column (never electric power or BUH) |
 
-Water-to-water and hybrid will be separate files (`hpt_ww_rev1.json`, `hpt_hybrid_rev1.json`) when those templates exist. The notebook dropdown lists a map only if its JSON is present.
+The notebook dropdown lists a map only if its JSON is present.
 
 ---
 

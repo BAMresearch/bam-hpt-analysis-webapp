@@ -88,7 +88,17 @@ CREATE TABLE IF NOT EXISTS results (
     avg_t_in_cond REAL,
     avg_t_out_cond REAL,
     avg_t_in_evap REAL,
-    avg_t_out_evap REAL
+    avg_t_out_evap REAL,
+    avg_q_hp REAL,
+    avg_gas_heat_input REAL,
+    avg_t_in_source REAL,
+    avg_t_out_source REAL,
+    avg_volume_flow_source REAL,
+    avg_mass_flow_source REAL,
+    avg_density_source REAL,
+    avg_cp_in_source REAL,
+    avg_cp_out_source REAL,
+    avg_dp_source REAL
 )
 """
 
@@ -96,6 +106,9 @@ CREATE TABLE IF NOT EXISTS results (
 # Extras only: nullable, never part of the core insert_query, written after insert by rowid.
 # avg_real_buh_power is the REAL backup-heater meter and is unrelated to avg_power_buh
 # (which stays the virtual back-up / "Electrical power input BUH" path).
+# avg_t_in_cond / avg_t_out_cond / avg_t_in_evap / avg_t_out_evap are no longer filled
+# or shown; they stay in RESULTS_CREATE_SQL so the schema is never rewritten, and
+# column_visibility.json keeps them hidden on databases that have them.
 OPTIONAL_MONITORING_MEAN_COLUMNS = {
     "avg_lab_air_db": "REAL",
     "avg_lab_atm_pressure": "REAL",
@@ -109,10 +122,20 @@ OPTIONAL_MONITORING_MEAN_COLUMNS = {
     "avg_frequency": "REAL",
     "avg_cos_phi": "REAL",
     "avg_real_buh_power": "REAL",
-    "avg_t_in_cond": "REAL",
-    "avg_t_out_cond": "REAL",
-    "avg_t_in_evap": "REAL",
-    "avg_t_out_evap": "REAL",
+    # Building-model Q_BA is stored by the core insert; listed here only so the Means
+    # monitoring checkbox hides it. avg_q_hp is a main Means column (see ANALYSIS_MEAN_COLUMNS).
+    "avg_q_ba": "REAL",
+    # Hybrid / water-to-water REV1: gas heat input (fuel energy, never electric power) and
+    # the source loop. Stored only; not part of COP and not scored.
+    "avg_gas_heat_input": "REAL",
+    "avg_t_in_source": "REAL",
+    "avg_t_out_source": "REAL",
+    "avg_volume_flow_source": "REAL",
+    "avg_mass_flow_source": "REAL",
+    "avg_density_source": "REAL",
+    "avg_cp_in_source": "REAL",
+    "avg_cp_out_source": "REAL",
+    "avg_dp_source": "REAL",
 }
 
 # Columns required by config insert_query / mean-value page that older empty DBs omitted.
@@ -122,6 +145,8 @@ ANALYSIS_MEAN_COLUMNS = {
     "avg_t_h_calc": "REAL",
     "avg_q_hb": "REAL",
     "avg_q_ba": "REAL",
+    # Building-model Q_HP mean (hybrid / water-to-water REV1). Stored only; not part of COP.
+    "avg_q_hp": "REAL",
     "avg_eff_pump": "REAL",
     "avg_qcorr_bam": "REAL",
     "avg_pcorr_bam": "REAL",

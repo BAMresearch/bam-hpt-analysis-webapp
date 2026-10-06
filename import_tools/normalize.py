@@ -25,6 +25,11 @@ except ImportError:  # pragma: no cover
 
 MAPS_DIR = Path(__file__).resolve().parent / "maps"
 
+# Refrigerant-side temperatures: not BAM columns and not in the HPT round-robin
+# templates. An older sheet may still carry them; they are left out of Plotdaten
+# rather than passed through. Matched case- and whitespace-insensitively.
+PASSTHROUGH_DROP = ("T_in_cond", "T_out_cond", "T_in_evap", "T_out_evap")
+
 
 def load_map(map_id: str = "hpt_aw_rev1") -> dict[str, Any]:
     """Load ``maps/{map_id}.json``. Default is AIR-TO-WATER REV1."""
@@ -191,23 +196,40 @@ def _add_time_elapsed(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _maybe_convert_volume_flow(series: pd.Series, unit_hint: Optional[str] = None) -> tuple[pd.Series, list[str]]:
-    """Prefer m³/h; if values look like m³/s (typical max << 1), convert ×3600."""
+# Plotdaten flows are m³/h (hydraulic power divides the sink flow by 3600).
+VOLUME_FLOW_TARGETS = ("volume flow", "volume flow_source")
+
+
+def _unit_key(unit_hint: Optional[str]) -> str:
+    if unit_hint is None or pd.isna(unit_hint):
+        return ""
+    return str(unit_hint).replace("³", "3").replace(" ", "").lower()
+
+
+def _maybe_convert_volume_flow(
+    series: pd.Series, unit_hint: Optional[str] = None, name: str = "volume flow"
+) -> tuple[pd.Series, list[str]]:
+    """Return the flow in m³/h. ×3600 only when the unit row declares m³/s.
+
+    A small number is not a unit: with no declared unit, a median in (0, 0.05) is
+    reported and the values are left as they are.
+    """
     notes: list[str] = []
     s = pd.to_numeric(series, errors="coerce")
-    finite = s.replace([np.inf, -np.inf], np.nan).dropna()
-    if finite.empty:
+    unit = _unit_key(unit_hint)
+    if "m3/s" in unit:
+        notes.append(f"{name}: unit row says m³/s → converted ×3600 to m³/h")
+        return s * 3600.0, notes
+    if "m3/h" in unit:
         return s, notes
-    if unit_hint and "m3/s" in unit_hint.replace("³", "3").replace(" ", "").lower():
-        notes.append("volume flow: unit row indicates m³/s → converted ×3600 to m³/h")
-        return s * 3600.0, notes
-    # Magnitude heuristic: heating HP flows in m³/h are typically > 0.2; in m³/s often < 0.05
-    med = float(finite.median())
-    if 0 < med < 0.05:
-        notes.append(
-            f"volume flow: median={med:.5g} looks like m³/s → converted ×3600 to m³/h (decision 3.4 legacy)"
-        )
-        return s * 3600.0, notes
+    finite = s.replace([np.inf, -np.inf], np.nan).dropna()
+    if not finite.empty:
+        med = float(finite.median())
+        if 0 < med < 0.05:
+            notes.append(
+                f"{name}: no m³/h or m³/s in the unit row and median={med:.5g} is small — "
+                "values NOT converted; check the unit with the lab"
+            )
     return s, notes
 
 
@@ -256,11 +278,11 @@ def normalize_dataframe(
         # Unit / scale
         if colmap.get("scale") is not None:
             series = pd.to_numeric(series, errors="coerce") * float(colmap["scale"])
-        if target == "volume flow" or "volume flow" in _norm_key(source):
+        if target in VOLUME_FLOW_TARGETS:
             unit_hint = None
             if units_row is not None and actual in getattr(units_row, "index", []):
-                unit_hint = str(units_row[actual])
-            series, vnotes = _maybe_convert_volume_flow(series, unit_hint)
+                unit_hint = units_row[actual]
+            series, vnotes = _maybe_convert_volume_flow(series, unit_hint, target)
             report["warnings"].extend(vnotes)
 
         # Do not create optional columns that are entirely empty (e.g. mass flow_sink all-NaN)
@@ -282,10 +304,13 @@ def normalize_dataframe(
 
     # Passthrough unmapped (optional extras)
     if mapping.get("passthrough_unmapped", True):
+        drop = {_norm_key(n) for n in PASSTHROUGH_DROP}
         for c in df.columns:
             if c in used_sources:
                 continue
             if c in out.columns:
+                continue
+            if _norm_key(c) in drop:
                 continue
             # Avoid colliding with targets already taken
             out[c] = df[c]
