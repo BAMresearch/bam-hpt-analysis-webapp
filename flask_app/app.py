@@ -14479,6 +14479,64 @@ def api_guideline_windows_export():
         return jsonify({'success': False, 'message': str(e)})
 
 
+@app.route('/api/guideline_windows/delta_cop_trace', methods=['POST'])
+def api_guideline_windows_delta_cop_trace():
+    """The sliding ΔCOP figure of one row. Read-only; only the row's button calls it.
+
+    The saved clocks are checked in SQLite first, so a row with no trace
+    (on–off, no equilibrium, no H, H too short) answers without opening a
+    workbook. Otherwise the row's sheet is read once and every window reuses
+    it. Nothing is written: no clock, no score cache row, no column.
+    """
+    try:
+        ensure_cycle_periods_table()
+        payload = request.get_json(silent=True) or {}
+        try:
+            rid = int(payload.get('rowid'))
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': 'rowid required'})
+        buffer_s = _guideline_buffer_s()
+        conn = get_db_connection()
+        try:
+            entry = conn.execute('SELECT rowid, * FROM results WHERE rowid=?', (rid,)).fetchone()
+            periods = _guideline_periods_by_rowid(conn, [rid], buffer_s).get(rid, [])
+        finally:
+            conn.close()
+        if entry is None:
+            return jsonify({'success': False, 'message': f'no entry with rowid {rid}'})
+
+        lengths = _guideline_lengths()
+        periods = sorted(periods, key=lambda p: (float(p['start_time']), str(p['period_type'])))
+        row, _ev, _dt, _wants = _guideline_row_base(dict(entry), periods, lengths)
+        cfg = load_interval_deviations_config()
+        base = {'success': True, 'rowid': rid, 'file_name': row['file_name'],
+                'data_set': row['data_set'], 'kind': row['kind'],
+                'eval_start': row['eval_start'], 'eval_end': row['eval_end']}
+        if row['kind'] == 'unknown':
+            no_trace = 'no guideline clocks are saved'
+        elif row['kind'] == 'on_off':
+            no_trace = 'on–off cycle — no equilibrium, so no ΔCOP trace'
+        else:
+            no_trace = ''
+        if no_trace:
+            return jsonify({**base, 'points': [], 'cop_points': [], 'reason': no_trace,
+                            'eval_min': lengths['eval_min'],
+                            'step_min': cfg['delta_cop_slice_min'],
+                            'limit_pct': cfg['delta_cop_pct'],
+                            'eq_end': row['eq_end'], 'h_end': row['h_end']})
+
+        import io
+        import contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            trace = _interval_delta_cop_trace(row['file_name'], row['data_set'], row['eq_end'],
+                                              row['h_end'], cfg, lengths, {})
+        return jsonify({**base, **trace})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)})
+
+
 @app.route('/api/guideline_windows/score_files', methods=['POST', 'GET'])
 def api_guideline_windows_score_files():
     """Which files still need interval scores. SQLite only — no Plotdaten.
@@ -16499,6 +16557,83 @@ def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets) -> dict:
         return out
     out['value_pct'] = 100.0 * (out['cop_last'] - out['cop_first']) / out['cop_first']
     return out
+
+
+def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, sheets) -> dict:
+    """ΔCOP of an ``eval_min`` window walking from the saved equilibrium end to the saved H end.
+
+    Read-only, for the Guideline Windows figure. Every point is
+    ``_interval_delta_cop`` on its own window, so both slices move with the
+    window and the arithmetic is the cell's. The first window is
+    ``[eq_end, eq_end + eval_min]``, the next ones step by
+    ``delta_cop_slice_min``, and a last window ending exactly at ``h_end`` is
+    added when the step does not land there. ``sheets`` is shared, so the sheet
+    is read once. Nothing is stored, and the saved evaluation cell is not
+    touched. Too little H after equilibrium gives no points, never zeros.
+    """
+    eval_s = float(lengths['eval_s'])
+    step_s = cfg['delta_cop_slice_min'] * 60.0
+    out = {'points': [], 'reason': '', 'eq_end': _guideline_num(eq_end),
+           'h_end': _guideline_num(h_end), 'eval_min': lengths['eval_min'],
+           'step_min': cfg['delta_cop_slice_min'], 'limit_pct': cfg['delta_cop_pct']}
+    eq_end, h_end = out['eq_end'], out['h_end']
+    if eq_end is None:
+        out['reason'] = 'no equilibrium window is saved'
+        return out
+    if h_end is None:
+        out['reason'] = 'no heating window is saved'
+        return out
+    if eval_s <= 0 or h_end - eq_end < eval_s:
+        out['reason'] = (f"H ends before a full {lengths['eval_min']:g} min exist "
+                         'after the equilibrium end')
+        return out
+
+    n_steps = int(np.floor((h_end - eq_end - eval_s) / step_s + 1e-9))
+    starts = [eq_end + i * step_s for i in range(n_steps + 1)]
+    if h_end - eval_s - starts[-1] > 1e-6:
+        starts.append(h_end - eval_s)
+    for start in starts:
+        dc = _interval_delta_cop(file_name, data_set, start, start + eval_s, cfg, sheets)
+        out['points'].append({
+            'start': start, 'end': start + eval_s,
+            'value_pct': _guideline_num(dc.get('value_pct')),
+            'cop_first': _guideline_num(dc.get('cop_first')),
+            'cop_last': _guideline_num(dc.get('cop_last')),
+            'reason': dc.get('reason') or '',
+        })
+    out['cop_points'] = _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets)
+    return out
+
+
+def _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets) -> list:
+    """The corrected COP of every ``delta_cop_slice_min`` block from the equilibrium end to H end.
+
+    The second line of the ΔCOP figure. Each block is the same slice
+    ``_interval_delta_cop`` reads (``_analysis_means_for_window`` →
+    ``_interval_cop_from_means``), so the ΔCOP of a window is
+    (COP of its last block − COP of its first block) / COP of its first block,
+    both read off this line. Blocks are ``[eq_end + (k−1)·slice, eq_end + k·slice]``
+    while the end is at or before ``h_end``, plus ``[h_end − slice, h_end]``
+    when ``h_end`` is off that grid. A point is placed at its block end, so
+    there is none at the equilibrium end. Read-only; ``sheets`` is shared.
+    """
+    slice_s = cfg['delta_cop_slice_min'] * 60.0
+    if slice_s <= 0 or h_end - eq_end < slice_s:
+        return []
+    n_blocks = int(np.floor((h_end - eq_end) / slice_s + 1e-9))
+    blocks = [(eq_end + (k - 1) * slice_s, eq_end + k * slice_s) for k in range(1, n_blocks + 1)]
+    if h_end - blocks[-1][1] > 1e-6:
+        blocks.append((h_end - slice_s, h_end))
+    df_sheet, lab_corr_missing, reason = _interval_prepared_sheet(file_name, data_set, sheets)
+    points = []
+    for start, end in blocks:
+        cop = None
+        if df_sheet is not None:
+            cop = _guideline_num(_interval_cop_from_means(
+                _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing)))
+        why = '' if cop is not None else (reason if df_sheet is None else 'this block has no Q or P')
+        points.append({'start': start, 'end': end, 'cop': cop, 'reason': why or ''})
+    return points
 
 
 def _interval_deviation_payload(entry, rowid, hp_id, periods, cfg, df_entry, sheets):

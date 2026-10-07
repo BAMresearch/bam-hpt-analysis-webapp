@@ -228,9 +228,11 @@ DB / WB / Tsup = \(\bar T - T_{\mathrm{set}}\); dTreturn mean = mean of \(T_{\ma
 
 1. Slice the first and last `delta_cop_slice_min` minutes of the **saved evaluation** window (default 5 min).
 2. Each slice: Q and P as on the parent entry (BAM-corr when lab-corr is missing, then BUH-corr); \(\mathrm{COP}=\bar Q/\bar P\) (§3).
-3. \(\Delta\mathrm{COP}=(\mathrm{COP}_{\mathrm{last}}-\mathrm{COP}_{\mathrm{first}})/\mathrm{COP}_{\mathrm{first}}\). Compare \(|\Delta\mathrm{COP}|\) to `delta_cop_pct` (2.5 %).
+3. \(\Delta\mathrm{COP}=(\mathrm{COP}_{\mathrm{last}}-\mathrm{COP}_{\mathrm{first}})/\mathrm{COP}_{\mathrm{first}}\). A drop in COP is negative. The cell is flagged when \(\Delta\mathrm{COP}\) is below −2.5 % (minus `delta_cop_pct`), not on its absolute value: a rise is never flagged.
 
 Empty, not 0, when there is no evaluation window, the window is shorter than two slices, or a slice has no Q/P. Not the first/last five minutes of H.
+
+A figure per row shows the same formula on `eval_min` (70 min) windows that start at the saved equilibrium end and step by `delta_cop_slice_min` up to the saved H end; both slices move with the window. It is read-only and does not change the stored value. The same figure plots, on a second axis, the corrected COP of every `delta_cop_slice_min` block from the saved equilibrium end to the saved H end (step 2, placed at the block end), so each ΔCOP point is read off two points of that line.
 
 Config: `flask_app/config/interval_deviations.json` — the single source for every interval band above, individual and mean. The numbers happen to match the parent Interval H widths today; they are separate keys and may be retuned on their own. These values are draft configuration, not agreed acceptance limits.
 

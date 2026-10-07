@@ -85,6 +85,8 @@
   .gw-amber { color: #e8590c; }
   .gw-green { color: #2b8a3e; }
   .gw-na { color: #adb5bd; cursor: help; }
+  .gw-trace-btn { margin-left: 4px; padding: 0 4px; line-height: 1.2; font-size: 0.75rem; }
+  #gwTracePlot { width: 100%; height: 420px; }
 </style>
 {% endblock %}
 
@@ -215,6 +217,25 @@
 
 <!-- Confirm for the score backfill. Nothing is read from Plotdaten before the
      analyst presses the button inside this modal. -->
+<!-- The sliding ΔCOP figure of one row. Empty until that row's button is
+     pressed; the chart library is loaded on the first press only. -->
+<div class="modal fade" id="gwTraceModal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-xl" role="document">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h5 class="modal-title" id="gwTraceTitle">ΔCOP trace</h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted mb-2" id="gwTraceMsg"></p>
+        <div id="gwTracePlot" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="gwComputeModal" tabindex="-1" role="dialog" aria-hidden="true">
   <div class="modal-dialog modal-lg" role="document">
     <div class="modal-content">
@@ -313,10 +334,20 @@
    *  read over, in seconds like every other time on this page. A row scored
    *  before the slices were stored has the % but no COPs; it keeps the plain
    *  reading of the column instead of a half-filled sentence. */
-  function gwDeltaTitle(r) {
+  /** What the eval ΔCOP number is, and what the limit means. Shared by the
+   *  header and the cell so the two never say different things. */
+  function gwDeltaMeaning() {
     var slice = _gwMeta.delta_cop_slice_min;
     var limit = _gwMeta.delta_cop_pct;
-    var tail = 'ΔCOP = (last − first) / first, limit ±' + limit + ' %';
+    return 'ΔCOP = (last − first) / first × 100, i.e. (COP last − COP first) / COP first. '
+      + '−' + limit + ' % means the COP of the last ' + slice
+      + ' minutes is ' + limit + ' % lower than the COP of the first ' + slice
+      + ' minutes. Red only below −' + limit + ' %; a rise is never red.';
+  }
+
+  function gwDeltaTitle(r) {
+    var slice = _gwMeta.delta_cop_slice_min;
+    var tail = gwDeltaMeaning();
     if (!r || r.delta_cop_first == null || r.delta_cop_last == null) {
       return 'First ' + slice + ' min against last ' + slice
         + ' min of the saved evaluation window — ' + tail
@@ -335,9 +366,132 @@
   function gwDeltaCell(v, reason, r) {
     if (v === null || v === undefined) { return gwNa(reason); }
     var n = Number(v);
-    var cls = (Math.abs(n) > _gwMeta.delta_cop_pct) ? 'gw-num gw-red' : 'gw-num gw-green';
+    // A drop is negative. Only a drop beyond the limit is red: exactly −limit
+    // stays green, and so does any rise.
+    var cls = (n < -_gwMeta.delta_cop_pct) ? 'gw-num gw-red' : 'gw-num gw-green';
     var text = (n >= 0 ? '+' : '') + n.toFixed(2);
     return gwCell(text, cls, gwDeltaTitle(r));
+  }
+
+  /** The row's button for the sliding ΔCOP figure. Lives inside the eval ΔCOP
+   *  cell, so the table gains no column and the CSV gains nothing. */
+  function gwTraceButton(r) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-outline-secondary btn-sm gw-trace-btn';
+    b.textContent = '↗';
+    b.title = 'ΔCOP of a sliding ' + (_gwMeta.eval_min || 70)
+      + '-min window, from the saved equilibrium end to the saved H end';
+    b.onclick = function (ev) { ev.stopPropagation(); gwOpenTrace(r); };
+    return b;
+  }
+
+  var _gwPlotly = null;          // loaded on the first trace click, never on page load
+  function gwLoadPlotly() {
+    if (window.Plotly) { return Promise.resolve(window.Plotly); }
+    if (!_gwPlotly) {
+      _gwPlotly = new Promise(function (resolve, reject) {
+        var s = document.createElement('script');
+        s.src = 'https://cdn.plot.ly/plotly-2.27.0.min.js';
+        s.onload = function () { resolve(window.Plotly); };
+        s.onerror = function () { _gwPlotly = null; reject(new Error('the chart library could not be loaded')); };
+        document.head.appendChild(s);
+      });
+    }
+    return _gwPlotly;
+  }
+
+  /** One click: one request, which reads the row's sheet once. The cell is
+   *  never changed from here — it stays the saved evaluation window. */
+  async function gwOpenTrace(r) {
+    var msg = document.getElementById('gwTraceMsg');
+    var plot = document.getElementById('gwTracePlot');
+    document.getElementById('gwTraceTitle').textContent =
+      'ΔCOP trace — #' + (r.index == null ? '' : r.index) + ' ' + (r.file_name || '')
+      + ' / data set ' + (r.data_set == null ? '' : r.data_set);
+    msg.textContent = 'Reading the sheet…';
+    plot.style.display = 'none';
+    if (window.Plotly) { window.Plotly.purge(plot); }
+    $('#gwTraceModal').modal('show');
+    var d;
+    try {
+      var resp = await fetch('/api/guideline_windows/delta_cop_trace', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rowid: r.rowid })
+      });
+      d = await gwReadJson(resp);
+    } catch (e) {
+      d = { success: false, message: String(e) };
+    }
+    if (!d.success) { msg.textContent = 'No trace: ' + (d.message || 'request failed'); return; }
+    var pts = (d.points || []).filter(function (p) { return p.value_pct != null; });
+    if (!pts.length) {
+      var why = d.reason || ((d.points || [])[0] || {}).reason || 'no window could be scored';
+      msg.textContent = 'No trace: ' + why + '.';
+      return;
+    }
+    var limit = Number(d.limit_pct);
+    var eqEnd = Number(d.eq_end);
+    var cell = (r.eval_delta_cop == null) ? 'n/a' : Number(r.eval_delta_cop).toFixed(2) + ' %';
+    var note = 'Each point: one ' + d.eval_min + '-min window, (COP last − COP first) / COP first of its own first and last '
+      + d.step_min + ' min, stepped by ' + d.step_min + ' min from the saved equilibrium end ('
+      + gwSeconds(d.eq_end) + ' s) to the saved H end (' + gwSeconds(d.h_end) + ' s). '
+      + 'Left axis: the corrected COP of each ' + d.step_min + '-min block, at the block end — '
+      + 'the COP the percent is made from. '
+      + 'The eval ΔCOP cell stays the saved evaluation window: ' + cell + '.';
+    if (r.eval_start != null && Math.abs(Number(r.eval_start) - eqEnd) > 0.5) {
+      note += ' The saved evaluation does not start at the equilibrium end, so the first point is not the cell.';
+    }
+    msg.textContent = note;
+    var Plotly;
+    try {
+      Plotly = await gwLoadPlotly();
+    } catch (e) {
+      msg.textContent = note + ' ' + e.message + '.';
+      return;
+    }
+    var all = d.points || [];
+    var x = all.map(function (p) { return (Number(p.end) - eqEnd) / 60; });
+    var y = all.map(function (p) { return p.value_pct; });
+    var text = all.map(function (p) {
+      var w = gwSeconds(p.start) + '–' + gwSeconds(p.end) + ' s';
+      if (p.value_pct == null) { return w + '<br>n/a: ' + (p.reason || ''); }
+      return w + '<br>COP first ' + Number(p.cop_first).toFixed(3)
+        + ', COP last ' + Number(p.cop_last).toFixed(3);
+    });
+    var colors = y.map(function (v) { return (v != null && v < -limit) ? '#c0392b' : '#000000'; });
+    // The corrected COP of every slice block the percent is made from, at the
+    // block end: the first block ends one slice after equilibrium, none at 0.
+    var cops = d.cop_points || [];
+    var copTrace = {
+      x: cops.map(function (p) { return (Number(p.end) - eqEnd) / 60; }),
+      y: cops.map(function (p) { return p.cop; }),
+      text: cops.map(function (p) {
+        var w = 'block ' + gwSeconds(p.start) + '–' + gwSeconds(p.end) + ' s';
+        return (p.cop == null) ? w + '<br>n/a: ' + (p.reason || '') : w;
+      }),
+      type: 'scatter', mode: 'lines+markers', connectgaps: false, yaxis: 'y',
+      marker: { color: '#a0a0a0', size: 5 }, line: { color: '#a0a0a0', width: 1.5, dash: 'dash' },
+      hovertemplate: 'COP %{y:.3f}<br>%{text}<extra></extra>',
+      name: d.step_min + '-min corrected COP'
+    };
+    plot.style.display = '';
+    Plotly.newPlot(plot, [copTrace, {
+      x: x, y: y, text: text, type: 'scatter', mode: 'lines+markers', yaxis: 'y2',
+      connectgaps: false, marker: { color: colors, size: 10 }, line: { color: '#000000', width: 3 },
+      hovertemplate: '%{y:.2f} %<br>%{text}<extra></extra>', name: 'ΔCOP'
+    }], {
+      margin: { l: 60, r: 70, t: 20, b: 50 }, showlegend: true,
+      legend: { orientation: 'h', x: 0, y: 1.02, yanchor: 'bottom' },
+      xaxis: { title: 'block / window end, min after the saved equilibrium end' },
+      yaxis: { title: d.step_min + '-min corrected COP', zeroline: false },
+      yaxis2: { title: 'ΔCOP % = (last − first) / first', overlaying: 'y', side: 'right',
+                zeroline: true, showgrid: false },
+      shapes: [{ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: -limit, y1: -limit,
+                 line: { color: '#c0392b', dash: 'dash', width: 1.5 } }],
+      annotations: [{ xref: 'paper', yref: 'y2', x: 1, xanchor: 'right', y: -limit, yanchor: 'bottom',
+                      text: '−' + limit + ' %', showarrow: false, font: { color: '#c0392b' } }]
+    }, { responsive: true, displaylogo: false });
   }
 
   /** The set one mean cell was read against, for the hover. Audit, not a
@@ -390,8 +544,9 @@
       if (d[k] != null) { _gwMeta[k] = d[k]; }
     });
     var band = _gwMeta.dtreturn_band_k;
+    // The trace window length, so the button and header name the configured one.
+    if (d.lengths && d.lengths.eval_min != null) { _gwMeta.eval_min = d.lengths.eval_min; }
     var slice = _gwMeta.delta_cop_slice_min;
-    var limit = _gwMeta.delta_cop_pct;
     function setTitle(id, text) {
       var el = document.getElementById(id);
       if (el) { el.title = text; }
@@ -408,7 +563,8 @@
     setTitle('gwHdrHDt', 'Share of samples in the saved H window whose |T_return,emu − T_return,calc| exceeds ±' + band + ' K');
     setTitle('gwHdrEqDt', 'Same return check on the saved equilibrium window (±' + band + ' K)');
     setTitle('gwHdrEvalDt', 'Same return check on the saved evaluation window (±' + band + ' K)');
-    setTitle('gwHdrDcop', 'First ' + slice + ' min against last ' + slice + ' min of the saved evaluation window (limit ' + limit + ' %)');
+    setTitle('gwHdrDcop', 'First ' + slice + ' min against last ' + slice + ' min of the saved evaluation window. '
+      + gwDeltaMeaning() + ' The ↗ button opens the sliding ' + (_gwMeta.eval_min || 70) + '-min figure.');
     setTitle('gwHdrDDb', 'Union of saved D spans: dry-bulb outside ±' + _gwMeta.d_db_k + ' K (not Interval H ±1 K)');
     setTitle('gwHdrDDt', 'Union of saved D spans: |dTreturn| outside ±' + _gwMeta.d_dtreturn_k + ' K');
     setTitle('gwHdrSDb', 'Union of saved S spans: dry-bulb outside ±' + _gwMeta.s_db_k + ' K');
@@ -505,7 +661,9 @@
         td.classList.add('gw-mean-dev');
         tr.appendChild(td);
       });
-      tr.appendChild(gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason, r));
+      var dcopTd = gwDeltaCell(r.eval_delta_cop, r.delta_cop_reason, r);
+      dcopTd.appendChild(gwTraceButton(r));
+      tr.appendChild(dcopTd);
       tr.appendChild(gwCell(r.note || '', 'gw-note'));
       // The Entry block stays put while the score columns scroll sideways.
       for (var c = 0; c < GW_FREEZE_COLS && c < tr.children.length; c++) {
