@@ -129,6 +129,18 @@ A **missing column and an empty column are the same case**: the HPT template alw
 
 The notice always names the path that ran (measured / derived with measured density / derived with 997), so a derived series is never silent. Prefer measured mass flow when the lab provides it. Nothing is written back to the Plotdaten file.
 
+**The reverse direction — sink volume flow from measured mass flow.** A row without a measured `volume flow` but with a measured `mass flow` gets
+
+\[
+\dot{V}\;[\mathrm{m^3/h}] = \frac{\dot{m}\;[\mathrm{kg/s}]}{\rho\;[\mathrm{kg/m^3}]}\times 3600
+\]
+
+with the same per-row ρ as above (`density_sink`, else `density`, else 997 kg/m³; 900–1100 kg/m³ check). The result is already m³/h, like the Plotdaten column, so hydraulic power's `/ 3600` is the only other factor. Measured volume flow wins, zeros included; an absent and an empty column are the same case. Source `volume flow_source` is never derived.
+
+**No round trip.** Both directions read the **original** measured series, and nothing is written until both are known: a derived mass flow is never turned back into a volume flow, nor the other way round. A row with neither value stays empty on both sides — no flow is invented.
+
+A derived volume flow feeds **hydraulic power, the pump efficiency and the BAM pump correction** (§4.2), and so the stored corrected averages when lab-corrected Q/P are also missing. It is always a warning, once per file. When volume flow is missing and there is no measured mass flow either, a warning says volume flow stays empty. A complete volume flow adds no notice.
+
 Implemented once in `derive_mass_flow_if_needed()` (`flask_app/app.py`) and used by import, recalculation, the single-column update, the cycle extract and the flow-deviation plot, so BAM and HPT entries cannot drift apart.
 
 ### 4.2 BAM pump-correction fallback

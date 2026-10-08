@@ -283,60 +283,107 @@ def _density_for_mass_flow(df):
 
 
 def derive_mass_flow_if_needed(df):
-    """Fill missing mass flow from volume flow and density. Returns (df, notices).
+    """Fill missing sink mass flow and sink volume flow from each other. Returns (df, notices).
 
     Order, identical for BAM and HPT:
-      1. measured 'mass flow' wins and is never overwritten — zeros are measurements;
-      2. rows without a measured value get volume flow [m³/h] / 3600 × ρ [kg/m³];
-      3. ρ from 'density_sink', else 'density', else 997 kg/m³ — per row, so a partly
-         filled density column is used where it is finite.
+      1. a measured value wins and is never overwritten — zeros are measurements;
+      2. rows without a measured mass flow get volume flow [m³/h] / 3600 × ρ [kg/m³];
+      3. rows without a measured volume flow get mass flow [kg/s] / ρ [kg/m³] × 3600,
+         so the derived volume flow is already m³/h like the Plotdaten column;
+      4. ρ from 'density_sink', else 'density', else 997 kg/m³ — per row, so a partly
+         filled density column is used where it is finite. 'density_source' is never used.
+    Both directions read the original measured series and nothing is written until both
+    are known, so a derived column never feeds the other. A row with neither stays empty.
     An absent column and an all-empty column are the same case. The frame is changed in
     place for analysis only; nothing is written back to the Excel file. notices always
-    names the path that ran, so derivation is never silent.
+    names the mass-flow path that ran, and a derived volume flow is always reported.
     """
     notices = []
     if df is None:
         return df, notices
 
     measured = _numeric_series(df, 'mass flow')
-    gaps = measured.isna() if measured is not None else None
-    if measured is not None and not gaps.any():
-        notices.append(MASS_FLOW_MEASURED_NOTICE)
-        return df, notices
-
     volume = _numeric_series(df, 'volume flow')
-    if volume is None:
+    mass_gaps = measured.isna() if measured is not None else pd.Series(True, index=df.index)
+    volume_gaps = volume.isna() if volume is not None else pd.Series(True, index=df.index)
+    has_mass = measured is not None and measured.notna().any()
+    has_volume = volume is not None and volume.notna().any()
+
+    # ρ is worked out once, so an implausible density column warns once.
+    density = density_wording = None
+    warnings = []
+    if (mass_gaps.any() and volume is not None) or (volume_gaps.any() and has_mass):
+        density, density_wording, warnings = _density_for_mass_flow(df)
+
+    # --- mass flow from the measured volume flow (unchanged rule) -------------------
+    new_mass = None
+    mass_filled = 0
+    if measured is not None and not mass_gaps.any():
+        notices.append(MASS_FLOW_MEASURED_NOTICE)
+    elif volume is None:
         state = "is not in the file" if measured is None else "is empty in the file"
         notices.append(f"Mass flow {state} and there is no volume flow to derive it from.")
-        return df, notices
-
-    density, density_wording, warnings = _density_for_mass_flow(df)
-    derived = volume / 3600.0 * density
-    if measured is None:
-        gaps = pd.Series(True, index=df.index)
-        df['mass flow'] = derived
     else:
-        df['mass flow'] = measured.where(~gaps, derived)
-    filled = int((gaps & derived.notna()).sum())
+        derived = volume / 3600.0 * density
+        new_mass = derived if measured is None else measured.where(~mass_gaps, derived)
+        mass_filled = int((mass_gaps & derived.notna()).sum())
+        if not mass_filled:
+            state = "was not in the file" if measured is None else "is empty in the file"
+            notices.append(
+                f"Mass flow {state} and volume flow has no values either — mass flow stays empty."
+            )
+        elif not has_mass:
+            state = "was not in the file" if measured is None else "was empty in the file"
+            notices.append(
+                f"Mass flow {state} — derived from volume flow × {density_wording}. "
+                "Prefer measured mass flow when available."
+            )
+        else:
+            notices.append(
+                f"Mass flow: {mass_filled} of {len(mass_gaps)} rows were empty and derived from "
+                f"volume flow × {density_wording}; the measured values are unchanged."
+            )
 
-    if not filled:
-        state = "was not in the file" if measured is None else "is empty in the file"
-        notices.append(
-            f"Mass flow {state} and volume flow has no values either — mass flow stays empty."
-        )
-    elif measured is None or not measured.notna().any():
-        state = "was not in the file" if measured is None else "was empty in the file"
-        notices.append(
-            f"Mass flow {state} — derived from volume flow × {density_wording}. "
-            "Prefer measured mass flow when available."
-        )
-        df.attrs['mass_flow_derived'] = True
-    else:
-        notices.append(
-            f"Mass flow: {filled} of {len(gaps)} rows were empty and derived from "
-            f"volume flow × {density_wording}; the measured values are unchanged."
-        )
-        df.attrs['mass_flow_derived'] = True
+    # --- volume flow from the measured mass flow ------------------------------------
+    # A complete volume flow adds no notice: that is the ordinary file.
+    new_volume = None
+    if volume_gaps.any():
+        if not has_mass:
+            if not has_volume:
+                state = "is not in the file" if volume is None else "is empty in the file"
+                notices.append(
+                    f"Volume flow {state} and there is no measured mass flow to derive it "
+                    "from — volume flow stays empty, so hydraulic power and the BAM pump "
+                    "correction cannot be computed."
+                )
+        else:
+            derived = measured / density * 3600.0
+            filled = int((volume_gaps & derived.notna()).sum())
+            if filled:
+                new_volume = derived if volume is None else volume.where(~volume_gaps, derived)
+                use = ("used for hydraulic power and the BAM pump correction. "
+                       "Prefer a measured volume flow when the lab has one.")
+                if not has_volume:
+                    state = "was not in the file" if volume is None else "was empty in the file"
+                    notices.append(
+                        f"Volume flow {state} — derived from measured mass flow ÷ "
+                        f"{density_wording} × 3600 (m³/h); {use}"
+                    )
+                else:
+                    notices.append(
+                        f"Volume flow: {filled} of {len(volume_gaps)} rows were empty and derived "
+                        f"from measured mass flow ÷ {density_wording} × 3600 (m³/h); the measured "
+                        f"values are unchanged; {use}"
+                    )
+
+    # Both results are known — only now is anything written.
+    if new_mass is not None:
+        df['mass flow'] = new_mass
+        if mass_filled:
+            df.attrs['mass_flow_derived'] = True
+    if new_volume is not None:
+        df['volume flow'] = new_volume
+        df.attrs['volume_flow_derived'] = True
     notices.extend(warnings)
     return df, notices
 
@@ -378,6 +425,9 @@ MEANS_HIDDEN_EXPLICIT_L = frozenset(c.lower() for c in MEANS_HIDDEN_EXPLICIT)
 _IMPORT_NOTICE_FILE_RE = re.compile(r'^(.+\.(?:xlsx|xls|csv)):\s*(.*)$', re.IGNORECASE)
 _IMPORT_NOTICE_DENSITY_RE = re.compile(
     r'volume flow\s*[×x]\s*(.+?)(?:\.\s*Prefer|;|$)', re.IGNORECASE
+)
+_IMPORT_NOTICE_VOLUME_DENSITY_RE = re.compile(
+    r'mass flow\s*÷\s*(.+?)\s*×\s*3600', re.IGNORECASE
 )
 
 
@@ -454,6 +504,11 @@ def _classify_import_notice(text):
         return file_name, 'both_buh', body
     if 'lab-corrected' in body_l:
         return file_name, 'lab_corr_missing', body
+    # Before the mass-flow branch: these notices also mention "mass flow" and "derived".
+    if body_l.startswith('volume flow') and 'derived from measured mass flow' in body_l:
+        return file_name, 'volume_flow_derived', body
+    if body_l.startswith('volume flow') and 'stays empty' in body_l:
+        return file_name, 'volume_flow_missing', body
     if 'mass flow' in body_l and 'derived' in body_l:
         return file_name, 'mass_flow_derived', body
     if 'mass flow' in body_l:
@@ -519,6 +574,25 @@ def collapse_import_notices(raw_notices):
                 'message': (
                     f"{label}: mass flow not reported — derived from volume flow × {wording}."
                 ),
+            })
+        elif kind == 'volume_flow_derived':
+            match = _IMPORT_NOTICE_VOLUME_DENSITY_RE.search(bodies[0])
+            wording = match.group(1).strip() if match else 'density'
+            partly = any(b.lower().startswith('volume flow:') for b in bodies)
+            what = ("volume flow partly empty — gaps filled" if partly
+                    else "volume flow not reported — derived")
+            collapsed.append({
+                'category': 'warning',
+                'message': (
+                    f"{label}: {what} from measured mass flow ÷ {wording} × 3600 (m³/h); "
+                    "used for hydraulic power and the BAM pump correction. "
+                    "Prefer a measured volume flow when the lab has one."
+                ),
+            })
+        elif kind == 'volume_flow_missing':
+            collapsed.append({
+                'category': 'warning',
+                'message': f"{label}: {bodies[0]}",
             })
         elif kind == 'mass_flow_measured':
             collapsed.append({
@@ -1176,12 +1250,11 @@ def compute_single_column_value(df_filtered: pd.DataFrame, column_name: str) -> 
             return float(df_filtered['Q_HB'].mean())
         if column_name == 'avg_q_ba' and 'Q_BA' in df_filtered.columns:
             return float(df_filtered['Q_BA'].mean())
-        if column_name == 'avg_volume_flow' and 'volume flow' in df_filtered.columns:
-            return float(df_filtered['volume flow'].mean())
-        if column_name == 'avg_mass_flow':
-            # Same fallback as import: measured wins, empty or absent is derived
-            df_mass, _ = derive_mass_flow_if_needed(df_filtered.copy())
-            series = _numeric_series(df_mass, 'mass flow')
+        if column_name in ('avg_volume_flow', 'avg_mass_flow'):
+            # Same fallback as Apply: measured wins, empty or absent is derived
+            df_flow, _ = derive_mass_flow_if_needed(df_filtered.copy())
+            column = 'volume flow' if column_name == 'avg_volume_flow' else 'mass flow'
+            series = _numeric_series(df_flow, column)
             if series is None or not series.notna().any():
                 return None
             return float(series.mean())
