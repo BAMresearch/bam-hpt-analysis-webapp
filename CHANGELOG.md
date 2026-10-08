@@ -11,6 +11,7 @@ Version numbers match `flask_app/VERSION` and the `tool_version` column on summa
 
 ### Added
 
+- **Water-to-water heating source is stored.** `ecodesign_heating` gains a `water_water_source` block beside the letter grid (ground heat exchanger, source inlet 5 °C for every letter, 3 K inlet − outlet for variable source flow, no outlet setpoint), returned only for `water_water` profiles. Water-to-water profiles can set `source_flow_mode`, `source_flow_type` and `source_flow_set_value` on the Profiles page, separate from the sink flow fields. Nothing is scored or coloured
 - **Water-to-water and hybrid import maps.** The import notebook's **Template** dropdown now offers `hpt_ww_rev1` and `hpt_hybrid_rev1` beside air-to-water. Both read the sink side exactly like air-to-water. Water-to-water keeps the source loop under its own `_source` names and needs no outdoor air. Hybrid keeps `Heat input (at 15°C)` (gas fuel energy) as its own column; the other gas columns pass through. Gas is never added to electric power or heating capacity and never becomes a back-up heater column
 - **`Q_HP`, gas heat input and the source loop are stored as means** after Add to DB: `avg_q_hp`, `avg_gas_heat_input`, and `avg_t_in_source`, `avg_t_out_source`, `avg_volume_flow_source`, `avg_mass_flow_source`, `avg_density_source`, `avg_cp_in_source`, `avg_cp_out_source`, `avg_dp_source`. A file without the column stores n/a, never `0`. They are not scored and not part of COP. On Mean Values `Avg Q HP` is a main column; the gas and source means sit with the other monitoring means
 

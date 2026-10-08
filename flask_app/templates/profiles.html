@@ -126,6 +126,32 @@
             <input class="form-control" name="flow_set_value" type="number" step="any">
           </div>
         </div>
+        <div class="form-row" id="sourceFlowRow" style="display:none">
+          <div class="form-group col-md-3">
+            <label>source_flow_mode</label>
+            <select class="form-control" name="source_flow_mode">
+              <option value="">(not set)</option>
+              <option value="fixed">fixed</option>
+              <option value="variable">variable</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>source_flow_type</label>
+            <select class="form-control" name="source_flow_type">
+              <option value="">(none)</option>
+              <option value="volume">volume</option>
+              <option value="mass">mass</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>source_flow_set_value</label>
+            <input class="form-control" name="source_flow_set_value" type="number" step="any">
+          </div>
+          <div class="form-group col-md-3">
+            <label>Source (heating)</label>
+            <p class="form-control-plaintext small mb-0" id="sourceInfo"></p>
+          </div>
+        </div>
         <div class="form-row">
           <div class="form-group col-md-3">
             <label>default_climate</label>
@@ -259,6 +285,9 @@
     f.default_climate.value = p.default_climate || '';
     f.default_application.value = p.default_application || '';
     f.flow_mode.value = p.flow_mode || 'per_test';
+    f.source_flow_mode.value = p.source_flow_mode || '';
+    f.source_flow_type.value = p.source_flow_type || '';
+    f.source_flow_set_value.value = (p.source_flow_set_value != null) ? p.source_flow_set_value : '';
     f.wb_rule.value = p.wb_rule || 'db_minus_1k';
     f.owner.value = p.owner || '';
     f.filename_patterns.value = (p.filename_patterns || []).join(',');
@@ -268,11 +297,37 @@
     f.original_profile_id.value = p.profile_id || '';
     f.original_destination.value = f.destination.value;
     f.original_entry_count.value = (entryCount != null && entryCount !== '') ? String(entryCount) : '0';
+    updateSourceFlowRow();
+  }
+
+  // Water-to-water heating source: shown only for unit_type water_water. Inlet and
+  // variable-flow difference come from the condition set and are read-only here.
+  function updateSourceFlowRow() {
+    const f = document.getElementById('profileForm');
+    const isWW = f.unit_type.value === 'water_water';
+    document.getElementById('sourceFlowRow').style.display = isWW ? '' : 'none';
+    if (!isWW) return;
+    const doc = JSON.parse(document.getElementById('condDocJson').textContent);
+    const condId = JSON.parse(document.getElementById('condIdJson').textContent);
+    const block = (((doc.condition_sets || {})[condId] || {}).water_water_source) || {};
+    const bits = [];
+    if (block.t_in_source_set != null) bits.push('Source inlet ' + block.t_in_source_set + ' °C');
+    if (f.source_flow_mode.value === 'variable') {
+      if (block.delta_T_variable_source_flow != null) {
+        bits.push('variable flow: ' + block.delta_T_variable_source_flow + ' K inlet − outlet');
+      }
+      bits.push('no flow number stored');
+    }
+    document.getElementById('sourceInfo').textContent = bits.join('; ');
+    const fixed = f.source_flow_mode.value === 'fixed';
+    f.source_flow_type.disabled = !fixed;
+    f.source_flow_set_value.disabled = !fixed;
   }
 
   function resetProfileForm() {
     const f = document.getElementById('profileForm');
     f.reset();
+    updateSourceFlowRow();
     f.original_profile_id.value = '';
     f.original_destination.value = '';
     f.original_entry_count.value = '0';
@@ -288,6 +343,11 @@
 
   const btnNew = document.getElementById('btnNewProfile');
   if (btnNew) btnNew.addEventListener('click', resetProfileForm);
+
+  const profileFormEl = document.getElementById('profileForm');
+  profileFormEl.unit_type.addEventListener('change', updateSourceFlowRow);
+  profileFormEl.source_flow_mode.addEventListener('change', updateSourceFlowRow);
+  updateSourceFlowRow();
 
   document.getElementById('profileForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -332,6 +392,13 @@
       original_destination: (f.original_destination.value || f.destination.value),
       update_entries: updateEntries
     };
+    // Other unit types omit the source keys so a save does not clear them.
+    if (f.unit_type.value === 'water_water') {
+      const srcFixed = f.source_flow_mode.value === 'fixed';
+      payload.source_flow_mode = f.source_flow_mode.value;
+      payload.source_flow_type = srcFixed ? f.source_flow_type.value : '';
+      payload.source_flow_set_value = srcFixed ? f.source_flow_set_value.value : '';
+    }
     const resp = await fetch('/api/profiles', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

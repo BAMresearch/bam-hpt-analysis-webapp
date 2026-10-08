@@ -22,6 +22,13 @@
         "MT": 8.0,
         "HT": 10.0
       },
+      "water_water_source": {
+        "unit_types": ["water_water"],
+        "source_type": "ground_heat_exchanger",
+        "t_in_source_set": 5.0,
+        "delta_T_variable_source_flow": 3.0,
+        "note": "Water-to-water heating source side. Source inlet applies to every heating letter. Variable source flow uses the difference between source inlet and source outlet. Source outlet is not a setpoint."
+      },
       "conditions": {
         "Average": {
           "LT": {

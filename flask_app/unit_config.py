@@ -327,6 +327,73 @@ def resolve_climate_application(climate: Optional[str] = None,
     return clim, app
 
 
+# --- Water-to-water heating source -----------------------------------------
+
+SOURCE_FLOW_MODES = ('fixed', 'variable')
+SOURCE_FLOW_TYPES = ('volume', 'mass')
+
+
+def _is_water_water(profile: Optional[Dict[str, Any]]) -> bool:
+    return str((profile or {}).get('unit_type') or '').strip().lower() == 'water_water'
+
+
+def get_water_water_source_block(profile: Optional[Dict[str, Any]],
+                                 condition_set_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Source block of the condition set, only for a water_water profile.
+
+    It sits beside the climate × application × letter grid, not inside it.
+    """
+    if not _is_water_water(profile):
+        return None
+    block = get_condition_set(condition_set_id).get('water_water_source')
+    if not isinstance(block, dict):
+        return None
+    allowed = block.get('unit_types')
+    if allowed is not None and 'water_water' not in [str(t) for t in allowed]:
+        return None
+    return block
+
+
+def get_source_inlet_setpoint(profile: Optional[Dict[str, Any]],
+                              condition_set_id: Optional[str] = None) -> Optional[float]:
+    """Source inlet °C (same for every heating letter); None unless water_water."""
+    block = get_water_water_source_block(profile, condition_set_id)
+    if block is None or block.get('t_in_source_set') is None:
+        return None
+    return float(block['t_in_source_set'])
+
+
+def get_source_variable_delta_t(profile: Optional[Dict[str, Any]],
+                                condition_set_id: Optional[str] = None) -> Optional[float]:
+    """Source inlet − outlet difference (K) for variable source flow; None unless water_water."""
+    block = get_water_water_source_block(profile, condition_set_id)
+    if block is None or block.get('delta_T_variable_source_flow') is None:
+        return None
+    return float(block['delta_T_variable_source_flow'])
+
+
+def resolve_source_flow(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Source flow setting from the profile's source_flow_* keys.
+
+    Returns {mode, flow_type, flow_set_value}. mode is 'fixed', 'variable' or None
+    (not set). Only fixed mode carries a type and a value, either of which may be
+    None. Never reads the sink flow_type / flow_set_value.
+    """
+    out: Dict[str, Any] = {'mode': None, 'flow_type': None, 'flow_set_value': None}
+    if not _is_water_water(profile):
+        return out
+    mode = str(profile.get('source_flow_mode') or '').strip().lower()
+    if mode not in SOURCE_FLOW_MODES:
+        return out
+    out['mode'] = mode
+    if mode == 'fixed':
+        ft = str(profile.get('source_flow_type') or '').strip().lower()
+        out['flow_type'] = ft if ft in SOURCE_FLOW_TYPES else None
+        fv = profile.get('source_flow_set_value')
+        out['flow_set_value'] = float(fv) if fv not in (None, '') else None
+    return out
+
+
 # --- Unit types / checks ----------------------------------------------------
 
 def load_unit_types() -> Dict[str, Any]:

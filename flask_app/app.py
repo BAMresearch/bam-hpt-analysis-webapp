@@ -21735,12 +21735,12 @@ def api_profiles_save():
             return jsonify({'success': False, 'message': 'profile_id required'})
         new_id = str(data.get('profile_id')).strip()
         data['profile_id'] = new_id
-        for key in ('buh_power_cap_kw', 'pdesign_kw', 'flow_set_value'):
+        for key in ('buh_power_cap_kw', 'pdesign_kw', 'flow_set_value', 'source_flow_set_value'):
             if key in data and data[key] not in (None, ''):
                 data[key] = float(data[key])
             elif key in data and data[key] == '':
                 data[key] = None
-        for key in ('default_climate', 'default_application'):
+        for key in ('default_climate', 'default_application', 'source_flow_mode', 'source_flow_type'):
             if key in data and data[key] == '':
                 data[key] = None
         if isinstance(data.get('filename_patterns'), str):
