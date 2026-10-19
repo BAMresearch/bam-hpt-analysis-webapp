@@ -178,6 +178,12 @@
         <th colspan="6">H, equilibrium, evaluation</th>
         <th colspan="4">Entry means</th>
         <th colspan="4">Evaluation window means</th>
+        <!-- The pieces a spreadsheet combines. Pelec split of this page, not the
+             Period Statistics D1 / D2 (those are the two stored defrost spans). -->
+        <th colspan="5" title="The buffer immediately before H. Opens in the defrost: Pelec → Pelec + buffer. Opens after a defrost: start → start + buffer. Not Period Statistics D1.">D1 = buffer before H (Pelec split)</th>
+        <th colspan="5" title="The defrost body. Opens in the defrost: start → Pelec. Opens after a defrost: Pelec → end. A later defrost in the same row is not this D2. Not Period Statistics D2.">D2 = defrost body (Pelec split)</th>
+        <th colspan="5">Equilibrium window</th>
+        <th colspan="5">H window</th>
         <th colspan="12" id="gwIntervalGroup">H / eq / eval individual % (Interval H)</th>
         <th colspan="2" id="gwDGroup">D individual %</th>
         <th colspan="4" id="gwSGroup">S individual %</th>
@@ -196,6 +202,10 @@
         <th>H start</th><th>H end</th><th>eq start</th><th>eq end</th><th>eval start</th><th>eval end</th>
         <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
         <th>Tsup °C</th><th>Q kW</th><th>P kW</th><th>COP</th>
+        <th>D1pre s</th><th>D1pre Tsup °C</th><th>D1pre Q kW</th><th>D1pre P kW</th><th>D1pre COP</th>
+        <th>D2body s</th><th>D2body Tsup °C</th><th>D2body Q kW</th><th>D2body P kW</th><th>D2body COP</th>
+        <th>eq s</th><th>eq Tsup °C</th><th>eq Q kW</th><th>eq P kW</th><th>eq COP</th>
+        <th>H s</th><th>H Tsup °C</th><th>H Q kW</th><th>H P kW</th><th>H COP</th>
         <th id="gwHdrHDb">H DB %</th><th id="gwHdrEqDb">eq DB %</th><th id="gwHdrEvalDb">eval DB %</th>
         <th id="gwHdrHWb">H WB %</th><th id="gwHdrEqWb">eq WB %</th><th id="gwHdrEvalWb">eval WB %</th>
         <th id="gwHdrHFl">H flow %</th><th id="gwHdrEqFl">eq flow %</th><th id="gwHdrEvalFl">eval flow %</th>
@@ -433,11 +443,15 @@
     var limit = Number(d.limit_pct);
     var eqEnd = Number(d.eq_end);
     var cell = (r.eval_delta_cop == null) ? 'n/a' : Number(r.eval_delta_cop).toFixed(2) + ' %';
-    var note = 'Each point: one ' + d.eval_min + '-min window, (COP last − COP first) / COP first of its own first and last '
+    var note = 'Black line: each point one ' + d.eval_min + '-min window, (COP last − COP first) / COP first of its own first and last '
       + d.step_min + ' min, stepped by ' + d.step_min + ' min from the saved equilibrium end ('
       + gwSeconds(d.eq_end) + ' s) to the saved H end (' + gwSeconds(d.h_end) + ' s). '
       + 'Left axis: the corrected COP of each ' + d.step_min + '-min block, at the block end — '
       + 'the COP the percent is made from. '
+      + 'Blue line: ΔCOP of a growing interval that always starts at the saved equilibrium end — its first '
+      + d.step_min + ' min stay fixed, its last ' + d.step_min + ' min end at the point, from two slices to the H end. '
+      + 'At ' + d.eval_min + ' min it equals the first ' + d.eval_min + '-min point; after that the '
+      + d.eval_min + '-min window moves its first slice forward and the growing one does not. '
       + 'The eval ΔCOP cell stays the saved evaluation window: ' + cell + '.';
     if (r.eval_start != null && Math.abs(Number(r.eval_start) - eqEnd) > 0.5) {
       note += ' The saved evaluation does not start at the equilibrium end, so the first point is not the cell.';
@@ -475,12 +489,35 @@
       hovertemplate: 'COP %{y:.3f}<br>%{text}<extra></extra>',
       name: d.step_min + '-min corrected COP'
     };
-    plot.style.display = '';
-    Plotly.newPlot(plot, [copTrace, {
+    // Growing interval: first slice fixed at the equilibrium end, last slice
+    // ending at the point. Absent (not zeros) when no growing point has a value.
+    var grow = d.growing_points || [];
+    var growOk = grow.some(function (p) { return p.value_pct != null; });
+    var growTrace = {
+      x: grow.map(function (p) { return (Number(p.end) - eqEnd) / 60; }),
+      y: grow.map(function (p) { return p.value_pct; }),
+      text: grow.map(function (p) {
+        var w = 'growing ' + gwSeconds(p.start) + '–' + gwSeconds(p.end) + ' s';
+        if (p.value_pct == null) { return w + '<br>n/a: ' + (p.reason || ''); }
+        return w + '<br>COP first ' + Number(p.cop_first).toFixed(3)
+          + ', COP last ' + Number(p.cop_last).toFixed(3);
+      }),
+      type: 'scatter', mode: 'lines+markers', yaxis: 'y2', connectgaps: false,
+      marker: { size: 7, color: grow.map(function (p) {
+        return (p.value_pct != null && p.value_pct < -limit) ? '#c0392b' : '#1f6fb2';
+      }) },
+      line: { color: '#1f6fb2', width: 2 },
+      hovertemplate: '%{y:.2f} %<br>%{text}<extra></extra>',
+      name: 'ΔCOP, growing from equilibrium end'
+    };
+    var traces = [copTrace, {
       x: x, y: y, text: text, type: 'scatter', mode: 'lines+markers', yaxis: 'y2',
       connectgaps: false, marker: { color: colors, size: 10 }, line: { color: '#000000', width: 3 },
-      hovertemplate: '%{y:.2f} %<br>%{text}<extra></extra>', name: 'ΔCOP'
-    }], {
+      hovertemplate: '%{y:.2f} %<br>%{text}<extra></extra>', name: 'ΔCOP, ' + d.eval_min + '-min window'
+    }];
+    if (growOk) { traces.push(growTrace); }
+    plot.style.display = '';
+    Plotly.newPlot(plot, traces, {
       margin: { l: 60, r: 70, t: 20, b: 50 }, showlegend: true,
       legend: { orientation: 'h', x: 0, y: 1.02, yanchor: 'bottom' },
       xaxis: { title: 'block / window end, min after the saved equilibrium end' },
@@ -626,6 +663,15 @@
       tr.appendChild(gwCell(gwValue(r.eval_q, 3), 'gw-num'));
       tr.appendChild(gwCell(gwValue(r.eval_p, 3), 'gw-num'));
       tr.appendChild(gwCell(gwValue(r.eval_cop, 3), 'gw-num'));
+      // D1 / D2 (Pelec split), equilibrium, H: an empty piece is n/a with its reason.
+      var pieceR = r.piece_reasons || {};
+      ['d1pre', 'd2body', 'eq', 'h'].forEach(function (slot) {
+        [['dur_s', 0], ['tsup', 2], ['q', 3], ['p', 3], ['cop', 3]].forEach(function (q) {
+          var v = r['piece_' + slot + '_' + q[0]];
+          tr.appendChild((v === null || v === undefined)
+            ? gwNa(pieceR[slot] || 'no value') : gwCell(gwValue(v, q[1]), 'gw-num'));
+        });
+      });
       tr.appendChild(gwPctCell(r.h_db_pct, dbR.h, 'db'));
       tr.appendChild(gwPctCell(r.eq_db_pct, dbR.eq, 'db'));
       tr.appendChild(gwPctCell(r.eval_db_pct, dbR.eval, 'db'));

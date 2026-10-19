@@ -12882,6 +12882,13 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     ('parent_p', 'parent_P_kW'), ('parent_cop', 'parent_COP'),
     ('eval_tsup', 'eval_Tsup_C'), ('eval_q', 'eval_Q_kW'),
     ('eval_p', 'eval_P_kW'), ('eval_cop', 'eval_COP'),
+    # The pieces a spreadsheet combines. D1bufferBeforeH / D2defrostBody are the
+    # Pelec split of this page, not Period Statistics D1 / D2 (the stored spans).
+    *[(f'piece_{slot}_{qty}', f'{label}_{unit}')
+      for slot, label in (('d1pre', 'D1bufferBeforeH'), ('d2body', 'D2defrostBody'),
+                          ('eq', 'eq'), ('h', 'H'))
+      for qty, unit in (('dur_s', 'duration_s'), ('tsup', 'Tsup_C'), ('q', 'Q_kW'),
+                        ('p', 'P_kW'), ('cop', 'COP'))],
     ('h_db_pct', 'H_DB_pct'), ('eq_db_pct', 'eq_DB_pct'), ('eval_db_pct', 'eval_DB_pct'),
     ('h_wb_pct', 'H_WB_pct'), ('eq_wb_pct', 'eq_WB_pct'), ('eval_wb_pct', 'eval_WB_pct'),
     ('h_flow_pct', 'H_flow_pct'), ('eq_flow_pct', 'eq_flow_pct'), ('eval_flow_pct', 'eval_flow_pct'),
@@ -13529,6 +13536,21 @@ GUIDELINE_DELTA_COP_AUDIT_KEYS = (
     'delta_cop_last_start', 'delta_cop_last_end',
 )
 
+# The pieces of one cycle that a spreadsheet combines: duration, Tsup, Q, P and
+# COP on each, the same quantities as the evaluation means. ``d1pre`` is the
+# buffer right before H and ``d2body`` the defrost body, both split from the
+# parent edges and the Pelec transition — **not** Period Statistics D1 / D2,
+# which are the two stored defrost spans. The tool never adds the pieces up.
+GUIDELINE_PIECE_SLOTS = ('d1pre', 'd2body', 'eq', 'h')
+GUIDELINE_PIECE_QUANTITIES = ('dur_s', 'tsup', 'q', 'p', 'cop')
+GUIDELINE_PIECE_VALUE_KEYS = tuple(
+    f'piece_{slot}_{qty}' for slot in GUIDELINE_PIECE_SLOTS for qty in GUIDELINE_PIECE_QUANTITIES)
+# A payload stored before the pieces existed has no ``piece_reasons``. Its other
+# numbers are still good, so the row keeps them and only the piece cells are n/a.
+GUIDELINE_PIECES_MISSING_REASON = (
+    'scores were stored before the piece means existed — use Compute missing scores on this page'
+)
+
 GUIDELINE_SCORE_VALUE_KEYS = (
     'eval_tsup', 'eval_q', 'eval_p', 'eval_cop',
     'h_dtreturn_pct', 'eq_dtreturn_pct', 'eval_dtreturn_pct',
@@ -13541,12 +13563,12 @@ GUIDELINE_SCORE_VALUE_KEYS = (
     'd_mean_db_k', 'd_mean_wb_k',
     's_mean_db_k', 's_mean_wb_k', 's_mean_flow_pct',
     'eval_delta_cop',
-) + GUIDELINE_DELTA_COP_AUDIT_KEYS
+) + GUIDELINE_DELTA_COP_AUDIT_KEYS + GUIDELINE_PIECE_VALUE_KEYS
 # The hover text beside those numbers. Stored with them, so an n/a cell keeps
 # saying *why* it is empty after a restart instead of turning into a bare blank.
 GUIDELINE_SCORE_REASON_KEYS = (
     'dtreturn_reasons', 'db_reasons', 'wb_reasons', 'flow_reasons', 'd_reasons', 's_reasons',
-    'h_mean_reasons', 'd_mean_reasons', 's_mean_reasons',
+    'h_mean_reasons', 'd_mean_reasons', 's_mean_reasons', 'piece_reasons',
 )
 GUIDELINE_SCORE_TEXT_KEYS = ('delta_cop_reason', 'note')
 
@@ -13831,8 +13853,21 @@ def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=No
     row['s_reasons'] = {k: reason for k in ('db', 'wb', 'flow', 'dtreturn')}
     for iv in ('H', 'D', 'S'):
         row[MEAN_DEV_REASON_KEYS[iv]] = _mean_dev_reason_defaults(iv, reason)
+    row['piece_reasons'] = {slot: reason for slot in GUIDELINE_PIECE_SLOTS}
     row['delta_cop_reason'] = reason
     row['scores_cached'] = False
+
+
+def _guideline_payload_has_pieces(payload) -> bool:
+    """True when a cached payload was written after the piece means existed."""
+    return isinstance((payload or {}).get('piece_reasons'), dict)
+
+
+def _guideline_pieces_missing(row, reason=GUIDELINE_PIECES_MISSING_REASON) -> None:
+    """Only the piece cells n/a with one reason; every other stored number stays."""
+    for k in GUIDELINE_PIECE_VALUE_KEYS:
+        row[k] = None
+    row['piece_reasons'] = {slot: reason for slot in GUIDELINE_PIECE_SLOTS}
 
 
 def _guideline_cop_dataset(entry) -> str:
@@ -13927,6 +13962,10 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         # The audit trail of that one %: both slice COPs and the seconds they
         # were read over. Hover and CSV read them; the table has no column.
         **{k: None for k in GUIDELINE_DELTA_COP_AUDIT_KEYS},
+        # D1 (buffer before H), D2 (defrost body), equilibrium and H: duration,
+        # Tsup, Q, P, COP each, for the spreadsheet. Filled with the eval means.
+        **{k: None for k in GUIDELINE_PIECE_VALUE_KEYS},
+        'piece_reasons': {},
         'dtreturn_reasons': {}, 'db_reasons': {}, 'wb_reasons': {}, 'flow_reasons': {},
         'd_reasons': {}, 's_reasons': {},
         'h_mean_reasons': _mean_dev_reason_defaults('H'),
@@ -13990,6 +14029,122 @@ def _apply_delta_cop_audit(row, delta_cop) -> None:
         window = delta_cop.get(f'{side}_window') or (None, None)
         row[f'delta_cop_{side}_start'] = _guideline_num(window[0])
         row[f'delta_cop_{side}_end'] = _guideline_num(window[1])
+
+
+def _defrost_piece_spans(begins_in, start, end, pelec, buffer_s):
+    """``({'d1pre': (s, e) | None, 'd2body': ...}, {slot: reason})`` of one defrost parent.
+
+    D1 is the ``buffer_s`` immediately before heating, D2 the defrost body. Both
+    come from the parent edges and the Pelec transition alone — a second stored
+    defrost span is never read as this D2.
+
+    * opens in the defrost (``begins_in`` ``'ds'``): D2 = start → Pelec,
+      D1 = Pelec → Pelec + buffer. Both sit inside the opening span.
+    * opens when a defrost has just finished (``'h'``): D1 = start → start +
+      buffer, D2 = Pelec → end, Pelec being the start of the closing defrost.
+
+    No Pelec, no marker, or an edge outside the parent: that piece is None with
+    a reason. Never a zero-length span standing in for a missing one.
+    """
+    spans = {'d1pre': None, 'd2body': None}
+    start, end, pelec = _guideline_num(start), _guideline_num(end), _guideline_num(pelec)
+    buffer_s = _guideline_num(buffer_s)
+    if start is None or end is None or end <= start:
+        return spans, {k: 'the parent has no start / end' for k in spans}
+    if pelec is None:
+        return spans, {k: 'no Pelec transition time is stored on this entry' for k in spans}
+    if begins_in == 'ds':
+        cand = {'d2body': (start, pelec), 'd1pre': (pelec, pelec + (buffer_s or 0.0))}
+    elif begins_in == 'h':
+        cand = {'d1pre': (start, start + (buffer_s or 0.0)), 'd2body': (pelec, end)}
+    else:
+        return spans, {k: 'no defrost_start / defrost_end marker is stored on this entry'
+                       for k in spans}
+    why = {}
+    eps = 1e-6
+    for slot, (s, e) in cand.items():
+        if e <= s:
+            why[slot] = f'empty ({s:.0f} → {e:.0f} s)'
+        elif s < start - eps or e > end + eps:
+            why[slot] = f'{s:.0f} → {e:.0f} s lies outside the parent {start:.0f} → {end:.0f} s'
+        else:
+            spans[slot] = (s, e)
+            why[slot] = ''
+    return spans, why
+
+
+def _guideline_window_quantities(df_sheet, df_full, file_name, start, end,
+                                 lab_corr_missing, prep_reason):
+    """``({'tsup', 'q', 'p', 'cop'}, reason)`` on one window — the evaluation means' path.
+
+    ``analysis_window_means`` plus the BUH-corrected fields, read through the
+    same deviation getters as the evaluation columns, so COP is mean Q over
+    mean P. The stored-series fallback is the evaluation one as well.
+    """
+    vals = {'tsup': None, 'q': None, 'p': None, 'cop': None}
+    means = None
+    if df_sheet is not None:
+        means = _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing)
+    if means is not None:
+        vals['tsup'] = _guideline_num(get_mean_supply_for_deviations(means))
+        vals['q'] = _guideline_num(get_mean_q_for_deviations(means))
+        vals['p'] = _guideline_num(get_mean_p_for_deviations(means))
+        vals['cop'] = _guideline_num(get_mean_cop_for_deviations(means))
+    else:
+        stats = _period_stats_from_df(df_full, start, end)
+        vals['tsup'] = _guideline_num(stats.get('avg_ts_buh'))
+        vals['q'] = _guideline_num(stats.get('avg_q_corr_wbuh'))
+        vals['p'] = _guideline_num(stats.get('avg_p_corr_wbuh'))
+        vals['cop'] = _guideline_num(stats.get('avg_cop_corr_wbuh'))
+    if all(v is None for v in vals.values()):
+        return vals, 'the sheet holds no values in this window'
+    if any(vals[k] is None for k in ('q', 'p', 'cop')):
+        return vals, (f"Q / P / COP need the entry's own quantities: {prep_reason}"
+                      if prep_reason else 'Q / P / COP could not be computed on this window')
+    return vals, ''
+
+
+def _apply_guideline_pieces(row, parent, df_sheet, df_full, file_name,
+                            lab_corr_missing, prep_reason, buffer_s) -> None:
+    """Fill D1 / D2 / equilibrium / H duration, Tsup, Q, P, COP on a scored row.
+
+    D1 and D2 exist on a defrost cycle only; equilibrium and H come from the
+    saved clocks. Every empty piece is None with a reason in ``piece_reasons``.
+    """
+    reasons = {}
+    spans = {'eq': None, 'h': None}
+    for slot in ('eq', 'h'):
+        s, e = row.get(f'{slot}_start'), row.get(f'{slot}_end')
+        if s is not None and e is not None and e > s:
+            spans[slot] = (float(s), float(e))
+        else:
+            reasons[slot] = ('no equilibrium window is saved' if slot == 'eq'
+                             else 'no H window is saved')
+    if row.get('kind') == 'defrost':
+        d_spans, d_why = _defrost_piece_spans(
+            _begins_in_from_marker((parent or {}).get('cycle_start_marker')),
+            row.get('start_time'), row.get('end_time'),
+            (parent or {}).get('pelec_transition_time'), buffer_s)
+        spans.update(d_spans)
+        reasons.update({k: v for k, v in d_why.items() if v})
+    else:
+        why = 'on–off cycle — no D1 / D2' if row.get('kind') == 'on_off' else 'not a defrost cycle'
+        spans.update({'d1pre': None, 'd2body': None})
+        reasons.update({'d1pre': why, 'd2body': why})
+
+    for slot in GUIDELINE_PIECE_SLOTS:
+        for qty in GUIDELINE_PIECE_QUANTITIES:
+            row[f'piece_{slot}_{qty}'] = None
+        span = spans.get(slot)
+        if span is None:
+            continue
+        row[f'piece_{slot}_dur_s'] = _guideline_num(span[1] - span[0])
+        vals, why = _guideline_window_quantities(
+            df_sheet, df_full, file_name, span[0], span[1], lab_corr_missing, prep_reason)
+        for qty, val in vals.items():
+            row[f'piece_{slot}_{qty}'] = val
+        reasons[slot] = why
+    row['piece_reasons'] = {slot: str(reasons.get(slot) or '') for slot in GUIDELINE_PIECE_SLOTS}
 
 
 def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
@@ -14091,6 +14246,9 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                 s_means = _mean_dev_na('S', 'not an on–off cycle')
             _apply_mean_devs(row, 'S', s_means)
 
+            _apply_guideline_pieces(row, parent, df_sheet, df_full, file_name,
+                                    lab_corr_missing, prep_reason, _guideline_buffer_s())
+
             row['scores_cached'] = True
             if ev is None:
                 row['delta_cop_reason'] = 'no evaluation window is saved'
@@ -14191,6 +14349,115 @@ def _guideline_scores_for_entries(entries, periods_by_rowid, sheets=None):
         for row, _ev, _windows in items:
             payloads[int(row['rowid'])] = _guideline_score_payload_from_row(row)
     return payloads, failed
+
+
+def _guideline_piece_payloads(entries, periods_by_rowid, cached, sheets=None):
+    """``({rowid: payload}, failures)``: add the piece means to payloads stored before them.
+
+    Only the piece keys are written into the existing payload; every other
+    number in it — eval ΔCOP included — is kept exactly as stored, and the
+    fingerprint does not move because the clocks did not.
+    """
+    lengths = _guideline_lengths()
+    buffer_s = _guideline_buffer_s()
+    by_sheet, failed, payloads = {}, [], {}
+    for entry in entries:
+        rid = int(entry['rowid'])
+        periods = sorted(periods_by_rowid.get(rid) or [],
+                         key=lambda p: (float(p['start_time']), str(p['period_type'])))
+        row, _ev, _dt, wants = _guideline_row_base(entry, periods, lengths)
+        if wants and rid in cached:
+            by_sheet.setdefault((row['file_name'], row['data_set']), []).append((row, entry))
+
+    import io
+    import contextlib
+    for (file_name, data_set), items in by_sheet.items():
+        df_full = (sheets or {}).get(_sheet_cache_key(file_name, data_set))
+        if df_full is None:
+            df_full = _read_excel_sheet(file_name, data_set)
+        if df_full is None:
+            failed.append((file_name, data_set, 'the sheet could not be read'))
+            continue
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                df_sheet, lab_corr_missing, prep_reason = _prepare_sheet_for_analysis(df_full, file_name)
+                for row, entry in items:
+                    _apply_guideline_pieces(row, _entry_with_hp_id(entry), df_sheet, df_full,
+                                            file_name, lab_corr_missing, prep_reason, buffer_s)
+        except Exception as exc:
+            failed.append((file_name, data_set, str(exc)))
+            continue
+        for row, _entry in items:
+            rid = int(row['rowid'])
+            body = dict(cached[rid])
+            body.update({k: _guideline_num(row.get(k)) for k in GUIDELINE_PIECE_VALUE_KEYS})
+            body['piece_reasons'] = {str(a): str(b or '') for a, b in row['piece_reasons'].items()}
+            payloads[rid] = body
+    return payloads, failed
+
+
+def _guideline_stale_period_sql(alias: str = 'cycle_periods') -> str:
+    """Saved guideline periods whose Period Statistics Q / P / COP must be rewritten.
+
+    An older mean-stat schema, or a current one that still holds an empty Q, P
+    or COP — the raw-column read that left Period Statistics showing dashes.
+    """
+    return (f"{alias}.detection_method=? AND {alias}.buffer_s=? AND ("
+            f"COALESCE({alias}.period_stats_schema, 0) < {PERIOD_STATS_SCHEMA} "
+            f"OR {alias}.avg_q_corr_wbuh IS NULL OR {alias}.avg_p_corr_wbuh IS NULL "
+            f"OR {alias}.avg_cop_corr_wbuh IS NULL)")
+
+
+def _refresh_stale_guideline_periods(file_name, rowids, buffer_s, sheets=None):
+    """Rewrite the stale period caches of these parents. ``(n refreshed, failures)``.
+
+    Same calculation as Save and Apply. Clock times are read, never written.
+    Every sheet it reads is left in ``sheets`` so the scoring after it reuses it.
+    """
+    ids = sorted({int(r) for r in rowids or []})
+    if not ids:
+        return 0, []
+    conn = get_db_connection()
+    try:
+        stale = []
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            ph = ','.join(['?'] * len(chunk))
+            stale.extend(dict(r) for r in conn.execute(
+                "SELECT cp.id, cp.start_time, cp.end_time, r.data_set FROM cycle_periods cp "
+                "JOIN results r ON r.rowid = cp.entry_rowid "
+                f"WHERE cp.entry_rowid IN ({ph}) AND {_guideline_stale_period_sql('cp')}",
+                chunk + [GUIDELINE_DETECTION_METHOD, int(buffer_s)]).fetchall())
+    finally:
+        conn.close()
+    if not stale:
+        return 0, []
+
+    by_ds, failed, n = {}, [], 0
+    for p in stale:
+        by_ds.setdefault(p['data_set'], []).append(p)
+    for data_set, group in by_ds.items():
+        key = _sheet_cache_key(file_name, data_set)
+        df_full = (sheets or {}).get(key)
+        if df_full is None:
+            df_full = _read_excel_sheet(file_name, data_set)
+            if df_full is not None and sheets is not None:
+                sheets[key] = df_full
+        if df_full is None:
+            failed.append((file_name, data_set, 'the sheet could not be read for Period Statistics'))
+            continue
+        conn = get_db_connection()
+        try:
+            for p in group:
+                _refresh_cycle_period_row_stats(conn, int(p['id']), df_full,
+                                                float(p['start_time']), float(p['end_time']))
+                n += 1
+            conn.commit()
+        except Exception as exc:
+            failed.append((file_name, data_set, str(exc)))
+        finally:
+            conn.close()
+    return n, failed
 
 
 def _store_scores_for_parents(rowids, sheets=None):
@@ -14379,7 +14646,12 @@ def _guideline_window_rows(rowids=None) -> dict:
             hit = cached.get(rid)
             if hit and hit[0] == _guideline_score_fingerprint(stored.get(rid, []), buffer_s):
                 _apply_guideline_score_payload(row, hit[1])
-                n_scored += 1
+                if _guideline_payload_has_pieces(hit[1]):
+                    n_scored += 1
+                else:
+                    # Stored before the pieces: keep its numbers, piece cells n/a.
+                    _guideline_pieces_missing(row)
+                    n_missing += 1
             else:
                 _guideline_scores_missing(row, ev=ev)
                 n_missing += 1
@@ -14592,7 +14864,8 @@ def api_guideline_windows_delta_cop_trace():
         else:
             no_trace = ''
         if no_trace:
-            return jsonify({**base, 'points': [], 'cop_points': [], 'reason': no_trace,
+            return jsonify({**base, 'points': [], 'cop_points': [], 'growing_points': [],
+                            'reason': no_trace,
                             'eval_min': lengths['eval_min'],
                             'step_min': cfg['delta_cop_slice_min'],
                             'limit_pct': cfg['delta_cop_pct'],
@@ -14635,6 +14908,11 @@ def api_guideline_windows_score_files():
             ).fetchall()
             stored = _guideline_periods_by_rowid(conn, None, buffer_s)
             cached = _load_guideline_scores(conn, None)
+            # Parents whose Period Statistics Q / P / COP still need the rewrite.
+            stale_periods = {int(x[0]) for x in conn.execute(
+                "SELECT DISTINCT entry_rowid FROM cycle_periods "
+                f"WHERE {_guideline_stale_period_sql()}",
+                (GUIDELINE_DETECTION_METHOD, buffer_s)).fetchall()}
         finally:
             conn.close()
 
@@ -14649,7 +14927,8 @@ def api_guideline_windows_score_files():
                                                     'n_missing': 0})
             f['n_with_clocks'] += 1
             hit = cached.get(rid)
-            if hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s):
+            if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
+                    and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -14681,8 +14960,11 @@ def api_guideline_windows_compute_scores():
     clock batch, so the browser can show ``file i of n`` and one unreadable
     sheet stops that file only.
 
-    It writes the cache and nothing else: no proposal, no clock, no ``results``
-    column, no ``entry_interval_deviations`` row. It never runs on page load,
+    It writes the cache and the stale Period Statistics Q / P / COP of saved
+    guideline periods, nothing else: no proposal, no clock time, no ``results``
+    column, no ``entry_interval_deviations`` row. A payload stored before the
+    piece means gets those added and keeps every other number, eval ΔCOP
+    included. It never runs on page load,
     and the page's own auto-load never turns into it — a parent with no cache
     row shows n/a until the analyst asks for this.
 
@@ -14710,24 +14992,39 @@ def api_guideline_windows_compute_scores():
         finally:
             conn.close()
 
-        todo, skipped = [], 0
+        todo, pieces_todo, skipped = [], [], 0
+        with_clocks = []
         for entry in entries:
             rid = int(entry['rowid'])
             periods = stored.get(rid)
             if not periods:
                 continue            # no saved clocks on this parent
+            with_clocks.append(rid)
             if not recompute:
                 hit = cached.get(rid)
                 if hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s):
-                    skipped += 1
+                    if _guideline_payload_has_pieces(hit[1]):
+                        skipped += 1
+                    else:
+                        # Stored before the piece means: add those, keep the rest.
+                        pieces_todo.append(entry)
                     continue
             todo.append(entry)
 
-        if not todo:
-            return jsonify({'success': True, 'file_name': file_name, 'computed': 0,
-                            'skipped': skipped, 'failed': [], 'buffer_s': buffer_s})
+        # Period Statistics Q / P / COP on the same file, before the score cache.
+        # One read per sheet for both steps.
+        sheets = {}
+        n_periods, failed = _refresh_stale_guideline_periods(file_name, with_clocks, buffer_s, sheets)
 
-        payloads, failed = _guideline_scores_for_entries(todo, stored)
+        payloads = {}
+        if todo:
+            payloads, more_failed = _guideline_scores_for_entries(todo, stored, sheets)
+            failed += more_failed
+        if pieces_todo:
+            piece_payloads, more_failed = _guideline_piece_payloads(
+                pieces_todo, stored, {rid: hit[1] for rid, hit in cached.items()}, sheets)
+            payloads.update(piece_payloads)
+            failed += more_failed
         if payloads:
             conn = get_db_connection()
             try:
@@ -14744,6 +15041,7 @@ def api_guideline_windows_compute_scores():
             'file_name': file_name,
             'computed': len(payloads),
             'skipped': skipped,
+            'periods_refreshed': n_periods,
             'failed': [f'{f} — {why}' for f, _ds, why in failed],
             'buffer_s': buffer_s,
         })
@@ -15243,20 +15541,82 @@ def _period_stats_from_df(df_full, stf: float, etf: float) -> dict:
     return out
 
 
-def _period_cache_values(df_full, stf: float, etf: float):
-    """Combined dTreturn + operating-point caches for one period window."""
+# One prepared sheet, reused while Save / Apply / the backfill walk the periods
+# of the same frame. The frame itself is held, so its id cannot be recycled.
+_period_prep_memo = None
+
+
+def _period_prepared_sheet(df_full, file_name):
+    """``(prepared sheet, lab-corr flag, reason)`` for this frame, prepared once."""
+    global _period_prep_memo
+    memo = _period_prep_memo
+    if memo is not None and memo[0] is df_full and memo[1] == file_name:
+        return memo[2]
+    prepared = _prepare_sheet_for_analysis(df_full, file_name)
+    _period_prep_memo = (df_full, file_name, prepared)
+    return prepared
+
+
+def _period_qpc_from_analysis(df_full, file_name, stf: float, etf: float) -> dict:
+    """Period Q, P and COP the way the evaluation means get them, or {} if not possible.
+
+    Plotdaten carries no QCorrwBUH / PCorrwBUH / COPCorrwBUH series, so the raw
+    column read left these cells empty; ``analysis_window_means`` plus the
+    BUH-corrected fields does not need them. COP is mean Q over mean P.
+    """
+    if not file_name or df_full is None:
+        return {}
+    import io
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        df_sheet, lab_corr_missing, _reason = _period_prepared_sheet(df_full, file_name)
+        if df_sheet is None:
+            return {}
+        means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing)
+    if means is None:
+        return {}
+    out = {
+        'avg_q_corr_wbuh': _guideline_num(get_mean_q_for_deviations(means)),
+        'avg_p_corr_wbuh': _guideline_num(get_mean_p_for_deviations(means)),
+        'avg_cop_corr_wbuh': _guideline_num(get_mean_cop_for_deviations(means)),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _period_cache_values(df_full, stf: float, etf: float, file_name=None):
+    """Combined dTreturn + operating-point caches for one period window.
+
+    With ``file_name`` the Q / P / COP come from the analysis-time means (the
+    evaluation columns' calculation); the raw-column read stays the fallback.
+    """
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg = _dtreturn_stats_from_df(
         df_full, stf, etf
     )
     pst = _period_stats_from_df(df_full, stf, etf)
+    pst.update(_period_qpc_from_analysis(df_full, file_name, stf, etf))
     return n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst
+
+
+def _period_parent_file_name(conn, entry_rowid=None, period_id=None):
+    """The parent's ``file_name`` for a period row, or None."""
+    try:
+        if period_id is not None:
+            r = conn.execute(
+                "SELECT r.file_name FROM cycle_periods cp JOIN results r ON r.rowid = cp.entry_rowid "
+                "WHERE cp.id=?", (int(period_id),)).fetchone()
+        else:
+            r = conn.execute("SELECT file_name FROM results WHERE rowid=?",
+                             (int(entry_rowid),)).fetchone()
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    return r[0] if r is not None else None
 
 
 def _insert_cycle_period_row(conn, rid, p, df_full, detection_method: str, buffer_s: int) -> None:
     """Insert one cycle_periods row with dTreturn and mean-value caches."""
     stf, etf = float(p['start_time']), float(p['end_time'])
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst = _period_cache_values(
-        df_full, stf, etf
+        df_full, stf, etf, _period_parent_file_name(conn, entry_rowid=rid)
     )
     conn.execute(
         "INSERT INTO cycle_periods "
@@ -15280,7 +15640,7 @@ def _insert_cycle_period_row(conn, rid, p, df_full, detection_method: str, buffe
 def _refresh_cycle_period_row_stats(conn, period_id: int, df_full, stf: float, etf: float) -> None:
     """Recompute cached stats for an existing cycle_periods row."""
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst = _period_cache_values(
-        df_full, stf, etf
+        df_full, stf, etf, _period_parent_file_name(conn, period_id=period_id)
     )
     conn.execute(
         "UPDATE cycle_periods SET dtreturn_n_valid=?, dtreturn_n_nan=?, dtreturn_sample=?, "
@@ -16643,10 +17003,13 @@ def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, 
     added when the step does not land there. ``sheets`` is shared, so the sheet
     is read once. Nothing is stored, and the saved evaluation cell is not
     touched. Too little H after equilibrium gives no points, never zeros.
+
+    ``growing_points`` is the second ΔCOP line: see ``_interval_delta_cop_growing``.
+    It comes only with the walking windows, so a no-trace row still opens no sheet.
     """
     eval_s = float(lengths['eval_s'])
     step_s = cfg['delta_cop_slice_min'] * 60.0
-    out = {'points': [], 'reason': '', 'eq_end': _guideline_num(eq_end),
+    out = {'points': [], 'growing_points': [], 'reason': '', 'eq_end': _guideline_num(eq_end),
            'h_end': _guideline_num(h_end), 'eval_min': lengths['eval_min'],
            'step_min': cfg['delta_cop_slice_min'], 'limit_pct': cfg['delta_cop_pct']}
     eq_end, h_end = out['eq_end'], out['h_end']
@@ -16675,7 +17038,39 @@ def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, 
             'reason': dc.get('reason') or '',
         })
     out['cop_points'] = _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets)
+    out['growing_points'] = _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets)
     return out
+
+
+def _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets) -> list:
+    """ΔCOP of a growing interval ``[eq_end, E]``, E walking from two slices to ``h_end``.
+
+    Each point is ``_interval_delta_cop`` on ``[eq_end, E]``: the first slice
+    stays ``[eq_end, eq_end + slice]`` and the last slice is ``[E − slice, E]``.
+    Ends step by ``delta_cop_slice_min`` from ``eq_end + 2·slice``, plus a last
+    end exactly at ``h_end`` when the step does not land there. At
+    ``E = eq_end + eval_min`` it equals the first point of the walking window.
+    Less than two slices of H after equilibrium gives no points, never zeros.
+    Read-only; ``sheets`` is shared.
+    """
+    slice_s = cfg['delta_cop_slice_min'] * 60.0
+    if slice_s <= 0 or h_end - eq_end < 2.0 * slice_s:
+        return []
+    n_steps = int(np.floor((h_end - eq_end) / slice_s + 1e-9))
+    ends = [eq_end + k * slice_s for k in range(2, n_steps + 1)]
+    if h_end - ends[-1] > 1e-6:
+        ends.append(h_end)
+    points = []
+    for end in ends:
+        dc = _interval_delta_cop(file_name, data_set, eq_end, end, cfg, sheets)
+        points.append({
+            'start': eq_end, 'end': end,
+            'value_pct': _guideline_num(dc.get('value_pct')),
+            'cop_first': _guideline_num(dc.get('cop_first')),
+            'cop_last': _guideline_num(dc.get('cop_last')),
+            'reason': dc.get('reason') or '',
+        })
+    return points
 
 
 def _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets) -> list:
