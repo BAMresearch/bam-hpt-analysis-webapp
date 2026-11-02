@@ -262,7 +262,7 @@
     },
     "ecodesign_cooling_fan_coil": {
       "display_name": "Ecodesign cooling – fan coil",
-      "description": "Fan-coil cooling, one outdoor grid, water outlet setpoints (tsup_set). Not scored.",
+      "description": "Fan-coil cooling, one outdoor grid: outdoor dry-bulb (tdb_set) and water outlet (tsup_set) are stored per letter. Wet-bulb is not stored.",
       "conditions": {
         "A": {
           "tdb_set": 35.0,

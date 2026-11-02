@@ -5334,14 +5334,14 @@ def calculate_derived_columns_for_entry(cursor, rowid):
                             # If value is None, check if it's a setpoint column that we can calculate
                             if key == 'dev_tsup_setpoint' and test_condition:
                                 # Calculate tsup_setpoint on-the-fly if missing
-                                calculated_value = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                calculated_value = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                 eval_context[key] = calculated_value
                                 normalized = key.lower().replace(' ', '_')
                                 if normalized not in eval_context:
                                     eval_context[normalized] = calculated_value
                             elif key == 'dev_db_setpoint' and test_condition:
                                 # Calculate db_setpoint on-the-fly if missing
-                                calculated_value = unit_config.get_tdb_setpoint_for(test_condition)
+                                calculated_value = _formula_db_setpoint_fill(entry_dict, test_condition)
                                 if calculated_value is not None:
                                     eval_context[key] = float(calculated_value)
                                     normalized = key.lower().replace(' ', '_')
@@ -5354,7 +5354,7 @@ def calculate_derived_columns_for_entry(cursor, rowid):
                                         eval_context[normalized] = None
                             elif key == 'dev_wb_setpoint' and test_condition:
                                 # Calculate wb_setpoint on-the-fly if missing (db_setpoint - 1)
-                                db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+                                db_setpoint = _formula_wb_dry_bulb(entry_dict, test_condition)
                                 if db_setpoint is not None:
                                     calculated_value = db_setpoint - 1
                                     eval_context[key] = float(calculated_value)
@@ -5384,13 +5384,13 @@ def calculate_derived_columns_for_entry(cursor, rowid):
                                     else:
                                         # Try calculating if we have test_condition
                                         if key == 'dev_tsup_setpoint' and test_condition:
-                                            eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                            eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                         else:
                                             eval_context[key] = None
                                 else:
                                     # Try calculating if we have test_condition
                                     if key == 'dev_tsup_setpoint' and test_condition:
-                                        eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                        eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                     else:
                                         eval_context[key] = None
                             except:
@@ -6416,16 +6416,16 @@ def calculate_derived_column():
                             else:
                                 # If value is None, check if it's a setpoint column that we can calculate
                                 if key == 'dev_tsup_setpoint' and test_condition:
-                                    calculated_value = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                    calculated_value = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                     eval_context[key] = calculated_value
                                 elif key == 'dev_db_setpoint' and test_condition:
-                                    calculated_value = unit_config.get_tdb_setpoint_for(test_condition)
+                                    calculated_value = _formula_db_setpoint_fill(entry_dict, test_condition)
                                     if calculated_value is not None:
                                         eval_context[key] = float(calculated_value)
                                     else:
                                         eval_context[key] = None
                                 elif key == 'dev_wb_setpoint' and test_condition:
-                                    db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+                                    db_setpoint = _formula_wb_dry_bulb(entry_dict, test_condition)
                                     if db_setpoint is not None:
                                         calculated_value = db_setpoint - 1
                                         eval_context[key] = float(calculated_value)
@@ -6445,15 +6445,15 @@ def calculate_derived_column():
                                         else:
                                             # Try calculating if we have test_condition
                                             if key == 'dev_tsup_setpoint' and test_condition:
-                                                eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                                eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                             elif key == 'dev_db_setpoint' and test_condition:
-                                                calculated_value = unit_config.get_tdb_setpoint_for(test_condition)
+                                                calculated_value = _formula_db_setpoint_fill(entry_dict, test_condition)
                                                 if calculated_value is not None:
                                                     eval_context[key] = float(calculated_value)
                                                 else:
                                                     eval_context[key] = None
                                             elif key == 'dev_wb_setpoint' and test_condition:
-                                                db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+                                                db_setpoint = _formula_wb_dry_bulb(entry_dict, test_condition)
                                                 if db_setpoint is not None:
                                                     calculated_value = db_setpoint - 1
                                                     eval_context[key] = float(calculated_value)
@@ -6464,15 +6464,15 @@ def calculate_derived_column():
                                     else:
                                         # Try calculating if we have test_condition
                                         if key == 'dev_tsup_setpoint' and test_condition:
-                                            eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                            eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                         elif key == 'dev_db_setpoint' and test_condition:
-                                            calculated_value = unit_config.get_tdb_setpoint_for(test_condition)
+                                            calculated_value = _formula_db_setpoint_fill(entry_dict, test_condition)
                                             if calculated_value is not None:
                                                 eval_context[key] = float(calculated_value)
                                             else:
                                                 eval_context[key] = None
                                         elif key == 'dev_wb_setpoint' and test_condition:
-                                            db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+                                            db_setpoint = _formula_wb_dry_bulb(entry_dict, test_condition)
                                             if db_setpoint is not None:
                                                 calculated_value = db_setpoint - 1
                                                 eval_context[key] = float(calculated_value)
@@ -6696,16 +6696,16 @@ def recalculate_single_column():
                                 else:
                                     # If value is None, check if it's a setpoint column that we can calculate
                                     if key == 'dev_tsup_setpoint' and test_condition:
-                                        calculated_value = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                        calculated_value = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                         eval_context[key] = calculated_value
                                     elif key == 'dev_db_setpoint' and test_condition:
-                                        calculated_value = unit_config.get_tdb_setpoint_for(test_condition)
+                                        calculated_value = _formula_db_setpoint_fill(entry_dict, test_condition)
                                         if calculated_value is not None:
                                             eval_context[key] = float(calculated_value)
                                         else:
                                             eval_context[key] = None
                                     elif key == 'dev_wb_setpoint' and test_condition:
-                                        db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+                                        db_setpoint = _formula_wb_dry_bulb(entry_dict, test_condition)
                                         if db_setpoint is not None:
                                             calculated_value = db_setpoint - 1
                                             eval_context[key] = float(calculated_value)
@@ -6723,13 +6723,13 @@ def recalculate_single_column():
                                             else:
                                                 # Try calculating if we have test_condition
                                                 if key == 'dev_tsup_setpoint' and test_condition:
-                                                    eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                                    eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                                 else:
                                                     eval_context[key] = None
                                         else:
                                             # Try calculating if we have test_condition
                                             if key == 'dev_tsup_setpoint' and test_condition:
-                                                eval_context[key] = _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
+                                                eval_context[key] = _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name)
                                             else:
                                                 eval_context[key] = None
                                     except Exception as calc_error:
@@ -7383,6 +7383,33 @@ def _tsup_setpoint_from_entry(entry_dict, test_condition=None, file_name=None):
         climate=climate,
         application=application,
     )
+
+
+# Formula context fills: a missing stored setpoint is filled for the formula only
+# (never written back). A cooling row reads its own letter from the cooling set
+# and never the heating letter; its wet-bulb has no setpoint and stays empty.
+def _formula_db_setpoint_fill(entry_dict, test_condition):
+    """Dry-bulb for a formula when ``dev_db_setpoint`` is missing, or None."""
+    if _entry_is_cooling(entry_dict):
+        value, _ = _cooling_setpoints((entry_dict or {}).get('condition_set_id'), test_condition)
+    else:
+        value = unit_config.get_tdb_setpoint_for(test_condition)
+    return float(value) if value is not None else None
+
+
+def _formula_wb_dry_bulb(entry_dict, test_condition):
+    """Heating dry-bulb a missing wet-bulb is derived from (minus 1 K); None on a cooling row."""
+    if _entry_is_cooling(entry_dict):
+        return None
+    return unit_config.get_tdb_setpoint_for(test_condition)
+
+
+def _formula_tsup_setpoint_fill(entry_dict, test_condition, file_name=None):
+    """Water outlet for a formula when ``dev_tsup_setpoint`` is missing, or None."""
+    if _entry_is_cooling(entry_dict):
+        _, value = _cooling_setpoints((entry_dict or {}).get('condition_set_id'), test_condition)
+        return float(value) if value is not None else None
+    return _tsup_setpoint_from_entry(entry_dict, test_condition, file_name)
 
 
 # Permissible deviation configuration file path
@@ -21200,6 +21227,9 @@ def generate_scatter_plots():
                                 'unit_source': ident['source'],
                                 'climate': e_clim,
                                 'application': e_app,
+                                # Per-point condition set: the strip plot draws a cooling
+                                # point's bands from the cooling letter.
+                                'condition_set_id': entry.get('condition_set_id'),
                             })
                         except (ValueError, TypeError) as e:
                             print(f"  Skipped (invalid Y value): {y_value} - {e}")
@@ -21596,6 +21626,40 @@ def scatter_plot_image(image_id):
         abort(404)
     return send_file(BytesIO(raw), mimetype='image/png', max_age=300)
 
+def _stripplot_letter_setpoints(cond, condition_set_ids, quantity):
+    """Band centres of one Scatter letter for ``quantity`` 'db', 'wb', 'tsup' or 'q'.
+
+    ``condition_set_ids`` are the per-point condition sets of that letter (None for
+    a point with no set). Heating points, and points with no set, keep the heating
+    grid (``DEVIATION_SETPOINTS`` / ``TSUP_SETPOINTS``); 'q' returns the heating
+    dry-bulb the heating Qset is computed from. Cooling points add the cooling
+    letter's ``tdb_set`` ('db') or ``tsup_set`` ('tsup') and nothing for 'wb' or
+    'q'. One letter may return both a heating and a cooling centre.
+    """
+    ids = [None if v is None or (isinstance(v, float) and pd.isna(v)) else v
+           for v in (condition_set_ids or [None])] or [None]
+    cooling_ids = [v for v in ids if unit_config.is_cooling_condition_set(v)]
+    centres = []
+    if len(cooling_ids) < len(ids):
+        heating_db = DEVIATION_SETPOINTS.get(cond)
+        if quantity in ('db', 'q'):
+            value = heating_db
+        elif quantity == 'wb':
+            value = heating_db - 1 if heating_db is not None else None
+        elif quantity == 'tsup':
+            value = TSUP_SETPOINTS.get(cond, TSUP_SETPOINTS['E'])
+        else:
+            value = None
+        if value is not None:
+            centres.append(value)
+    if cooling_ids and quantity in ('db', 'tsup'):
+        tdb, tsup = _cooling_setpoints(cooling_ids[0], cond)
+        value = tdb if quantity == 'db' else tsup
+        if value is not None and value not in centres:
+            centres.append(value)
+    return centres
+
+
 def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, mean_wb_k=0.4, mean_tsup_k=0.5, mean_q_pct=5.0, mean_flow_pct=1.0, unit_label=None, profile_id=None):
     """Generate a stripplot for given data. Draws permissible deviation bands only for test conditions present in the data.
     mean_q_pct and mean_flow_pct are used for Q (heating capacity) and flow (mass/volume) y_parameters respectively."""
@@ -21722,30 +21786,29 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
                     continue
                 ylo, yhi = None, None
                 setpoint_val = None  # for dashed line and set-value text
-                extra_bands = []  # (ylo, yhi, set): flow may carry a heating and a cooling band
+                extra_bands = []  # (ylo, yhi, set): one letter may carry a heating and a cooling band
+                # Per-point condition sets of this letter: heating points (or no set)
+                # stay on the heating grid; cooling points use the cooling letter.
+                letter_rows = plot_df[plot_df['test_condition'].astype(str) == str(cond)]
+                letter_set_ids = (letter_rows['condition_set_id'].tolist()
+                                  if 'condition_set_id' in letter_rows.columns else [None])
+                temp_quantity, temp_half = None, None
                 if 't_db' in y_param_lower or ('db' in y_param_lower and 'wb' not in y_param_lower):
-                    setpoint = DEVIATION_SETPOINTS.get(cond)
-                    half = mean_db_k
-                    if setpoint is not None and half is not None:
-                        ylo, yhi = setpoint - half, setpoint + half
-                        setpoint_val = setpoint
+                    temp_quantity, temp_half = 'db', mean_db_k
                 elif is_wb_temperature:
-                    setpoint = DEVIATION_SETPOINTS.get(cond) - 1 if DEVIATION_SETPOINTS.get(cond) is not None else None
-                    half = mean_wb_k
-                    if setpoint is not None and half is not None:
-                        ylo, yhi = setpoint - half, setpoint + half
-                        setpoint_val = setpoint
+                    # Cooling points have no wet-bulb setpoint, so no band.
+                    temp_quantity, temp_half = 'wb', mean_wb_k
                 elif ('supply' in y_param_lower or 'tsup' in y_param_lower or 't_sup' in y_param_lower or
                       'ts buh' in y_param_lower or 'ts_buh' in y_param_lower):
                     # Tsup bands: supply temp and Ts Buh (buffer supply temp)
-                    setpoint = TSUP_SETPOINTS.get(cond, TSUP_SETPOINTS['E'])
-                    half = mean_tsup_k
-                    if setpoint is not None and half is not None:
-                        ylo, yhi = setpoint - half, setpoint + half
-                        setpoint_val = setpoint
+                    temp_quantity, temp_half = 'tsup', mean_tsup_k
+                if temp_quantity is not None:
+                    if temp_half is not None:
+                        for setpoint in _stripplot_letter_setpoints(cond, letter_set_ids, temp_quantity):
+                            extra_bands.append((setpoint - temp_half, setpoint + temp_half, setpoint))
                 elif is_q_param:
-                    # Q (heating capacity): band = Qset ± mean_q_pct%
-                    db_setpoint = DEVIATION_SETPOINTS.get(cond)
+                    # Q (heating capacity): band = Qset ± mean_q_pct%, heating points only
+                    db_setpoint = next(iter(_stripplot_letter_setpoints(cond, letter_set_ids, 'q')), None)
                     hp_for_design = None
                     if 'hp_id' in plot_df.columns:
                         hp_vals = plot_df['hp_id'].dropna().astype(str).str.strip()
