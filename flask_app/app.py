@@ -13235,13 +13235,48 @@ def _pct_outside_half(series, setpoint, half, total):
     return count / total * 100.0
 
 
-# Cooling rows are stored, not scored: DB / WB / Tsup / dTreturn / flow stay n/a.
+# Cooling rows: DB / WB / Tsup / dTreturn stay n/a. Flow is compared with the
+# profile's cooling flow only when that is fixed with a number (see below).
 COOLING_NOT_SCORED = 'cooling set — not scored'
+COOLING_FLOW_VARIABLE = 'variable cooling flow — flow % is not scored'
+COOLING_FLOW_NOT_SET = 'no fixed cooling flow is stored on the profile — flow is not scored'
 
 
 def _entry_is_cooling(entry):
     """True when the row's condition set is the fan-coil cooling set."""
     return unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
+
+
+def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
+    """``(flow_type, flow_set_value, reason)`` a cooling row's flow is compared with.
+
+    Only the profile's cooling flow (``resolve_cooling_design``): mode ``fixed``,
+    type ``mass`` / ``volume`` and a number > 0. Otherwise ``(None, None, why)``.
+    Never the heating ``flow_set_value``, never ``hp_design`` and never the
+    heating ``flow_mode`` — one profile may be variable-flow heating and
+    fixed-flow cooling, or the other way round. Call only for a cooling row.
+    """
+    entry = entry or {}
+    try:
+        profile, _ = unit_config.resolve_profile(
+            file_name=entry.get('file_name') or file_name,
+            hp_id=entry.get('hp_id') if entry.get('hp_id') is not None else hp_id,
+            profile_id=entry.get('profile_id'),
+        )
+    except Exception:
+        profile = None
+    design = unit_config.resolve_cooling_design(profile)
+    if design.get('mode') == 'variable':
+        return None, None, COOLING_FLOW_VARIABLE
+    ft, fv = design.get('flow_type'), design.get('flow_set_value')
+    try:
+        fv = float(fv) if fv is not None else None
+    except (TypeError, ValueError):
+        fv = None
+    if (design.get('mode') != 'fixed' or ft not in ('mass', 'volume')
+            or fv is None or not np.isfinite(fv) or fv <= 0):
+        return None, None, COOLING_FLOW_NOT_SET
+    return ft, fv, ''
 
 
 def _entry_db_setpoint(entry, file_name):
@@ -13284,8 +13319,14 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
         return missing
     if not isinstance(spec, dict) or not spec:
         return {k: (None, 'no bands are configured for this interval') for k in quantities}
-    if _entry_is_cooling(entry):
-        return {k: (None, COOLING_NOT_SCORED) for k in quantities}
+    cooling = _entry_is_cooling(entry)
+    out = {}
+    if cooling:
+        # DB / WB / dTreturn stay n/a; only flow can score, against the cooling flow.
+        out = {k: (None, COOLING_NOT_SCORED) for k in quantities if k != 'flow'}
+        quantities = [k for k in quantities if k == 'flow']
+        if not quantities:
+            return out
     entry = _entry_with_hp_id(entry)
     applicable = _entry_applicable_checks(entry)
 
@@ -13296,7 +13337,6 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
 
     window_dev = _cut(df_dev)
     window_raw = _cut(df_raw if df_raw is not None else df_dev)
-    out = {}
     db_set = _entry_db_setpoint(entry, file_name)
 
     if 'db' in quantities:
@@ -13340,19 +13380,27 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
 
     if 'flow' in quantities:
         half = _interval_spec_half(spec, 'flow_instantaneous_pct')
+        # A cooling row reads the cooling flow and its own mode, never the heating mode.
+        cool_type, cool_set, cool_why = (
+            _entry_cooling_flow_set(entry, file_name) if cooling else (None, None, ''))
         if half is None:
             out['flow'] = (None, 'no flow band is configured for this interval')
-        elif _entry_is_variable_flow(entry):
+        elif cooling and cool_why:
+            out['flow'] = (None, cool_why)
+        elif not cooling and _entry_is_variable_flow(entry):
             out['flow'] = (None, 'variable-flow test — flow % is not scored')
-        elif 'flow' not in applicable:
+        elif not cooling and 'flow' not in applicable:
             out['flow'] = (None, 'the flow check does not apply')
         elif window_dev is None:
             out['flow'] = (None, 'the sheet could not be read')
         elif window_dev.empty:
             out['flow'] = (None, 'the sheet holds no samples in this window')
         else:
-            flow_type, flow_set = get_flow_set_for_hp(
-                entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
+            if cooling:
+                flow_type, flow_set = cool_type, cool_set
+            else:
+                flow_type, flow_set = get_flow_set_for_hp(
+                    entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
             if not flow_type or flow_set is None or flow_set <= 0:
                 out['flow'] = (None, 'no flow set for this unit')
             else:
@@ -13483,8 +13531,14 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities)
         return missing
     if not isinstance(spec, dict) or not spec:
         return {k: (None, 'no mean bands are configured for this interval') for k in quantities}
-    if _entry_is_cooling(entry):
-        return {k: (None, COOLING_NOT_SCORED) for k in quantities}
+    cooling = _entry_is_cooling(entry)
+    out = {}
+    if cooling:
+        # DB / WB / Tsup / dTreturn stay n/a; only flow can score, against the cooling flow.
+        out = {k: (None, COOLING_NOT_SCORED) for k in quantities if k != 'flow'}
+        quantities = [k for k in quantities if k == 'flow']
+        if not quantities:
+            return out
     entry = _entry_with_hp_id(entry)
     applicable = _entry_applicable_checks(entry)
     window_dev = _union_span_frame(df_dev, spans)
@@ -13498,7 +13552,6 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities)
             return 'the sheet holds no samples in this window'
         return ''
 
-    out = {}
     db_set = _entry_db_setpoint(entry, file_name)
 
     def _temperature_mean(quantity, column, setpoint, check_id, what, setpoint_reason):
@@ -13559,19 +13612,27 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities)
                                        else (None, 'no valid dTreturn samples in this window'))
 
     if 'flow' in quantities:
+        # A cooling row reads the cooling flow and its own mode, never the heating mode.
+        cool_type, cool_set, cool_why = (
+            _entry_cooling_flow_set(entry, file_name) if cooling else (None, None, ''))
         if _mean_dev_half(spec, 'flow') is None:
             out['flow'] = (None, 'no mean flow band is configured for this interval')
-        elif _entry_is_variable_flow(entry):
+        elif cooling and cool_why:
+            out['flow'] = (None, cool_why)
+        elif not cooling and _entry_is_variable_flow(entry):
             out['flow'] = (None, 'variable-flow test — flow % is not scored')
-        elif 'flow' not in applicable:
+        elif not cooling and 'flow' not in applicable:
             out['flow'] = (None, 'the flow check does not apply')
         else:
             frame_why = _frame_reason(window_dev)
             if frame_why:
                 out['flow'] = (None, frame_why)
             else:
-                flow_type, flow_set = get_flow_set_for_hp(
-                    entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
+                if cooling:
+                    flow_type, flow_set = cool_type, cool_set
+                else:
+                    flow_type, flow_set = get_flow_set_for_hp(
+                        entry.get('hp_id'), file_name=file_name, profile_id=entry.get('profile_id'))
                 if not flow_type or flow_set is None or flow_set <= 0:
                     out['flow'] = (None, 'no flow set for this unit')
                 else:
@@ -13907,6 +13968,10 @@ def _guideline_score_payload_from_row(row) -> dict:
         payload[k] = {str(a): str(b or '') for a, b in (row.get(k) or {}).items()}
     for k in GUIDELINE_SCORE_TEXT_KEYS:
         payload[k] = str(row.get(k) or '')
+    if 'cooling_flow_set' in row:
+        # Cooling rows only (heating payloads are unchanged): what flow was scored against.
+        cfs = row.get('cooling_flow_set')
+        payload['cooling_flow_set'] = [str(cfs[0]), _guideline_num(cfs[1])] if cfs else None
     return payload
 
 
@@ -13947,28 +14012,70 @@ def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=No
     row['scores_cached'] = False
 
 
-def _guideline_cooling_unscored(row, reason=COOLING_NOT_SCORED) -> None:
-    """DB / WB / flow / dTreturn cells of a cooling row n/a — never 0, never a cached number.
+GUIDELINE_COOLING_FLOW_STALE = (
+    'flow is not yet scored against the stored cooling flow — use Compute missing scores on this page'
+)
+
+
+def _guideline_cooling_flow_state(entry, payload):
+    """``(keep_flow, reason, stale)`` for the flow cells of a cached cooling row.
+
+    ``keep_flow`` is True only when the profile has a fixed cooling flow with a
+    number and the payload says its flow cells were scored against exactly that
+    (type and number). No such cooling flow → the cells stay empty with its
+    reason, and there is nothing to recompute. A fixed cooling flow the payload
+    was not scored against (an older payload, perhaps from the heating flow, or
+    a changed cooling number) → empty and ``stale``, so Compute missing scores
+    recomputes the row from the cooling number. Opens no sheet.
+    """
+    ft, fv, why = _entry_cooling_flow_set(_entry_with_hp_id(entry or {}))
+    if ft is None:
+        return False, why, False
+    stored = (payload or {}).get('cooling_flow_set')
+    if isinstance(stored, (list, tuple)) and len(stored) == 2 and stored[0] == ft:
+        sv = _guideline_num(stored[1])
+        if sv is not None and abs(float(sv) - fv) <= 1e-9 * max(1.0, abs(fv)):
+            return True, '', False
+    return False, GUIDELINE_COOLING_FLOW_STALE, True
+
+
+def _guideline_cooling_unscored(row, reason=COOLING_NOT_SCORED, keep_flow=False,
+                                flow_reason=None) -> None:
+    """DB / WB / dTreturn cells of a cooling row n/a — never 0, never a cached number.
 
     Same cells the scorers leave n/a for the cooling set; applied on read so a
     payload cached before the cooling skip cannot show a heating-style score.
-    ΔCOP, the evaluation means and the pieces are not touched.
+    The flow cells are kept only with ``keep_flow`` (scored against the stored
+    fixed cooling flow, see ``_guideline_cooling_flow_state``); otherwise they
+    are emptied with ``flow_reason``. ΔCOP, the evaluation means and the pieces
+    are not touched.
     """
+    flow_reason = flow_reason or reason
+
+    def _why(metric):
+        return flow_reason if metric == 'flow' else reason
+
     for slot in ('h', 'eq', 'eval'):
         for metric in ('dtreturn', 'db', 'wb', 'flow'):
+            if metric == 'flow' and keep_flow:
+                continue
             row[f'{slot}_{metric}_pct'] = None
-            row.setdefault(f'{metric}_reasons', {})[slot] = reason
+            row.setdefault(f'{metric}_reasons', {})[slot] = _why(metric)
     for k in ('db', 'dtreturn'):
         row[f'd_{k}_pct'] = None
         row.setdefault('d_reasons', {})[k] = reason
     for k in ('db', 'wb', 'flow', 'dtreturn'):
+        if k == 'flow' and keep_flow:
+            continue
         row[f's_{k}_pct'] = None
-        row.setdefault('s_reasons', {})[k] = reason
+        row.setdefault('s_reasons', {})[k] = _why(k)
     for iv, keys in MEAN_DEV_ROW_KEYS.items():
         reasons = row.setdefault(MEAN_DEV_REASON_KEYS[iv], {})
         for quantity, key in keys.items():
+            if quantity == 'flow' and keep_flow:
+                continue
             row[key] = None
-            reasons[quantity] = reason
+            reasons[quantity] = _why(quantity)
 
 
 def _guideline_payload_has_pieces(payload) -> bool:
@@ -14303,6 +14410,12 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
         spec_s = (interval_cfg.get('intervals') or {}).get('S') or {}
         for row, ev, dt_windows in items:
             parent = _entry_with_hp_id(parents.get(int(row['rowid'])) or {})
+            if _entry_is_cooling(parent):
+                # The cooling flow the flow cells are scored against, so page load
+                # can tell a current flow score from one made before or against
+                # another cooling flow. Heating rows carry no such key.
+                cft, cfv, _why = _entry_cooling_flow_set(parent)
+                row['cooling_flow_set'] = [cft, cfv] if cft else None
             # Same parent-window series as /calculate_deviations. dTreturn keeps
             # the raw sheet (T_return_emu / T_return_calc are there already).
             df_dev = _series_for_entry_deviations(parent, df_full)
@@ -14648,12 +14761,16 @@ def _guideline_row_sets(entry, cache=None) -> dict:
             return None
 
     cooling = _entry_is_cooling(entry)
-    # A cooling row was not scored, so no set was subtracted and none is named.
+    # A cooling row's DB / WB / Tsup were not scored, so no set was subtracted and none is named.
     db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
-    # Same call the flow mean was scored with, so the set shown is that set.
-    flow = (None, None) if cooling else (_safe(
-        get_flow_set_for_hp, hp_id, file_name=file_name,
-        profile_id=entry.get('profile_id')) or (None, None))
+    # Same call the flow mean was scored with, so the set shown is that set:
+    # the fixed cooling flow on a cooling row (or none), the heating flow otherwise.
+    if cooling:
+        flow = (_safe(_entry_cooling_flow_set, entry, file_name) or (None, None, ''))[:2]
+    else:
+        flow = (_safe(
+            get_flow_set_for_hp, hp_id, file_name=file_name,
+            profile_id=entry.get('profile_id')) or (None, None))
     climate, application = _safe(_entry_climate_application, entry) or (None, None)
     out = {
         'db': db_set,
@@ -14765,14 +14882,21 @@ def _guideline_window_rows(rowids=None) -> dict:
             hit = cached.get(rid)
             if hit and hit[0] == _guideline_score_fingerprint(stored.get(rid, []), buffer_s):
                 _apply_guideline_score_payload(row, hit[1])
+                cooling_flow_stale = False
                 if _entry_is_cooling(entry):
-                    _guideline_cooling_unscored(row)
-                if _guideline_payload_has_pieces(hit[1]):
-                    n_scored += 1
-                else:
+                    keep_flow, flow_why, cooling_flow_stale = _guideline_cooling_flow_state(
+                        entry, hit[1])
+                    _guideline_cooling_unscored(row, keep_flow=keep_flow, flow_reason=flow_why)
+                if not _guideline_payload_has_pieces(hit[1]):
                     # Stored before the pieces: keep its numbers, piece cells n/a.
                     _guideline_pieces_missing(row)
                     n_missing += 1
+                elif cooling_flow_stale:
+                    # Flow cells empty until Compute missing scores rescores against
+                    # the cooling flow; every other stored number stays.
+                    n_missing += 1
+                else:
+                    n_scored += 1
             else:
                 _guideline_scores_missing(row, ev=ev)
                 n_missing += 1
@@ -15022,8 +15146,9 @@ def api_guideline_windows_score_files():
         buffer_s = _guideline_buffer_s()
         conn = get_db_connection()
         try:
+            # rowid, * : a cooling row's profile keys decide whether its flow is current.
             rows = conn.execute(
-                "SELECT rowid, file_name FROM results "
+                "SELECT rowid, * FROM results "
                 "WHERE file_name IS NOT NULL AND TRIM(file_name) != '' "
                 "ORDER BY file_name ASC, data_set ASC, start_time ASC"
             ).fetchall()
@@ -15048,8 +15173,11 @@ def api_guideline_windows_score_files():
                                                     'n_missing': 0})
             f['n_with_clocks'] += 1
             hit = cached.get(rid)
+            entry = dict(r)
             if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
-                    and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods):
+                    and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods
+                    and not (_entry_is_cooling(entry)
+                             and _guideline_cooling_flow_state(entry, hit[1])[2])):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -15123,7 +15251,11 @@ def api_guideline_windows_compute_scores():
             with_clocks.append(rid)
             if not recompute:
                 hit = cached.get(rid)
-                if hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s):
+                if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
+                        and not (_entry_is_cooling(entry)
+                                 and _guideline_cooling_flow_state(entry, hit[1])[2])):
+                    # A cooling row whose flow was not scored against today's fixed
+                    # cooling flow is rescored in full below; heating rows as before.
                     if _guideline_payload_has_pieces(hit[1]):
                         skipped += 1
                     else:
@@ -16477,6 +16609,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         })
         # Cooling set is stored, not scored: no dry-bulb, wet-bulb or supply comparison,
         # and the heating wet-bulb rule (dry-bulb − 1 K) is not applied.
+        # Flow is compared with the profile's fixed cooling flow only (see below).
         cooling_unscored = unit_config.is_cooling_condition_set(entry.get('condition_set_id'))
         db_setpoint = None
         db_bands = None
@@ -16622,28 +16755,33 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         entry_for_flow.setdefault('file_name', file_name)
         if hp_id is not None:
             entry_for_flow.setdefault('hp_id', hp_id)
-        # Cooling set: the profile flow is the heating flow, so it is not compared.
-        if not cooling_unscored and not _entry_is_variable_flow(entry_for_flow):
+        # Cooling set: only the profile's fixed cooling flow, decided by the cooling
+        # mode — never the heating flow or the heating flow_mode. Heating: as before.
+        if cooling_unscored:
+            flow_type, flow_set_value, _cool_why = _entry_cooling_flow_set(entry_for_flow)
+        elif not _entry_is_variable_flow(entry_for_flow):
             flow_type, flow_set_value = get_flow_set_for_hp(
                 hp_id, file_name=file_name, profile_id=entry_for_flow.get('profile_id')
             ) if (hp_id or file_name) else (None, None)
-            if flow_type and flow_set_value is not None and flow_set_value > 0:
-                flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
-                if flow_col in cycle_data.columns:
-                    flow_setpoint = flow_set_value
-                    flow_set_type = flow_type
-                    if not _has_valid_points(cycle_data[flow_col]):
-                        _note_missing_quantity(file_name, data_set, f'flow ({flow_col})', warning_list)
-                    else:
-                        mean_flow = float(cycle_data[flow_col].mean())
-                        mean_flow_dev_pct = round(100.0 * (mean_flow - flow_set_value) / flow_set_value, 2) if flow_set_value else None
-                        band_low = flow_set_value * (1 - flow_instantaneous_pct / 100.0)
-                        band_high = flow_set_value * (1 + flow_instantaneous_pct / 100.0)
-                        flow_outside = cycle_data[(cycle_data[flow_col] < band_low) | (cycle_data[flow_col] > band_high)]
-                        flow_outside_count = len(flow_outside)
-                        flow_percentage = round(100.0 * flow_outside_count / total_points, 2) if total_points > 0 else None
-                        flow_dev_pct = 100.0 * (cycle_data[flow_col] - flow_set_value) / flow_set_value
-                        max_flow_pos_pct, max_flow_neg_pct = _signed_extremes(flow_dev_pct)
+        else:
+            flow_type, flow_set_value = None, None
+        if flow_type and flow_set_value is not None and flow_set_value > 0:
+            flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
+            if flow_col in cycle_data.columns:
+                flow_setpoint = flow_set_value
+                flow_set_type = flow_type
+                if not _has_valid_points(cycle_data[flow_col]):
+                    _note_missing_quantity(file_name, data_set, f'flow ({flow_col})', warning_list)
+                else:
+                    mean_flow = float(cycle_data[flow_col].mean())
+                    mean_flow_dev_pct = round(100.0 * (mean_flow - flow_set_value) / flow_set_value, 2) if flow_set_value else None
+                    band_low = flow_set_value * (1 - flow_instantaneous_pct / 100.0)
+                    band_high = flow_set_value * (1 + flow_instantaneous_pct / 100.0)
+                    flow_outside = cycle_data[(cycle_data[flow_col] < band_low) | (cycle_data[flow_col] > band_high)]
+                    flow_outside_count = len(flow_outside)
+                    flow_percentage = round(100.0 * flow_outside_count / total_points, 2) if total_points > 0 else None
+                    flow_dev_pct = 100.0 * (cycle_data[flow_col] - flow_set_value) / flow_set_value
+                    max_flow_pos_pct, max_flow_neg_pct = _signed_extremes(flow_dev_pct)
         
         return {
             'test_condition': test_condition,
@@ -16730,7 +16868,7 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
     if hp_id is not None:
         entry_for_checks.setdefault('hp_id', hp_id)
     applicable_checks = _entry_applicable_checks(entry_for_checks)
-    # Cooling set is stored, not scored: DB / WB / Tsup / dTreturn / flow stay unset.
+    # Cooling set: DB / WB / Tsup / dTreturn stay unset; flow only against a fixed cooling flow.
     cooling_unscored = unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
 
     # Metrics that require test_condition / DB setpoint bands
@@ -16864,39 +17002,44 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             if 'dtreturn_extremes' in metrics:
                 out['max_dtreturn_pos'], out['max_dtreturn_neg'] = _signed_extremes(dtreturn)
 
-    # Flow metrics (fixed-flow set only)
-    if not cooling_unscored and any(m in metrics for m in ('flow_outside', 'flow_pct', 'mean_flow_dev', 'flow_extremes')):
+    # Flow metrics. Heating: fixed-flow set only. Cooling set: only the profile's
+    # fixed cooling flow, decided by the cooling mode — never the heating flow or mode.
+    if any(m in metrics for m in ('flow_outside', 'flow_pct', 'mean_flow_dev', 'flow_extremes')):
         entry_for_flow = dict(entry or {})
         entry_for_flow.setdefault('file_name', file_name)
         if hp_id is not None:
             entry_for_flow.setdefault('hp_id', hp_id)
-        if not _entry_is_variable_flow(entry_for_flow):
-            flow_instantaneous_pct = load_permissible_deviations().get('flow_instantaneous_pct', 2.5)
+        if cooling_unscored:
+            flow_type, flow_set_value, _cool_why = _entry_cooling_flow_set(entry_for_flow)
+        elif not _entry_is_variable_flow(entry_for_flow):
             flow_type, flow_set_value = get_flow_set_for_hp(
                 hp_id, file_name=file_name, profile_id=entry_for_flow.get('profile_id')
             ) if (hp_id or file_name) else (None, None)
-            if flow_type and flow_set_value is not None and flow_set_value > 0:
-                flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
-                if flow_col in cycle_data.columns:
-                    flow_has_data = _has_valid_points(cycle_data[flow_col])
-                    if not flow_has_data:
-                        _note_missing_quantity(file_name, data_set, f'flow ({flow_col})', warning_list)
-                    mean_flow = float(cycle_data[flow_col].mean()) if flow_has_data else None
-                    band_low = flow_set_value * (1 - flow_instantaneous_pct / 100.0)
-                    band_high = flow_set_value * (1 + flow_instantaneous_pct / 100.0)
-                    flow_outside = cycle_data[(cycle_data[flow_col] < band_low) | (cycle_data[flow_col] > band_high)]
-                    flow_outside_count = int(len(flow_outside)) if flow_has_data else None
-                    if 'mean_flow_dev' in metrics:
-                        out['mean_flow_dev_pct'] = (round(100.0 * (mean_flow - flow_set_value) / flow_set_value, 2)
-                                                    if (flow_has_data and flow_set_value) else None)
-                    if 'flow_outside' in metrics:
-                        out['flow_outside_count'] = flow_outside_count
-                    if 'flow_pct' in metrics:
-                        out['flow_percentage'] = (round(100.0 * flow_outside_count / total_points, 2)
-                                                  if (flow_outside_count is not None and total_points > 0) else None)
-                    if 'flow_extremes' in metrics:
-                        out['max_flow_pos_pct'], out['max_flow_neg_pct'] = _signed_extremes(
-                            100.0 * (cycle_data[flow_col] - flow_set_value) / flow_set_value)
+        else:
+            flow_type, flow_set_value = None, None
+        flow_instantaneous_pct = load_permissible_deviations().get('flow_instantaneous_pct', 2.5)
+        if flow_type and flow_set_value is not None and flow_set_value > 0:
+            flow_col = 'mass flow' if flow_type == 'mass' else 'volume flow'
+            if flow_col in cycle_data.columns:
+                flow_has_data = _has_valid_points(cycle_data[flow_col])
+                if not flow_has_data:
+                    _note_missing_quantity(file_name, data_set, f'flow ({flow_col})', warning_list)
+                mean_flow = float(cycle_data[flow_col].mean()) if flow_has_data else None
+                band_low = flow_set_value * (1 - flow_instantaneous_pct / 100.0)
+                band_high = flow_set_value * (1 + flow_instantaneous_pct / 100.0)
+                flow_outside = cycle_data[(cycle_data[flow_col] < band_low) | (cycle_data[flow_col] > band_high)]
+                flow_outside_count = int(len(flow_outside)) if flow_has_data else None
+                if 'mean_flow_dev' in metrics:
+                    out['mean_flow_dev_pct'] = (round(100.0 * (mean_flow - flow_set_value) / flow_set_value, 2)
+                                                if (flow_has_data and flow_set_value) else None)
+                if 'flow_outside' in metrics:
+                    out['flow_outside_count'] = flow_outside_count
+                if 'flow_pct' in metrics:
+                    out['flow_percentage'] = (round(100.0 * flow_outside_count / total_points, 2)
+                                              if (flow_outside_count is not None and total_points > 0) else None)
+                if 'flow_extremes' in metrics:
+                    out['max_flow_pos_pct'], out['max_flow_neg_pct'] = _signed_extremes(
+                        100.0 * (cycle_data[flow_col] - flow_set_value) / flow_set_value)
 
     return out
 
@@ -17936,10 +18079,16 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
             return None
 
     cooling = _entry_is_cooling(entry)
-    # Cooling: no outdoor, supply or flow set, so nothing is coloured against one.
+    # Cooling: no outdoor or supply set, so nothing is coloured against one. Flow
+    # is the profile's fixed cooling flow (never the heating flow, never the
+    # stored Deviations fallback), and the variable-flow flag follows the cooling mode.
     db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
-    flow = (None, None, '') if cooling else (
-        _safe(_entry_flow_set, entry, hp_id, file_name) or (None, None, ''))
+    if cooling:
+        flow = _safe(_entry_cooling_flow_set, entry, file_name) or (None, None, '')
+        variable_flow = flow[2] == COOLING_FLOW_VARIABLE
+    else:
+        flow = _safe(_entry_flow_set, entry, hp_id, file_name) or (None, None, '')
+        variable_flow = bool(_safe(_entry_is_variable_flow, entry))
     pdesign = _safe(get_pdesign_for_hp, hp_id, conn,
                     file_name=file_name, profile_id=entry.get('profile_id'))
     _ua, q_set = compute_ua_and_qset(pdesign, db_set)
@@ -17953,7 +18102,7 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
         'q_set': q_set,
         'flow_set_type': flow[0],
         'flow_set': flow[1],
-        'variable_flow': bool(_safe(_entry_is_variable_flow, entry)),
+        'variable_flow': variable_flow,
     }
     if cache is not None:
         cache[key] = out
@@ -18018,7 +18167,9 @@ def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
         return ('', '')
     sp = setpoints or {}
     unit = PERIOD_STAT_COLOUR_UNITS[quantity]
-    if sp.get('cooling') and quantity in ('db', 'wb', 'tsup', 'dtreturn', 'flow'):
+    # Cooling: flow is coloured like a heating fixed-flow cell against the cooling
+    # flow in the bundle (none stored → uncoloured with the no-setpoint hover).
+    if sp.get('cooling') and quantity in ('db', 'wb', 'tsup', 'dtreturn'):
         return ('', COOLING_NOT_SCORED)
 
     if quantity == 'flow':
@@ -20099,13 +20250,18 @@ def _flow_deviation_figure(entry, hp_id, file_name, data_set, cycle_data,
     reason, never an error that takes the rest of the modal with it.
     """
     if _entry_is_cooling(entry):
-        # The profile flow is the heating flow; a cooling row is not compared with it.
-        return None, 'Flow band does not apply: ' + COOLING_NOT_SCORED + '.'
-    if _entry_is_variable_flow(entry):
-        return None, 'Flow band does not apply to variable-flow tests (judged on Tmean / Tsup).'
-    flow_type, flow_set_value, reason = _entry_flow_set(entry, hp_id, file_name)
-    if reason:
-        return None, reason
+        # A cooling row is drawn against the profile's fixed cooling flow only —
+        # never the heating flow, the heating mode or the stored Deviations set.
+        flow_type, flow_set_value, _why = _entry_cooling_flow_set(
+            _entry_with_hp_id(entry or {}), file_name, hp_id)
+        if flow_type is None:
+            return None, 'Flow band does not apply: ' + COOLING_NOT_SCORED + '.'
+    else:
+        if _entry_is_variable_flow(entry):
+            return None, 'Flow band does not apply to variable-flow tests (judged on Tmean / Tsup).'
+        flow_type, flow_set_value, reason = _entry_flow_set(entry, hp_id, file_name)
+        if reason:
+            return None, reason
     if cycle_data is None or getattr(cycle_data, 'empty', True):
         return None, 'no time series data for this entry'
     cycle_data, mass_flow_notices = derive_mass_flow_if_needed(cycle_data)
@@ -21311,6 +21467,7 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
                     continue
                 ylo, yhi = None, None
                 setpoint_val = None  # for dashed line and set-value text
+                extra_bands = []  # (ylo, yhi, set): flow may carry a heating and a cooling band
                 if 't_db' in y_param_lower or ('db' in y_param_lower and 'wb' not in y_param_lower):
                     setpoint = DEVIATION_SETPOINTS.get(cond)
                     half = mean_db_k
@@ -21368,15 +21525,38 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
                         'flow_config': flow_config,
                         'hp_id': hp_label,
                     }
-                    if (is_mass_flow_param or is_volume_flow_param) and not _entry_is_variable_flow(scatter_entry):
-                        flow_type, flow_set_value = get_flow_set_for_hp(hp_label, file_name=band_file_name, profile_id=scatter_entry.get('profile_id'))
+                    # Per point kind in this letter: heating points use the heating flow
+                    # (unchanged); cooling points use only the profile's fixed cooling
+                    # flow, and get no flow band without one.
+                    cond_rows = plot_df[plot_df['test_condition'].astype(str) == str(cond)]
+                    if 'condition_set_id' in cond_rows.columns:
+                        cool_mask = cond_rows['condition_set_id'].apply(
+                            lambda v: unit_config.is_cooling_condition_set(v if pd.notna(v) else None))
+                    else:
+                        cool_mask = pd.Series(False, index=cond_rows.index)
+                    flow_sets = []
+                    if (~cool_mask).any() and (is_mass_flow_param or is_volume_flow_param) and not _entry_is_variable_flow(scatter_entry):
+                        flow_sets.append(get_flow_set_for_hp(hp_label, file_name=band_file_name, profile_id=scatter_entry.get('profile_id')))
+                    if cool_mask.any() and (is_mass_flow_param or is_volume_flow_param):
+                        cool_row = cond_rows[cool_mask].iloc[0]
+                        cool_pid = cool_row.get('profile_id') if 'profile_id' in cond_rows.columns else None
+                        cool_file = cool_row.get('file_name') if 'file_name' in cond_rows.columns else None
+                        cft, cfv, _cool_why = _entry_cooling_flow_set({
+                            'file_name': str(cool_file) if cool_file is not None and pd.notna(cool_file) else band_file_name,
+                            'profile_id': (str(cool_pid).strip() if cool_pid is not None and pd.notna(cool_pid) and str(cool_pid).strip()
+                                           else scatter_entry.get('profile_id')),
+                            'hp_id': hp_label,
+                        })
+                        if cft:
+                            flow_sets.append((cft, cfv))
+                    for flow_type, flow_set_value in flow_sets:
                         if flow_set_value is not None and mean_flow_pct >= 0:
                             if (is_mass_flow_param and (flow_type or '').lower() == 'mass') or (is_volume_flow_param and (flow_type or '').lower() == 'volume'):
                                 fac = mean_flow_pct / 100.0
-                                ylo = flow_set_value * (1 - fac)
-                                yhi = flow_set_value * (1 + fac)
-                                setpoint_val = flow_set_value
-                if ylo is not None and yhi is not None:
+                                extra_bands.append((flow_set_value * (1 - fac), flow_set_value * (1 + fac),
+                                                    flow_set_value))
+                bands_here = ([(ylo, yhi, setpoint_val)] if ylo is not None and yhi is not None else []) + extra_bands
+                for ylo, yhi, setpoint_val in bands_here:
                     band_ylo_yhi.append((ylo, yhi))
                     rect = Rectangle((idx - 0.45, ylo), 0.9, yhi - ylo, linewidth=0, facecolor='gray', alpha=0.2, zorder=-1)
                     ax.add_patch(rect)

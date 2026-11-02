@@ -128,7 +128,7 @@ When the report is clean, uncheck **Dry-run** and press **Export!** again. It pr
 | Air-to-water, template REV1 | `hpt_aw_rev1` | Shipped |
 | Water-to-water, template REV1 | `hpt_ww_rev1` | Available |
 | Hybrid, template REV1 | `hpt_hybrid_rev1` | Available |
-| Air-to-water cooling (fan coil), draft template | `hpt_aw_cooling_rev1` | Import only — the WebApp does not score cooling yet |
+| Air-to-water cooling (fan coil), draft template | `hpt_aw_cooling_rev1` | Import shipped. Flow is scored only against a stored fixed cooling flow (§6.2). Dry-bulb, wet-bulb, supply, inlet difference and cooling capacity are not scored |
 
 The **Template:** dropdown lists only the maps that exist in `import_tools/maps/`.
 
@@ -218,7 +218,7 @@ Nav bar, left to right, roughly in workflow order.
 
 The default condition **set** is Ecodesign Table 3 heating conditions (`ecodesign_heating`; the legacy alias `BAM_RRT` is still accepted). Average / MT is the default climate × application **slice** inside that set, not the name of the set.
 
-A Plotdaten file with `duty` = `cooling` is stored on Add to DB, and from the paste box on the main page, as `ecodesign_cooling_fan_coil` (fan coil, letters A–D, water outlets 7 / 8.5 / 10 / 11.5 °C). A file with no `duty` column stays on the heating set. A file that mixes more than one duty is not added. The cooling set is not scored on Deviations or Guideline Windows (dry-bulb, wet-bulb, supply, inlet difference and flow stay n/a), and the heating wet-bulb rule (dry-bulb − 1 K) is not applied to it. Its letters are listed read-only under the heating table on `/profiles`.
+A Plotdaten file with `duty` = `cooling` is stored on Add to DB, and from the paste box on the main page, as `ecodesign_cooling_fan_coil` (fan coil, letters A–D, water outlets 7 / 8.5 / 10 / 11.5 °C). A file with no `duty` column stays on the heating set. A file that mixes more than one duty is not added. The cooling set is not scored on Deviations or Guideline Windows for dry-bulb, wet-bulb, supply and inlet difference (those stay n/a), and the heating wet-bulb rule (dry-bulb − 1 K) is not applied to it. Flow is the air-to-water cooling paragraph below. Its letters are listed read-only under the heating table on `/profiles`.
 
 Check this before analysing a new unit. A wrong or missing profile shows up later as implausible deviations, because the setpoints the deviations are measured against came from the wrong place.
 
@@ -236,7 +236,7 @@ An empty **climate / application** on an entry means the Average / MT **default*
 
 **Water-to-water source (heating).** When `unit_type` is `water_water`, the profile form also shows `source_flow_mode` (`fixed`, `variable` or empty = not set), and for fixed mode `source_flow_type` and `source_flow_set_value`. These are separate from the sink `flow_*` fields and never fall back to them. Next to them the form shows, read-only, the source inlet of the heating condition set (10 °C, ground heat exchanger, same for every letter); in variable mode it also shows the 3 K inlet − outlet difference, and no flow number is stored. There is no source outlet setpoint. These values are stored only; they are not scored or coloured. Other unit types do not show or change these fields.
 
-**Air-to-water cooling design.** Only when `unit_type` is `air_water`, the profile form also shows a cooling design capacity (`pdesignc_kw`) and a cooling flow (`cooling_flow_mode`, and for fixed mode `cooling_flow_type` and `cooling_flow_set_value`) beside the heating numbers; they are typed, not calculated, stored only and not scored.
+**Air-to-water cooling design.** Only when `unit_type` is `air_water`, the profile form also shows a cooling design capacity (`pdesignc_kw`) and a cooling flow (`cooling_flow_mode`, and for fixed mode `cooling_flow_type` and `cooling_flow_set_value`) beside the heating numbers; they are typed, not calculated from each other. On a cooling row, flow is compared with this stored cooling flow when the cooling flow mode is fixed and a number is stored. The comparison is the one a heating row uses for its own flow (percent of set, outside-band count, instantaneous band), read from mass flow or volume flow according to the cooling flow type, on Deviations, Guideline Windows, Period Statistics, the flow deviation plot and Scatter. With a variable or empty cooling flow mode, or fixed with no number, flow on a cooling row stays n/a. A cooling row is never compared with the heating flow, and the heating flow mode does not decide it. Dry-bulb, wet-bulb, supply and inlet difference stay unscored on a cooling row. On Guideline Windows a cooling row's flow cells stay empty until **Compute missing scores** has scored them against the stored cooling flow. The cooling design capacity is not scored.
 
 ### 6.3 Cycle Extraction — turn a Plotdaten file into entries
 

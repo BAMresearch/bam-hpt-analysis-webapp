@@ -129,7 +129,7 @@ def condition_set_id_for_duty(duty: Any) -> str:
 
 
 def is_cooling_condition_set(condition_set_id: Optional[str]) -> bool:
-    """True for the fan-coil cooling set, which is stored but not scored."""
+    """True for the fan-coil cooling set. Only its flow is scored, against a fixed cooling flow."""
     if condition_set_id is None:
         return False
     return _resolve_condition_set_id(str(condition_set_id).strip()) == COOLING_CONDITION_SET_ID
@@ -416,7 +416,7 @@ def resolve_source_flow(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-# --- Air-to-water cooling design (stored, not scored) -----------------------
+# --- Air-to-water cooling design (flow scored when fixed) ------------------
 
 COOLING_FLOW_MODES = ('fixed', 'variable')
 COOLING_FLOW_TYPES = ('volume', 'mass')
@@ -434,8 +434,8 @@ def resolve_cooling_design(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     'fixed', 'variable' or None (not set); only fixed mode carries a type and a
     value, either of which may be None. Both numbers are typed by the analyst:
     neither is derived from the other. Never reads the heating pdesign_kw /
-    flow_mode / flow_type / flow_set_value or the source_flow_* keys. Nothing
-    scores these values yet.
+    flow_mode / flow_type / flow_set_value or the source_flow_* keys. A cooling
+    row's flow is compared with the fixed cooling flow; the capacity is not scored.
     """
     out: Dict[str, Any] = {'pdesignc_kw': None, 'mode': None,
                            'flow_type': None, 'flow_set_value': None}
