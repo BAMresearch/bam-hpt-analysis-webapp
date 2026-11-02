@@ -236,6 +236,8 @@ An empty **climate / application** on an entry means the Average / MT **default*
 
 **Water-to-water source (heating).** When `unit_type` is `water_water`, the profile form also shows `source_flow_mode` (`fixed`, `variable` or empty = not set), and for fixed mode `source_flow_type` and `source_flow_set_value`. These are separate from the sink `flow_*` fields and never fall back to them. Next to them the form shows, read-only, the source inlet of the heating condition set (10 °C, ground heat exchanger, same for every letter); in variable mode it also shows the 3 K inlet − outlet difference, and no flow number is stored. There is no source outlet setpoint. These values are stored only; they are not scored or coloured. Other unit types do not show or change these fields.
 
+**Air-to-water cooling design.** Only when `unit_type` is `air_water`, the profile form also shows a cooling design capacity (`pdesignc_kw`) and a cooling flow (`cooling_flow_mode`, and for fixed mode `cooling_flow_type` and `cooling_flow_set_value`) beside the heating numbers; they are typed, not calculated, stored only and not scored.
+
 ### 6.3 Cycle Extraction — turn a Plotdaten file into entries
 
 `/cycle_extract`. This is the normal way to create analysis entries from an imported file.

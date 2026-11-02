@@ -25,6 +25,7 @@
               <th>BUH cap</th>
               <th>Pdesign</th>
               <th>flow</th>
+              <th title="Air-to-water cooling design capacity and cooling flow (stored, not scored)">cooling</th>
               <th>source</th>
               <th title="Rows in the open database whose profile_id matches this file">entries</th>
               <th></th>
@@ -42,6 +43,20 @@
                   {{ p.flow_type }} {{ p.flow_set_value }}
                 {% else %}
                   {{ p.flow_mode or '—' }}
+                {% endif %}
+              </td>
+              <td>
+                {% if p.unit_type == 'air_water' %}
+                  {% set cbits = [] %}
+                  {% if p.get('pdesignc_kw') is not none %}{% set _ = cbits.append(p.pdesignc_kw ~ ' kW') %}{% endif %}
+                  {% if p.cooling_flow_mode == 'fixed' and p.cooling_flow_type and p.get('cooling_flow_set_value') is not none %}
+                    {% set _ = cbits.append(p.cooling_flow_type ~ ' ' ~ p.cooling_flow_set_value) %}
+                  {% elif p.cooling_flow_mode == 'variable' %}
+                    {% set _ = cbits.append('variable') %}
+                  {% endif %}
+                  {{ cbits | join(', ') if cbits else '—' }}
+                {% else %}
+                  —
                 {% endif %}
               </td>
               <td><span class="badge badge-secondary">{{ p._source }}</span></td>
@@ -150,6 +165,35 @@
           <div class="form-group col-md-3">
             <label>Source (heating)</label>
             <p class="form-control-plaintext small mb-0" id="sourceInfo"></p>
+          </div>
+        </div>
+        <div class="form-row" id="coolingDesignRow" style="display:none">
+          <div class="form-group col-md-3">
+            <label>Cooling design capacity (pdesignc_kw)</label>
+            <input class="form-control" name="pdesignc_kw" type="number" step="any">
+          </div>
+          <div class="form-group col-md-3">
+            <label>Cooling flow mode (cooling_flow_mode)</label>
+            <select class="form-control" name="cooling_flow_mode">
+              <option value="">(not set)</option>
+              <option value="fixed">fixed</option>
+              <option value="variable">variable</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>Cooling flow type (cooling_flow_type)</label>
+            <select class="form-control" name="cooling_flow_type">
+              <option value="">(none)</option>
+              <option value="volume">volume</option>
+              <option value="mass">mass</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>Cooling flow (cooling_flow_set_value)</label>
+            <input class="form-control" name="cooling_flow_set_value" type="number" step="any">
+          </div>
+          <div class="col-12">
+            <small class="form-text text-muted mt-0 mb-2">Cooling design capacity and cooling flow are typed here and stored on the profile. They are not calculated from each other and not scored.</small>
           </div>
         </div>
         <div class="form-row">
@@ -306,6 +350,10 @@
     f.source_flow_mode.value = p.source_flow_mode || '';
     f.source_flow_type.value = p.source_flow_type || '';
     f.source_flow_set_value.value = (p.source_flow_set_value != null) ? p.source_flow_set_value : '';
+    f.pdesignc_kw.value = (p.pdesignc_kw != null) ? p.pdesignc_kw : '';
+    f.cooling_flow_mode.value = p.cooling_flow_mode || '';
+    f.cooling_flow_type.value = p.cooling_flow_type || '';
+    f.cooling_flow_set_value.value = (p.cooling_flow_set_value != null) ? p.cooling_flow_set_value : '';
     f.wb_rule.value = p.wb_rule || 'db_minus_1k';
     f.owner.value = p.owner || '';
     f.filename_patterns.value = (p.filename_patterns || []).join(',');
@@ -316,6 +364,17 @@
     f.original_destination.value = f.destination.value;
     f.original_entry_count.value = (entryCount != null && entryCount !== '') ? String(entryCount) : '0';
     updateSourceFlowRow();
+    updateCoolingDesignRow();
+  }
+
+  // Air-to-water cooling design: shown only for unit_type air_water. Stored, not scored.
+  function updateCoolingDesignRow() {
+    const f = document.getElementById('profileForm');
+    const isAW = f.unit_type.value === 'air_water';
+    document.getElementById('coolingDesignRow').style.display = isAW ? '' : 'none';
+    const fixed = f.cooling_flow_mode.value === 'fixed';
+    f.cooling_flow_type.disabled = !fixed;
+    f.cooling_flow_set_value.disabled = !fixed;
   }
 
   // Water-to-water heating source: shown only for unit_type water_water. Inlet and
@@ -346,6 +405,7 @@
     const f = document.getElementById('profileForm');
     f.reset();
     updateSourceFlowRow();
+    updateCoolingDesignRow();
     f.original_profile_id.value = '';
     f.original_destination.value = '';
     f.original_entry_count.value = '0';
@@ -365,7 +425,10 @@
   const profileFormEl = document.getElementById('profileForm');
   profileFormEl.unit_type.addEventListener('change', updateSourceFlowRow);
   profileFormEl.source_flow_mode.addEventListener('change', updateSourceFlowRow);
+  profileFormEl.unit_type.addEventListener('change', updateCoolingDesignRow);
+  profileFormEl.cooling_flow_mode.addEventListener('change', updateCoolingDesignRow);
   updateSourceFlowRow();
+  updateCoolingDesignRow();
 
   document.getElementById('profileForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -416,6 +479,14 @@
       payload.source_flow_mode = f.source_flow_mode.value;
       payload.source_flow_type = srcFixed ? f.source_flow_type.value : '';
       payload.source_flow_set_value = srcFixed ? f.source_flow_set_value.value : '';
+    }
+    // Other unit types omit the cooling keys so a save does not clear them.
+    if (f.unit_type.value === 'air_water') {
+      const coolFixed = f.cooling_flow_mode.value === 'fixed';
+      payload.pdesignc_kw = f.pdesignc_kw.value;
+      payload.cooling_flow_mode = f.cooling_flow_mode.value;
+      payload.cooling_flow_type = coolFixed ? f.cooling_flow_type.value : '';
+      payload.cooling_flow_set_value = coolFixed ? f.cooling_flow_set_value.value : '';
     }
     const resp = await fetch('/api/profiles', {
       method: 'POST',

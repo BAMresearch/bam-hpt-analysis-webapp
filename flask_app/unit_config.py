@@ -416,6 +416,45 @@ def resolve_source_flow(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+# --- Air-to-water cooling design (stored, not scored) -----------------------
+
+COOLING_FLOW_MODES = ('fixed', 'variable')
+COOLING_FLOW_TYPES = ('volume', 'mass')
+
+
+def _is_air_water(profile: Optional[Dict[str, Any]]) -> bool:
+    return str((profile or {}).get('unit_type') or '').strip().lower() == 'air_water'
+
+
+def resolve_cooling_design(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Cooling design capacity and cooling water flow from the profile's cooling keys.
+
+    Returns {pdesignc_kw, mode, flow_type, flow_set_value}; all None unless the
+    profile is air_water. The capacity does not depend on the mode. mode is
+    'fixed', 'variable' or None (not set); only fixed mode carries a type and a
+    value, either of which may be None. Both numbers are typed by the analyst:
+    neither is derived from the other. Never reads the heating pdesign_kw /
+    flow_mode / flow_type / flow_set_value or the source_flow_* keys. Nothing
+    scores these values yet.
+    """
+    out: Dict[str, Any] = {'pdesignc_kw': None, 'mode': None,
+                           'flow_type': None, 'flow_set_value': None}
+    if not _is_air_water(profile):
+        return out
+    cap = profile.get('pdesignc_kw')
+    out['pdesignc_kw'] = float(cap) if cap not in (None, '') else None
+    mode = str(profile.get('cooling_flow_mode') or '').strip().lower()
+    if mode not in COOLING_FLOW_MODES:
+        return out
+    out['mode'] = mode
+    if mode == 'fixed':
+        ft = str(profile.get('cooling_flow_type') or '').strip().lower()
+        out['flow_type'] = ft if ft in COOLING_FLOW_TYPES else None
+        fv = profile.get('cooling_flow_set_value')
+        out['flow_set_value'] = float(fv) if fv not in (None, '') else None
+    return out
+
+
 # --- Unit types / checks ----------------------------------------------------
 
 def load_unit_types() -> Dict[str, Any]:
