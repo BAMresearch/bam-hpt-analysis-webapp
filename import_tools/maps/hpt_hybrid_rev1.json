@@ -1,11 +1,12 @@
 {
   "map_id": "hpt_hybrid_rev1",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "HPT HYBRID Data Collection Template REV1 → Plotdaten / WebApp contract",
   "template_family": "HYBRID",
   "template_revision": "REV1",
   "plotdaten_contract": "v0.1",
   "changelog": [
+    "0.1.3: refuses the air-to-water cooling workbook (T_out_source and Cooling capacity (without corr), no T_out_sink) with a sentence naming Template Air-to-water cooling; nothing else changed",
     "0.1.2: empty lab-corrected capacity and power are dropped, and Total Power Input (corrected) is renamed to Electric Power Input (corrected), same as hpt_aw_rev1",
     "0.1.1: volume flow is ×3600 only when the unit row says m3/s; a small value without a unit is warned, not converted",
     "0.1.0: initial REV1 map; sink side as hpt_aw_rev1; Heat input (at 15°C) kept as its own column; gas monitoring columns passthrough"
@@ -58,6 +59,13 @@
       "from": "Time",
       "rule": "elapsed_seconds_from_first_row",
       "notes": "Same behaviour as import_v2 / hp_tools.get_elapsed_time"
+    }
+  ],
+  "wrong_workbook_hints": [
+    {
+      "if_present": ["T_out_source", "Cooling capacity (without corr)"],
+      "if_absent": ["T_out_sink"],
+      "message": "This sheet is from the air-to-water cooling workbook, not a heating workbook. Keep that file and choose Template \"Air-to-water cooling\". Nothing was written for this sheet."
     }
   ],
   "columns": [

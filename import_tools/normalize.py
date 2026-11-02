@@ -68,6 +68,21 @@ def _resolve_source_column(df: pd.DataFrame, source: str, aliases: Optional[list
     return None
 
 
+def _wrong_workbook_message(df: pd.DataFrame, mapping: dict[str, Any]) -> Optional[str]:
+    """Return the map's recovery sentence when the headers belong to another workbook.
+
+    Each ``wrong_workbook_hints`` entry lists headers that must all be present
+    (``if_present``) and headers that must all be absent (``if_absent``). The first
+    entry that matches gives the sentence; the import of that sheet is refused.
+    """
+    for hint in mapping.get("wrong_workbook_hints") or []:
+        present = all(_resolve_source_column(df, h, None) is not None for h in hint.get("if_present", []))
+        absent = all(_resolve_source_column(df, h, None) is None for h in hint.get("if_absent", []))
+        if present and absent:
+            return hint.get("message")
+    return None
+
+
 # Most likely template form first, so a uniform DD.MM.YYYY column stops after one pass.
 _DMY_FORMATS = (
     "%d.%m.%Y",
@@ -251,6 +266,8 @@ def normalize_dataframe(
         "fills": [],
         "map_id": mapping.get("map_id"),
         "map_version": mapping.get("version"),
+        # Recovery sentence when the sheet belongs to another workbook; the sheet must not be written.
+        "wrong_workbook": _wrong_workbook_message(df, mapping),
     }
     out = pd.DataFrame(index=df.index)
     used_sources: set[str] = set()
@@ -314,6 +331,13 @@ def normalize_dataframe(
                 continue
             # Avoid colliding with targets already taken
             out[c] = df[c]
+
+    # Fixed value on every data row (cooling map: duty = cooling). Overrides a sheet column of that name.
+    for name, value in (mapping.get("constant_columns") or {}).items():
+        if name in out.columns:
+            report["warnings"].append(f"{name}: sheet column replaced by the map value {value!r}")
+        out[name] = value
+        report["fills"].append(f"{name} <- {value!r} (map constant)")
 
     # A test uses either the virtual or the real back-up, not both. Keep both series if the
     # lab filled both — merging or dropping one would falsify the power balance — but say so:

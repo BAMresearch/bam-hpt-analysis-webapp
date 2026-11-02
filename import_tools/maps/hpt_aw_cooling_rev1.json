@@ -1,0 +1,298 @@
+{
+  "map_id": "hpt_aw_cooling_rev1",
+  "version": "0.1.1",
+  "description": "HPT AIR-TO-WATER cooling (fan coil) Data Collection Template → Plotdaten / WebApp water-loop contract",
+  "template_family": "AIR-TO-WATER cooling",
+  "template_revision": "REV1 draft",
+  "plotdaten_contract": "v0.1",
+  "changelog": [
+    "0.1.0: initial cooling map. The cooling workbook names the indoor water loop _source; the suffix is dropped so Plotdaten has the same water-loop columns as heating (T_supply, T_return_emu, volume flow, Pressure difference, cp_out_sink, cp_in_sink, density_sink, mass flow). Cooling capacity (without corr) keeps its name. Every row gets duty = cooling (not read by the WebApp yet). Refuses the air-to-water heating workbook.",
+    "0.1.1: also refuses the hybrid workbook (names Template \"Hybrid\") and the water-to-water workbook (names Template \"Water-to-water\"). Hybrid hint first, air-to-water hint last; first match wins. Column mappings unchanged."
+  ],
+  "header_detection": {
+    "strategy": "scan_for_markers",
+    "marker_any_of": ["T_out_source", "Cooling capacity (without corr)", "volume flow_source", "T_outdoor (WB)"],
+    "units_row_offset": 1,
+    "avg_row_offset": 2,
+    "data_row_offset": 3,
+    "fallback_header_row_0based": 3
+  },
+  "sheet_names_expected": ["A", "B", "C", "D"],
+  "webapp_required_columns": [
+    "time_elapsed",
+    "T_outdoor (DB)",
+    "T_outdoor (WB)",
+    "T_supply",
+    "T_return_emu",
+    "volume flow",
+    "Cooling capacity (without corr)",
+    "Electric Power Input (without correction)",
+    "Pressure difference",
+    "duty"
+  ],
+  "webapp_columns_not_auto_filled": [
+    "mass flow",
+    "Electric Power Input (corrected)"
+  ],
+  "derived": [
+    {
+      "target": "time_elapsed",
+      "from": "Time",
+      "rule": "elapsed_seconds_from_first_row",
+      "notes": "Same behaviour as hpt_aw_rev1"
+    }
+  ],
+  "constant_columns": {
+    "duty": "cooling"
+  },
+  "wrong_workbook_hints": [
+    {
+      "if_present": ["Heat input (at 15°C)", "T_out_sink", "Heating Capacity (without corr)"],
+      "if_absent": ["Cooling capacity (without corr)"],
+      "message": "This sheet is from the hybrid workbook, not the cooling workbook. Keep that file and choose Template \"Hybrid\". Nothing was written for this sheet."
+    },
+    {
+      "if_present": ["T_out_sink", "T_out_source", "Heating Capacity (without corr)"],
+      "if_absent": ["Cooling capacity (without corr)"],
+      "message": "This sheet is from the water-to-water workbook, not the cooling workbook. Keep that file and choose Template \"Water-to-water\". Nothing was written for this sheet."
+    },
+    {
+      "if_present": ["T_out_sink", "Heating Capacity (without corr)"],
+      "if_absent": ["T_out_source"],
+      "message": "This sheet is from the air-to-water heating workbook, not the cooling workbook. Keep that file and choose Template \"Air-to-water\". Nothing was written for this sheet."
+    }
+  ],
+  "columns": [
+    {
+      "source": "Date",
+      "target": "Date",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Time",
+      "target": "Time",
+      "bucket": "A",
+      "required": true
+    },
+    {
+      "source": "Lab air temperature (DB)",
+      "target": "Lab air temperature (DB)",
+      "bucket": "C",
+      "required": false,
+      "aliases": ["Air Temperature (DB)", "Lab air Temperature (DB)"],
+      "notes": "Lab ambient — NEVER map to T_outdoor (DB)"
+    },
+    {
+      "source": "Lab atmospheric pressure",
+      "target": "Lab atmospheric pressure",
+      "bucket": "A",
+      "required": false,
+      "aliases": ["Atmospheric pressure"],
+      "unit_in": "kPa",
+      "unit_out": "kPa"
+    },
+    {
+      "source": "T_outdoor (DB)",
+      "target": "T_outdoor (DB)",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_outdoor_DB inlet temperature, dry bulb  (DB)",
+        "T_outdoor_DB inlet temperature, dry bulb (DB)",
+        "T_outdoor_DB"
+      ],
+      "notes": "Machine inlet DB only; the cooling header cell carries line breaks, matching is whitespace-tolerant"
+    },
+    {
+      "source": "T_outdoor (WB)",
+      "target": "T_outdoor (WB)",
+      "bucket": "A",
+      "required": true,
+      "aliases": [
+        "T_outdoor_WB inlet temperature, wet bulb  (WB)",
+        "T_outdoor_WB inlet temperature, wet bulb (WB)",
+        "T_outdoor_WB"
+      ]
+    },
+    {
+      "source": "T_out_source",
+      "target": "T_supply",
+      "bucket": "A",
+      "required": true,
+      "notes": "Indoor water loop outlet → WebApp supply. No short alias: T_out would match a heating sheet"
+    },
+    {
+      "source": "T_in_source",
+      "target": "T_return_emu",
+      "bucket": "A",
+      "required": true,
+      "notes": "Indoor water loop inlet → WebApp return emu. No short alias"
+    },
+    {
+      "source": "cp_out_source",
+      "target": "cp_out_sink",
+      "bucket": "A",
+      "required": false,
+      "notes": "Same Plotdaten name as heating's water loop"
+    },
+    {
+      "source": "cp_in_source",
+      "target": "cp_in_sink",
+      "bucket": "A",
+      "required": false,
+      "notes": "Same Plotdaten name as heating's water loop"
+    },
+    {
+      "source": "volume flow_source",
+      "target": "volume flow",
+      "bucket": "A",
+      "required": true,
+      "unit_in": "m3/h",
+      "unit_out": "m3/h",
+      "legacy_unit_in": "m3/s",
+      "legacy_scale": 3600,
+      "notes": "Unit row is m3/h; ×3600 only when the unit row says m3/s. No 'volume flow' alias: it would match a heating sheet"
+    },
+    {
+      "source": "rho_source",
+      "target": "density_sink",
+      "bucket": "A",
+      "required": false,
+      "notes": "Same Plotdaten name as heating's water loop"
+    },
+    {
+      "source": "mass flow_source",
+      "target": "mass flow",
+      "bucket": "A",
+      "required": false,
+      "notes": "Optional; dropped when empty, never derived here"
+    },
+    {
+      "source": "Pressure difference_source",
+      "target": "Pressure difference",
+      "bucket": "A",
+      "required": true,
+      "unit_in": "kPa",
+      "unit_out": "bar",
+      "scale": 0.01,
+      "notes": "Template kPa → Plotdaten/WebApp bar (/100)"
+    },
+    {
+      "source": "Compressor Frequency",
+      "target": "Compressor Frequency",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Fan Speed",
+      "target": "Fan Speed",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Voltage",
+      "target": "Voltage",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Current",
+      "target": "Current",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Frequency",
+      "target": "Frequency",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "cos_phi (optional)",
+      "target": "cos_phi",
+      "bucket": "A",
+      "required": false,
+      "aliases": ["cosФ   (if possible)", "cosФ (if possible)", "cos phi", "cos_phi"]
+    },
+    {
+      "source": "Total Power Input (without corr)",
+      "target": "Electric Power Input (without correction)",
+      "bucket": "A",
+      "required": true,
+      "notes": "Must be filled by lab"
+    },
+    {
+      "source": "Cooling capacity (without corr)",
+      "target": "Cooling capacity (without corr)",
+      "bucket": "A",
+      "required": true,
+      "notes": "Keeps its name; never renamed to Heating Capacity (without corr). Sign: positive = heat removed from the water loop"
+    },
+    {
+      "source": "Electric Power Input (corrected)",
+      "target": "Electric Power Input (corrected)",
+      "bucket": "A",
+      "required": false,
+      "aliases": ["Total Power Input (corrected)"],
+      "notes": "Only if lab provides it — importer does not invent"
+    },
+    {
+      "source": "T_return_calc",
+      "target": "T_return_calc",
+      "bucket": "A",
+      "required": false,
+      "notes": "Set inlet on the water loop when the sheet has it"
+    },
+    {
+      "source": "T_B_calc",
+      "target": "T_B_calc",
+      "bucket": "A",
+      "required": false,
+      "aliases": ["T_B_calc/t_water"]
+    },
+    {
+      "source": "T_H_calc",
+      "target": "T_H_calc",
+      "bucket": "A",
+      "required": false
+    },
+    {
+      "source": "Q_HB",
+      "target": "Q_HB",
+      "bucket": "A",
+      "required": false,
+      "aliases": ["Q_HB/Q_fixed"]
+    },
+    {
+      "source": "Q_HP",
+      "target": "Q_HP",
+      "bucket": "A",
+      "required": false
+    }
+  ],
+  "fill_if_missing": [
+  ],
+  "do_not_auto_create": [
+    "mass flow",
+    "Electric Power Input (corrected)",
+    "Electrical power input BUH",
+    "Real BUH power input",
+    "Heating Capacity (without corr)"
+  ],
+  "skip_empty_targets": [
+    "mass flow",
+    "Electric Power Input (corrected)"
+  ],
+  "notes_for_editors": [
+    "The cooling workbook has no back-up heater column; none is mapped or invented",
+    "Do not add short aliases (T_out, T_in, volume flow, cp_out): they would let a heating sheet pass",
+    "duty is written by constant_columns; the WebApp does not read it yet"
+  ],
+  "passthrough_unmapped": true,
+  "output": {
+    "folder": "Plotdaten",
+    "filename_pattern": "{prefix}{sheet}.xlsx",
+    "engine": "openpyxl"
+  }
+}

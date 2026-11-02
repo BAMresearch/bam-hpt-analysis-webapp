@@ -11,6 +11,7 @@ MAPPING = load_map("hpt_aw_rev1")  # loads hpt_aw_rev1.json
 | `hpt_aw_rev1.json` | AIR-TO-WATER template REV1 |
 | `hpt_ww_rev1.json` | WATER-TO-WATER template REV1 — sink as air-to-water, source loop kept under `_source` names, no outdoor air |
 | `hpt_hybrid_rev1.json` | HYBRID template REV1 — sink as air-to-water, `Heat input (at 15°C)` kept as its own column (never electric power or BUH) |
+| `hpt_aw_cooling_rev1.json` | AIR-TO-WATER cooling (fan coil) draft — `_source` water loop written as the usual Plotdaten water columns, `Cooling capacity (without corr)` kept, `duty` = `cooling` on every row; sheets `A–D` |
 
 The notebook dropdown lists a map only if its JSON is present.
 
@@ -46,6 +47,8 @@ You almost never need to change Python for a **tiny rename**. Edit the JSON, bum
 | `fill_if_missing` | Create columns the WebApp needs if labs did not provide them |
 | `skip_empty_targets` | Targets dropped when the template column is entirely empty (invent-risk: mass flow, corrected Q/P, both BUH columns). Every other optional column is kept even when all-empty, so the field stays visible and the WebApp stores NULL |
 | `passthrough_unmapped` | Keep extra template columns under their original names |
+| `constant_columns` | Optional. `{"name": value}` written on every data row (cooling: `{"duty": "cooling"}`) |
+| `wrong_workbook_hints` | Optional. List of `{if_present, if_absent, message}`: when every `if_present` header is found and every `if_absent` header is not, `message` goes into the report as `wrong_workbook` and the notebook writes nothing for that sheet |
 
 ---
 

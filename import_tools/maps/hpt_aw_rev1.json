@@ -1,11 +1,12 @@
 {
   "map_id": "hpt_aw_rev1",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "HPT AIR-TO-WATER Data Collection Template REV1 → Plotdaten / WebApp contract",
   "template_family": "AIR-TO-WATER",
   "template_revision": "REV1",
   "plotdaten_contract": "v0.1",
   "changelog": [
+    "0.5.3: refuses the air-to-water cooling workbook (T_out_source and Cooling capacity (without corr), no T_out_sink) with a sentence naming Template Air-to-water cooling; nothing else changed",
     "0.5.2: T_in_cond, T_out_cond, T_in_evap, T_out_evap removed (not BAM columns, not in the round-robin templates); the importer no longer passes them through to Plotdaten",
     "0.5.1: volume flow is ×3600 only when the unit row says m3/s; a small value without a unit is warned, not converted",
     "0.5.0: Q_BA no longer required (the one-mass building model outputs Q_HP and Q_HB only; older files may still carry Q_BA); Q_HP → Q_HP kept as an optional column",
@@ -52,6 +53,13 @@
       "from": "Time",
       "rule": "elapsed_seconds_from_first_row",
       "notes": "Same behaviour as import_v2 / hp_tools.get_elapsed_time"
+    }
+  ],
+  "wrong_workbook_hints": [
+    {
+      "if_present": ["T_out_source", "Cooling capacity (without corr)"],
+      "if_absent": ["T_out_sink"],
+      "message": "This sheet is from the air-to-water cooling workbook, not a heating workbook. Keep that file and choose Template \"Air-to-water cooling\". Nothing was written for this sheet."
     }
   ],
   "columns": [

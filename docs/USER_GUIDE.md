@@ -128,6 +128,7 @@ When the report is clean, uncheck **Dry-run** and press **Export!** again. It pr
 | Air-to-water, template REV1 | `hpt_aw_rev1` | Shipped |
 | Water-to-water, template REV1 | `hpt_ww_rev1` | Available |
 | Hybrid, template REV1 | `hpt_hybrid_rev1` | Available |
+| Air-to-water cooling (fan coil), draft template | `hpt_aw_cooling_rev1` | Import only — the WebApp does not score cooling yet |
 
 The **Template:** dropdown lists only the maps that exist in `import_tools/maps/`.
 
@@ -135,6 +136,10 @@ All three maps read the sink side the same way (§4.1): heating capacity, electr
 
 - **Water-to-water** adds the source loop (`T_in_source`, `T_out_source`, flow, density, cp, pressure difference) under its own `_source` names. These are monitoring means only and never replace the sink flow, sink density or heating capacity. The template has no outdoor air, so none is required.
 - **Hybrid** adds `Heat input (at 15°C)`, the gas fuel energy, as its own column and stored mean. **Gas is not added to electric power**, not to heating capacity, and not to either back-up heater column. The other gas columns (flowmeter temperature and pressure, calorific value, flow rates) are kept in Plotdaten but are not averaged.
+
+**Air-to-water cooling** is a separate workbook (sheets `A, B, C, D`). It names the indoor water loop `_source` (`T_out_source`, `T_in_source`, `volume flow_source`, `Pressure difference_source`, …). The cooling map drops that suffix and writes the usual Plotdaten water columns — `T_supply`, `T_return_emu`, `volume flow`, `Pressure difference`, `cp_out_sink`, `cp_in_sink`, `density_sink`, `mass flow` — with the same unit rules as heating. `T_outdoor (DB)` and `T_outdoor (WB)` keep their names. The capacity column stays `Cooling capacity (without corr)`; it is not renamed to heating capacity. Every row gets a column `duty` with the value `cooling`. The WebApp does not read `duty` yet.
+
+The heating maps and the cooling map refuse each other's workbook, and nothing is written for that sheet. A heating template on the cooling workbook says so and asks for Template **Air-to-water cooling**; the cooling template asks for Template **Air-to-water** on an air-to-water heating workbook, for **Water-to-water** on a water-to-water workbook and for **Hybrid** on a hybrid workbook. Nothing is written for that sheet. The `missing required sources` list is printed under that sentence.
 
 If you pick the wrong template, the symptom is a long `missing required sources` list, because the template's headers do not match what the map is looking for. That is a safe failure — nothing is written in dry-run.
 
