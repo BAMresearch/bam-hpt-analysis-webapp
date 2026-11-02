@@ -13235,9 +13235,25 @@ def _pct_outside_half(series, setpoint, half, total):
     return count / total * 100.0
 
 
-# Cooling rows: DB / WB / Tsup / dTreturn stay n/a. Flow is compared with the
-# profile's cooling flow only when that is fixed with a number (see below).
+# Cooling rows: DB / WB / Tsup stay n/a. Flow is compared with the profile's
+# cooling flow only when that is fixed with a number (see below). The inlet
+# difference (dTreturn) is scored with the steady-operation widths (Interval H),
+# never with the −2…+2 K parent band, which is the defrost width.
 COOLING_NOT_SCORED = 'cooling set — not scored'
+COOLING_INLET_NO_D = ('interval D is heating only — inlet difference is not scored '
+                      'on a cooling row there')
+COOLING_INLET_NO_BAND = 'no Interval H inlet width (dtreturn_k) is configured'
+
+
+def _cooling_dtreturn_band():
+    """Individual inlet band of a cooling row: ± Interval H ``dtreturn_k``, or None.
+
+    Cooling water is the heat source and its steady-operation interval is CS,
+    which has the Interval H inlet widths (±0.5 K each sample, ±0.3 K mean). The
+    parent ``dTreturn`` band in ``permissible_deviations.json`` (−2…+2 K) is the
+    defrost width and is never used for a cooling row.
+    """
+    return _interval_dtreturn_band(load_interval_deviations_config(), 'H')
 COOLING_FLOW_VARIABLE = 'variable cooling flow — flow % is not scored'
 COOLING_FLOW_NOT_SET = 'no fixed cooling flow is stored on the profile — flow is not scored'
 
@@ -13245,6 +13261,42 @@ COOLING_FLOW_NOT_SET = 'no fixed cooling flow is stored on the profile — flow 
 def _entry_is_cooling(entry):
     """True when the row's condition set is the fan-coil cooling set."""
     return unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
+
+
+# Cooling rows score outdoor dry-bulb (tdb_set) and the whole-test mean water
+# outlet (tsup_set) of their own letter. Wet-bulb stays unscored, and interval D
+# is heating only, so a cooling row's dry-bulb is never judged there.
+COOLING_WB_NOT_SCORED = 'cooling set — wet-bulb is not scored'
+COOLING_DB_NO_D = ('interval D is heating only — dry-bulb is not scored '
+                   'on a cooling row there')
+
+
+def _cooling_setpoints(condition_set_id, test_condition):
+    """``(tdb_set, tsup_set)`` of a cooling letter, read from the cooling set only.
+
+    The lookup passes the cooling condition-set id, so letter A is outdoor 35 °C
+    / outlet 7 °C, never the heating letter A. No heating fallback: a letter the
+    cooling set does not list gives ``(None, None)``.
+    """
+    if not unit_config.is_cooling_condition_set(condition_set_id):
+        return None, None
+    cs = unit_config.get_condition_set(condition_set_id)
+    if cs.get('id') != unit_config.COOLING_CONDITION_SET_ID:
+        # The cooling set is missing from the file: get_condition_set fell back
+        # to another set, whose letters must not be read for a cooling row.
+        return None, None
+    tdb = unit_config.get_tdb_setpoint_for(test_condition, condition_set_id=cs['id'])
+    tsup = unit_config.get_tsup_setpoint_for(test_condition, condition_set_id=cs['id'])
+    return tdb, tsup
+
+
+def _entry_cooling_setpoints(entry, test_condition=None):
+    """``(tdb_set, tsup_set)`` of a cooling row (see ``_cooling_setpoints``)."""
+    entry = entry or {}
+    tc = test_condition
+    if tc is None or str(tc).strip() == '':
+        tc = entry.get('dev_test_condition') or entry.get('test_cond')
+    return _cooling_setpoints(entry.get('condition_set_id'), tc)
 
 
 def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
@@ -13280,7 +13332,13 @@ def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
 
 
 def _entry_db_setpoint(entry, file_name):
-    """Outdoor dry-bulb set used by Deviations, including a stored fallback."""
+    """Outdoor dry-bulb set used by Deviations, including a stored fallback.
+
+    A cooling row reads its own letter's ``tdb_set`` from the cooling set and
+    nothing else: no heating letter, no stored fallback.
+    """
+    if _entry_is_cooling(entry):
+        return _entry_cooling_setpoints(entry)[0]
     entry = _entry_with_hp_id(entry)
     letter = unit_config.condition_letter(
         entry.get('dev_test_condition') or entry.get('test_cond')
@@ -13305,7 +13363,8 @@ def _entry_db_setpoint(entry, file_name):
     return db_set
 
 
-def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set, quantities):
+def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set, quantities,
+                         interval=None):
     """Individual % on the union of saved D or S spans, using that interval's JSON widths.
 
     ``quantities`` is the list of keys this interval is allowed to score. A draft
@@ -13322,9 +13381,15 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
     cooling = _entry_is_cooling(entry)
     out = {}
     if cooling:
-        # DB / WB / dTreturn stay n/a; only flow can score, against the cooling flow.
-        out = {k: (None, COOLING_NOT_SCORED) for k in quantities if k != 'flow'}
-        quantities = [k for k in quantities if k == 'flow']
+        # WB stays n/a. Flow scores against the cooling flow; the inlet and the
+        # dry-bulb (cooling tdb_set) score with this interval's own width, except
+        # on D, which is heating only (no ±2 K inlet, no ±5 K dry-bulb).
+        keep = ('flow',) if interval == 'D' else ('flow', 'dtreturn', 'db')
+        no_d = {'dtreturn': COOLING_INLET_NO_D, 'db': COOLING_DB_NO_D}
+        out = {k: (None, no_d.get(k) if interval == 'D' and k in no_d
+                   else COOLING_WB_NOT_SCORED if k == 'wb' else COOLING_NOT_SCORED)
+               for k in quantities if k not in keep}
+        quantities = [k for k in quantities if k in keep]
         if not quantities:
             return out
     entry = _entry_with_hp_id(entry)
@@ -13512,7 +13577,8 @@ def _mean_dev_half(spec, quantity):
     return _interval_spec_half(spec, MEAN_DEV_SPEC_KEYS[quantity])
 
 
-def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities):
+def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities,
+                      interval=None):
     """Signed **mean** deviations on the union of saved spans (the mean columns).
 
     One number per quantity, not a sample share: ``mean(series) − setpoint`` in K
@@ -13534,9 +13600,15 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities)
     cooling = _entry_is_cooling(entry)
     out = {}
     if cooling:
-        # DB / WB / Tsup / dTreturn stay n/a; only flow can score, against the cooling flow.
-        out = {k: (None, COOLING_NOT_SCORED) for k in quantities if k != 'flow'}
-        quantities = [k for k in quantities if k == 'flow']
+        # WB / Tsup stay n/a here (mean supply is not an interval score). Flow
+        # scores against the cooling flow, the mean inlet against this interval's
+        # mean width (H ±0.3 K; D has none) and the mean dry-bulb against the
+        # cooling tdb_set (H ±0.3 K, S ±0.6 K) — never on D, which is heating only.
+        keep = ('flow', 'dtreturn') if interval == 'D' else ('flow', 'dtreturn', 'db')
+        out = {k: (None, COOLING_DB_NO_D if (interval == 'D' and k == 'db')
+                   else COOLING_WB_NOT_SCORED if k == 'wb' else COOLING_NOT_SCORED)
+               for k in quantities if k not in keep}
+        quantities = [k for k in quantities if k in keep]
         if not quantities:
             return out
     entry = _entry_with_hp_id(entry)
@@ -13972,6 +14044,12 @@ def _guideline_score_payload_from_row(row) -> dict:
         # Cooling rows only (heating payloads are unchanged): what flow was scored against.
         cfs = row.get('cooling_flow_set')
         payload['cooling_flow_set'] = [str(cfs[0]), _guideline_num(cfs[1])] if cfs else None
+    if row.get('cooling_inlet_scored'):
+        # Cooling rows only: the inlet cells were scored with the cooling widths.
+        payload['cooling_inlet_scored'] = True
+    if row.get('cooling_db_scored'):
+        # Cooling rows only: the dry-bulb cells were scored against the cooling tdb_set.
+        payload['cooling_db_scored'] = True
     return payload
 
 
@@ -14012,6 +14090,38 @@ def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=No
     row['scores_cached'] = False
 
 
+GUIDELINE_COOLING_INLET_STALE = (
+    'inlet difference is not yet scored on this cooling row — use Compute missing scores on this page'
+)
+
+
+def _guideline_cooling_inlet_kept(payload) -> bool:
+    """True when a cached cooling payload's inlet cells were scored by the cooling rule."""
+    return bool((payload or {}).get('cooling_inlet_scored'))
+
+
+GUIDELINE_COOLING_DB_STALE = (
+    'dry-bulb is not yet scored on this cooling row — use Compute missing scores on this page'
+)
+
+
+def _guideline_cooling_db_kept(payload) -> bool:
+    """True when a cached cooling payload's dry-bulb cells were scored by the cooling rule."""
+    return bool((payload or {}).get('cooling_db_scored'))
+
+
+def _guideline_cooling_payload_stale(entry, payload) -> bool:
+    """A cached cooling row that Compute missing scores must rescore in full.
+
+    Its flow was not scored against today's fixed cooling flow, or its inlet or
+    dry-bulb cells come from before those were scored on a cooling row. Opens
+    no sheet.
+    """
+    return (_guideline_cooling_flow_state(entry, payload)[2]
+            or not _guideline_cooling_inlet_kept(payload)
+            or not _guideline_cooling_db_kept(payload))
+
+
 GUIDELINE_COOLING_FLOW_STALE = (
     'flow is not yet scored against the stored cooling flow — use Compute missing scores on this page'
 )
@@ -14040,8 +14150,17 @@ def _guideline_cooling_flow_state(entry, payload):
 
 
 def _guideline_cooling_unscored(row, reason=COOLING_NOT_SCORED, keep_flow=False,
-                                flow_reason=None) -> None:
-    """DB / WB / dTreturn cells of a cooling row n/a — never 0, never a cached number.
+                                flow_reason=None, keep_dtreturn=False,
+                                dtreturn_reason=None, keep_db=False,
+                                db_reason=None) -> None:
+    """WB cells of a cooling row n/a — never 0, never a cached number.
+
+    The inlet (dTreturn) cells are kept only with ``keep_dtreturn`` (the payload
+    was scored with the cooling inlet widths); otherwise they are emptied with
+    ``dtreturn_reason``. The dry-bulb cells are kept only with ``keep_db`` (the
+    payload was scored against the cooling tdb_set); otherwise they are emptied
+    with ``db_reason``. Interval D's inlet and dry-bulb (individual and mean)
+    are always empty on a cooling row.
 
     Same cells the scorers leave n/a for the cooling set; applied on read so a
     payload cached before the cooling skip cannot show a heating-style score.
@@ -14051,31 +14170,49 @@ def _guideline_cooling_unscored(row, reason=COOLING_NOT_SCORED, keep_flow=False,
     are not touched.
     """
     flow_reason = flow_reason or reason
+    dtreturn_reason = dtreturn_reason or reason
+    db_reason = db_reason or reason
 
     def _why(metric):
-        return flow_reason if metric == 'flow' else reason
+        if metric == 'flow':
+            return flow_reason
+        if metric == 'dtreturn':
+            return dtreturn_reason
+        if metric == 'db':
+            return db_reason
+        if metric == 'wb' and reason == COOLING_NOT_SCORED:
+            return COOLING_WB_NOT_SCORED
+        return reason
+
+    def _kept(metric):
+        return ((metric == 'flow' and keep_flow)
+                or (metric == 'dtreturn' and keep_dtreturn)
+                or (metric == 'db' and keep_db))
 
     for slot in ('h', 'eq', 'eval'):
         for metric in ('dtreturn', 'db', 'wb', 'flow'):
-            if metric == 'flow' and keep_flow:
+            if _kept(metric):
                 continue
             row[f'{slot}_{metric}_pct'] = None
             row.setdefault(f'{metric}_reasons', {})[slot] = _why(metric)
-    for k in ('db', 'dtreturn'):
-        row[f'd_{k}_pct'] = None
-        row.setdefault('d_reasons', {})[k] = reason
+    row['d_db_pct'] = None
+    row.setdefault('d_reasons', {})['db'] = COOLING_DB_NO_D
+    row['d_dtreturn_pct'] = None
+    row['d_reasons']['dtreturn'] = COOLING_INLET_NO_D if keep_dtreturn else dtreturn_reason
     for k in ('db', 'wb', 'flow', 'dtreturn'):
-        if k == 'flow' and keep_flow:
+        if _kept(k):
             continue
         row[f's_{k}_pct'] = None
         row.setdefault('s_reasons', {})[k] = _why(k)
     for iv, keys in MEAN_DEV_ROW_KEYS.items():
         reasons = row.setdefault(MEAN_DEV_REASON_KEYS[iv], {})
         for quantity, key in keys.items():
-            if quantity == 'flow' and keep_flow:
+            # Interval D is heating only: its mean dry-bulb is never kept.
+            if _kept(quantity) and not (iv == 'D' and quantity == 'db'):
                 continue
             row[key] = None
-            reasons[quantity] = _why(quantity)
+            reasons[quantity] = (COOLING_DB_NO_D if (iv == 'D' and quantity == 'db')
+                                 else _why(quantity))
 
 
 def _guideline_payload_has_pieces(payload) -> bool:
@@ -14416,14 +14553,17 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                 # another cooling flow. Heating rows carry no such key.
                 cft, cfv, _why = _entry_cooling_flow_set(parent)
                 row['cooling_flow_set'] = [cft, cfv] if cft else None
+                # The inlet cells below are scored with the cooling widths, so a
+                # page load keeps them; older payloads lack this and stay empty.
+                row['cooling_inlet_scored'] = True
+                # Same for dry-bulb, scored against the cooling tdb_set (not on D).
+                row['cooling_db_scored'] = True
             # Same parent-window series as /calculate_deviations. dTreturn keeps
             # the raw sheet (T_return_emu / T_return_calc are there already).
             df_dev = _series_for_entry_deviations(parent, df_full)
             for slot, (w_start, w_end) in dt_windows.items():
-                if _entry_is_cooling(parent):
-                    pct, reason = None, COOLING_NOT_SCORED
-                else:
-                    pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
+                # Heating and cooling alike: H / eq / eval inlet widths (±0.5 K).
+                pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
                 row[f'{slot}_dtreturn_pct'] = pct
                 row['dtreturn_reasons'][slot] = reason
                 # H's own widths, and the same spec for equilibrium / evaluation:
@@ -14437,7 +14577,7 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                     row[f'{metric}_reasons'][slot] = why
             d_pcts = _window_ds_band_pcts(
                 df_dev, df_full, _spans_from_row(row, 'd'), spec_d, parent,
-                row['file_name'], row['data_set'], ('db', 'dtreturn'))
+                row['file_name'], row['data_set'], ('db', 'dtreturn'), interval='D')
             if row['kind'] != 'defrost':
                 why = 'not a defrost cycle'
                 d_pcts = {k: (None, why) for k in ('db', 'dtreturn')}
@@ -14464,7 +14604,7 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                 row['file_name'], MEAN_DEV_QUANTITIES['H']))
             d_means = _window_mean_devs(
                 df_dev, df_full, _spans_from_row(row, 'd'), spec_d, parent,
-                row['file_name'], MEAN_DEV_QUANTITIES['D'])
+                row['file_name'], MEAN_DEV_QUANTITIES['D'], interval='D')
             if row['kind'] != 'defrost':
                 d_means = _mean_dev_na('D', 'not a defrost cycle')
             _apply_mean_devs(row, 'D', d_means)
@@ -14761,8 +14901,9 @@ def _guideline_row_sets(entry, cache=None) -> dict:
             return None
 
     cooling = _entry_is_cooling(entry)
-    # A cooling row's DB / WB / Tsup were not scored, so no set was subtracted and none is named.
-    db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
+    # A cooling row's dry-bulb is scored against its letter's cooling tdb_set;
+    # its WB and Tsup are not interval scores, so no set is named for them.
+    db_set = _safe(_entry_db_setpoint, entry, file_name)
     # Same call the flow mean was scored with, so the set shown is that set:
     # the fixed cooling flow on a cooling row (or none), the heating flow otherwise.
     if cooling:
@@ -14775,7 +14916,8 @@ def _guideline_row_sets(entry, cache=None) -> dict:
     out = {
         'db': db_set,
         # Same wet-bulb convention as the parent table and the mean columns.
-        'wb': (db_set - 1.0) if db_set is not None else None,
+        # Heating only: a cooling row's wet-bulb is not scored and has no set.
+        'wb': (db_set - 1.0) if (db_set is not None and not cooling) else None,
         'tsup': None if cooling else _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
         'flow': _guideline_num(flow[1]),
         'flow_type': flow[0],
@@ -14886,7 +15028,15 @@ def _guideline_window_rows(rowids=None) -> dict:
                 if _entry_is_cooling(entry):
                     keep_flow, flow_why, cooling_flow_stale = _guideline_cooling_flow_state(
                         entry, hit[1])
-                    _guideline_cooling_unscored(row, keep_flow=keep_flow, flow_reason=flow_why)
+                    keep_inlet = _guideline_cooling_inlet_kept(hit[1])
+                    keep_db = _guideline_cooling_db_kept(hit[1])
+                    _guideline_cooling_unscored(
+                        row, keep_flow=keep_flow, flow_reason=flow_why,
+                        keep_dtreturn=keep_inlet,
+                        dtreturn_reason=None if keep_inlet else GUIDELINE_COOLING_INLET_STALE,
+                        keep_db=keep_db,
+                        db_reason=None if keep_db else GUIDELINE_COOLING_DB_STALE)
+                    cooling_flow_stale = cooling_flow_stale or not keep_inlet or not keep_db
                 if not _guideline_payload_has_pieces(hit[1]):
                     # Stored before the pieces: keep its numbers, piece cells n/a.
                     _guideline_pieces_missing(row)
@@ -15177,7 +15327,7 @@ def api_guideline_windows_score_files():
             if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
                     and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods
                     and not (_entry_is_cooling(entry)
-                             and _guideline_cooling_flow_state(entry, hit[1])[2])):
+                             and _guideline_cooling_payload_stale(entry, hit[1]))):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -15253,9 +15403,10 @@ def api_guideline_windows_compute_scores():
                 hit = cached.get(rid)
                 if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
                         and not (_entry_is_cooling(entry)
-                                 and _guideline_cooling_flow_state(entry, hit[1])[2])):
+                                 and _guideline_cooling_payload_stale(entry, hit[1]))):
                     # A cooling row whose flow was not scored against today's fixed
-                    # cooling flow is rescored in full below; heating rows as before.
+                    # cooling flow, or whose inlet predates the cooling inlet score,
+                    # is rescored in full below; heating rows as before.
                     if _guideline_payload_has_pieces(hit[1]):
                         skipped += 1
                     else:
@@ -16607,13 +16758,21 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             'file_name': file_name,
             'hp_id': hp_id if hp_id is not None else entry.get('hp_id'),
         })
-        # Cooling set is stored, not scored: no dry-bulb, wet-bulb or supply comparison,
-        # and the heating wet-bulb rule (dry-bulb − 1 K) is not applied.
-        # Flow is compared with the profile's fixed cooling flow only (see below).
+        # Cooling set: dry-bulb against the letter's cooling tdb_set with the same
+        # individual half-width heating uses here (DB_BAND), never the heating
+        # letter grid. Wet-bulb is not scored and the heating wet-bulb rule
+        # (dry-bulb − 1 K) is not applied. Flow is compared with the profile's
+        # fixed cooling flow only (see below).
         cooling_unscored = unit_config.is_cooling_condition_set(entry.get('condition_set_id'))
         db_setpoint = None
         db_bands = None
-        if not cooling_unscored:
+        cooling_tsup_set = None
+        if cooling_unscored:
+            db_setpoint, cooling_tsup_set = _cooling_setpoints(
+                entry.get('condition_set_id'), test_condition)
+            if db_setpoint is not None:
+                db_bands = {'DB': (db_setpoint - DB_BAND, db_setpoint + DB_BAND)}
+        else:
             db_setpoint = unit_config.get_tdb_setpoint_for(
                 test_condition, climate=climate, application=application,
                 condition_set_id=entry.get('condition_set_id'),
@@ -16629,7 +16788,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             db_bands = DEVIATION_BANDS.get(test_condition)
             if db_setpoint is not None and not db_bands:
                 db_bands = calculate_deviation_bands({test_condition: db_setpoint}, DB_BAND, WB_BAND).get(test_condition)
-        if not cooling_unscored and (db_setpoint is None or not db_bands):
+        if db_setpoint is None or not db_bands:
             warning = (
                 f"{file_name}: no outdoor setpoint for condition {test_condition} "
                 f"(climate={climate}, application={application})."
@@ -16671,7 +16830,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_wb_deviation = None
         max_wb_pos = None
         max_wb_neg = None
-        if wb_applicable and db_bands:
+        if wb_applicable and db_bands and not cooling_unscored:
             wb_setpoint = db_setpoint - 1
             if _has_valid_points(cycle_data['T_outdoor (WB)']):
                 wb_outside_band = cycle_data[
@@ -16691,7 +16850,9 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             avg_timestep = 0
         
         # Calculate tsup_setpoint based on test condition × climate × application
-        tsup_setpoint = None if cooling_unscored else get_tsup_setpoint(
+        # Cooling: the letter's tsup_set (water outlet), scored as the whole-test
+        # mean only — no individual outlet percentage is computed below.
+        tsup_setpoint = cooling_tsup_set if cooling_unscored else get_tsup_setpoint(
             test_condition, file_name,
             condition_set_id=entry.get('condition_set_id'),
             climate=climate, application=application,
@@ -16706,7 +16867,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_tsup_neg = None
         tsup_band = _get_tsup_band()
         tsup_column = get_tsup_series_column(cycle_data)
-        if tsup_column and tsup_setpoint is not None:
+        if tsup_column and tsup_setpoint is not None and not cooling_unscored:
             tsup_series = cycle_data[tsup_column]
             if not _has_valid_points(tsup_series):
                 _note_missing_quantity(file_name, data_set, 'supply temperature', warning_list)
@@ -16727,9 +16888,13 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_dtreturn_deviation = None
         max_dtreturn_pos = None
         max_dtreturn_neg = None
+        # Cooling set: same subtraction, but the band is the steady-operation
+        # Interval H width (±0.5 K), never the −2…+2 K parent (defrost) band.
+        if cooling_unscored and dtreturn_band is None:
+            dtreturn_band = _cooling_dtreturn_band()
         dt_lower, dt_upper = _dtreturn_band_bounds(dtreturn_band)
-        # Cooling set: inlet difference is not scored (stays unset, never 0).
-        dtreturn = None if cooling_unscored else _dtreturn_series(cycle_data)
+        dtreturn = (None if (cooling_unscored and dtreturn_band is None)
+                    else _dtreturn_series(cycle_data))
         if dtreturn is not None:
             if not _has_valid_points(dtreturn):
                 _note_missing_quantity(file_name, data_set, 'return temperature difference (dTreturn)', warning_list)
@@ -16868,7 +17033,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
     if hp_id is not None:
         entry_for_checks.setdefault('hp_id', hp_id)
     applicable_checks = _entry_applicable_checks(entry_for_checks)
-    # Cooling set: DB / WB / Tsup / dTreturn stay unset; flow only against a fixed cooling flow.
+    # Cooling set: DB against the cooling tdb_set, WB unset, no individual Tsup %,
+    # inlet with the Interval H width; flow only against a fixed cooling flow.
     cooling_unscored = unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
 
     # Metrics that require test_condition / DB setpoint bands
@@ -16895,7 +17061,12 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             if warning_list is not None:
                 warning_list.append(warning)
         elif cooling_unscored:
+            # Cooling letter's own tdb_set / tsup_set; wet-bulb stays unset.
+            db_setpoint, cooling_tsup_set = _cooling_setpoints(
+                (entry or {}).get('condition_set_id'), test_condition)
             out['test_condition'] = test_condition
+            out['db_setpoint'] = db_setpoint
+            out['tsup_setpoint'] = cooling_tsup_set
         else:
             db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
             wb_setpoint = (db_setpoint - 1) if db_setpoint is not None else None
@@ -16922,7 +17093,9 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             db_has_data = _has_valid_points(cycle_data['T_outdoor (DB)'])
             if not db_has_data:
                 _note_missing_quantity(file_name, data_set, 'dry-bulb temperature', warning_list)
-            db_band = DEVIATION_BANDS[test_condition]['DB']
+            # Cooling: the cooling tdb_set ± the same half-width, never the heating grid.
+            db_band = ((db_setpoint - DB_BAND, db_setpoint + DB_BAND) if cooling_unscored
+                       else DEVIATION_BANDS[test_condition]['DB'])
             db_outside = cycle_data[(cycle_data['T_outdoor (DB)'] < db_band[0]) | (cycle_data['T_outdoor (DB)'] > db_band[1])]
             db_count = int(len(db_outside)) if db_has_data else None
             if 'db_outside' in metrics:
@@ -16955,7 +17128,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
                 out['max_wb_pos'], out['max_wb_neg'] = _signed_extremes(cycle_data['T_outdoor (WB)'] - wb_setpoint)
 
     # Tsup metrics (symmetric band around the supply temperature setpoint)
-    if needs_tsup_bands and out.get('tsup_setpoint') is not None:
+    # Cooling: the outlet is scored as the whole-test mean only, no individual %.
+    if needs_tsup_bands and out.get('tsup_setpoint') is not None and not cooling_unscored:
         tsup_column = get_tsup_series_column(cycle_data)
         if tsup_column:
             tsup_setpoint = out['tsup_setpoint']
@@ -16978,14 +17152,12 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
                 out['max_tsup_pos'], out['max_tsup_neg'] = _signed_extremes(tsup_series - tsup_setpoint)
 
     # dTreturn metrics (asymmetric band)
-    if not cooling_unscored and any(m in metrics for m in ('dtreturn_outside', 'dtreturn_pct', 'max_dtreturn', 'dtreturn_extremes')):
+    # Cooling set: Interval H inlet width (±0.5 K); no width configured → unset.
+    cooling_dt_band = _cooling_dtreturn_band() if cooling_unscored else None
+    if ((not cooling_unscored or cooling_dt_band is not None)
+            and any(m in metrics for m in ('dtreturn_outside', 'dtreturn_pct', 'max_dtreturn', 'dtreturn_extremes'))):
         if 'T_return_emu' in cycle_data.columns and 'T_return_calc' in cycle_data.columns:
-            dt_cfg = load_permissible_deviations().get('dTreturn', {'lower': -2.0, 'upper': 2.0})
-            try:
-                dt_lower = float(dt_cfg.get('lower', -2.0))
-                dt_upper = float(dt_cfg.get('upper', 2.0))
-            except Exception:
-                dt_lower, dt_upper = -2.0, 2.0
+            dt_lower, dt_upper = _dtreturn_band_bounds(cooling_dt_band)
             dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
             dt_has_data = _has_valid_points(dtreturn)
             if not dt_has_data:
@@ -17674,8 +17846,12 @@ def deviations():
                 tsup_setpoint_db = safe_float(entry.get('dev_tsup_setpoint'))
                 # If tsup_setpoint is missing (NULL) but we have test_condition, calculate it on-the-fly
                 if tsup_setpoint_db is None and test_condition:
-                    tsup_setpoint_db = _tsup_setpoint_from_entry(entry, test_condition, entry.get('file_name'))
-                
+                    if _entry_is_cooling(entry):
+                        # Cooling letter's tsup_set only — no heating fallback.
+                        tsup_setpoint_db = _entry_cooling_setpoints(entry, test_condition)[1]
+                    else:
+                        tsup_setpoint_db = _tsup_setpoint_from_entry(entry, test_condition, entry.get('file_name'))
+
                 stats = {
                     'test_condition': test_condition,
                     'db_setpoint': safe_float(entry.get('dev_db_setpoint')),
@@ -17814,7 +17990,10 @@ def deviations():
             pdesign = get_pdesign_for_hp(
                 hp_id, conn, file_name=entry.get('file_name'), profile_id=entry.get('profile_id')
             )
-            db_set = stats.get('db_setpoint')
+            # Qset is the heating design capacity at this dry-bulb: never on a
+            # cooling row, whose dry-bulb set is the cooling one and whose
+            # cooling capacity is not scored.
+            db_set = None if _entry_is_cooling(entry) else stats.get('db_setpoint')
             ua, qset = compute_ua_and_qset(pdesign, db_set)
             stats['qset_kw'] = round(qset, 3) if qset is not None else None
             mean_q = get_mean_q_for_deviations(entry)
@@ -18079,10 +18258,11 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
             return None
 
     cooling = _entry_is_cooling(entry)
-    # Cooling: no outdoor or supply set, so nothing is coloured against one. Flow
-    # is the profile's fixed cooling flow (never the heating flow, never the
+    # Cooling: dry-bulb is coloured against the letter's cooling tdb_set; there
+    # is no wet-bulb or supply set and no Qset (cooling capacity is not scored).
+    # Flow is the profile's fixed cooling flow (never the heating flow, never the
     # stored Deviations fallback), and the variable-flow flag follows the cooling mode.
-    db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
+    db_set = _safe(_entry_db_setpoint, entry, file_name)
     if cooling:
         flow = _safe(_entry_cooling_flow_set, entry, file_name) or (None, None, '')
         variable_flow = flow[2] == COOLING_FLOW_VARIABLE
@@ -18091,12 +18271,13 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
         variable_flow = bool(_safe(_entry_is_variable_flow, entry))
     pdesign = _safe(get_pdesign_for_hp, hp_id, conn,
                     file_name=file_name, profile_id=entry.get('profile_id'))
-    _ua, q_set = compute_ua_and_qset(pdesign, db_set)
+    _ua, q_set = compute_ua_and_qset(pdesign, None if cooling else db_set)
     out = {
         'cooling': cooling,
         'db': db_set,
         # Same wet-bulb convention as the parent table and the interval means.
-        'wb': (db_set - 1.0) if db_set is not None else None,
+        # Heating only: a cooling row's wet-bulb is not scored and has no set.
+        'wb': (db_set - 1.0) if (db_set is not None and not cooling) else None,
         'tsup': None if cooling else _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
         'tmean': _safe(_tmean_setpoint_from_entry, entry, tc),
         'q_set': q_set,
@@ -18169,8 +18350,16 @@ def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
     unit = PERIOD_STAT_COLOUR_UNITS[quantity]
     # Cooling: flow is coloured like a heating fixed-flow cell against the cooling
     # flow in the bundle (none stored → uncoloured with the no-setpoint hover).
-    if sp.get('cooling') and quantity in ('db', 'wb', 'tsup', 'dtreturn'):
-        return ('', COOLING_NOT_SCORED)
+    # The inlet mean (H row) keeps its ±0.3 K band on a cooling row too, and the
+    # dry-bulb mean is coloured against the cooling tdb_set on H and S. Interval
+    # D is heating only, so a cooling D dry-bulb stays uncoloured.
+    if sp.get('cooling'):
+        if quantity == 'wb':
+            return ('', COOLING_WB_NOT_SCORED)
+        if quantity == 'tsup':
+            return ('', COOLING_NOT_SCORED)
+        if quantity == 'db' and _period_stat_colour_row(group) == 'D':
+            return ('', COOLING_DB_NO_D)
 
     if quantity == 'flow':
         # Fixed flow only, and only the column that matches the stored set type.
@@ -20311,6 +20500,93 @@ def _flow_deviation_figure(entry, hp_id, file_name, data_set, cycle_data,
     return _figure_to_base64(fig), ''
 
 
+def _dtreturn_deviation_figure(entry, cycle_data, periods, clock_spans,
+                               parent_start, parent_end):
+    """The dTreturn figure, or ``(None, reason)``.
+
+    A row without the return columns gives ``(None, '')`` so the pop-up keeps its
+    "columns missing" sentence. A cooling row is drawn around 0 K with the
+    steady-operation width (Interval H ``dtreturn_k``, ±0.5 K), or the interval
+    steps without D when clocks are saved; the −2…+2 K parent band (the defrost
+    width) is drawn on heating rows only.
+    """
+    if 'T_return_emu' not in cycle_data.columns or 'T_return_calc' not in cycle_data.columns:
+        return None, ''
+    if _entry_is_cooling(entry):
+        return _dtreturn_cooling_figure(cycle_data, periods, clock_spans,
+                                        parent_start, parent_end)
+    dt_cfg = PERMISSIBLE_DEVIATIONS.get('dTreturn', {'lower': -2.0, 'upper': 2.0})
+    try:
+        dt_lower = float(dt_cfg.get('lower', -2.0))
+        dt_upper = float(dt_cfg.get('upper', 2.0))
+    except Exception:
+        dt_lower, dt_upper = -2.0, 2.0
+    dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
+    dt_steps = (_interval_individual_band_steps(periods, 'dtreturn',
+                                                parent_start, parent_end)
+                if clock_spans else [])
+
+    fig_dt, ax_dt = plt.subplots(figsize=PLOT_FIGSIZE)
+    ax_dt.plot(cycle_data['time_elapsed'], dtreturn,
+               label='dTreturn = T_return_emu − T_return_calc',
+               linewidth=1.5, color='purple', zorder=3)
+    _shade_guideline_clock_spans(ax_dt, clock_spans)
+    ax_dt.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.6,
+                  label='0 K', zorder=2)
+    if dt_steps:
+        drawn = _draw_interval_band_steps(ax_dt, dt_steps, 0.0, 'dtreturn', 'dTreturn')
+        _draw_parent_overlay(ax_dt, (dt_lower, dt_upper), 'purple')
+        band_text = 'interval individual ' + ', '.join(drawn)
+    else:
+        ax_dt.axhspan(dt_lower, dt_upper, color='purple', alpha=0.12,
+                      label=f'{PARENT_OVERLAY_LABEL} '
+                            f'({dt_lower:+.1f}…{dt_upper:+.1f}) K', zorder=0)
+        ax_dt.axhline(y=dt_lower, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+        ax_dt.axhline(y=dt_upper, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+        band_text = f'parent / full-cycle {dt_lower:+.1f}…{dt_upper:+.1f} K'
+    ax_dt.set_xlabel('Time Elapsed (s)', fontsize=12)
+    ax_dt.set_ylabel('Temperature difference (K)', fontsize=12)
+    ax_dt.set_title(_compact_plot_title('dtreturn', interval_fill=bool(dt_steps)))
+    ax_dt.legend(loc='best', fontsize=9)
+    ax_dt.grid(True, alpha=0.3)
+    return _figure_to_base64(fig_dt), ''
+
+
+def _dtreturn_cooling_figure(cycle_data, periods, clock_spans, parent_start, parent_end):
+    """Cooling dTreturn figure: series, 0 K, ±H band or H / S steps. Never −2…+2 K."""
+    band = _cooling_dtreturn_band()
+    if band is None:
+        return None, COOLING_INLET_NO_BAND + '.'
+    dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
+    # Interval D is heating only, so a defrost span gets no step on a cooling row.
+    dt_steps = ([st for st in _interval_individual_band_steps(
+                    periods, 'dtreturn', parent_start, parent_end) if st['interval'] != 'D']
+                if clock_spans else [])
+    fig_dt, ax_dt = plt.subplots(figsize=PLOT_FIGSIZE)
+    ax_dt.plot(cycle_data['time_elapsed'], dtreturn,
+               label='dTreturn = T_return_emu − T_return_calc',
+               linewidth=1.5, color='purple', zorder=3)
+    _shade_guideline_clock_spans(ax_dt, clock_spans)
+    ax_dt.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.6,
+                  label='0 K', zorder=2)
+    if dt_steps:
+        _draw_interval_band_steps(ax_dt, dt_steps, 0.0, 'dtreturn', 'dTreturn')
+        title = 'dTreturn — cooling, interval fill'
+    else:
+        lo, hi = band
+        ax_dt.axhspan(lo, hi, color='purple', alpha=0.12,
+                      label=f'cooling steady operation ±{hi:g} K', zorder=0)
+        ax_dt.axhline(y=lo, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+        ax_dt.axhline(y=hi, color='purple', linestyle=':', linewidth=1, alpha=0.7)
+        title = f'dTreturn — cooling ±{hi:g} K'
+    ax_dt.set_xlabel('Time Elapsed (s)', fontsize=12)
+    ax_dt.set_ylabel('Temperature difference (K)', fontsize=12)
+    ax_dt.set_title(title)
+    ax_dt.legend(loc='best', fontsize=9)
+    ax_dt.grid(True, alpha=0.3)
+    return _figure_to_base64(fig_dt), ''
+
+
 @app.route('/plot_deviation', methods=['POST'])
 def plot_deviation():
     """One figure per quantity for a single entry: DB/WB, Tsup, dTreturn, flow.
@@ -20369,10 +20645,19 @@ def plot_deviation():
         test_condition = stats['test_condition']
         tsup_setpoint = stats.get('tsup_setpoint')
         applicable_checks = _entry_applicable_checks({**entry, 'file_name': file_name, 'hp_id': hp_id})
-        # Cooling: the letter bands are the heating ones, so none is drawn.
-        bands = {} if _entry_is_cooling(entry) else (DEVIATION_BANDS.get(test_condition) or {})
+        # Cooling: DEVIATION_BANDS is the heating letter grid, so the band is the
+        # cooling tdb_set (from the stats) ± the same DB half-width. Wet-bulb is
+        # not scored on a cooling row, so neither its trace nor its band is drawn.
+        cooling = _entry_is_cooling(entry)
+        if cooling:
+            cool_db = stats.get('db_setpoint')
+            bands = ({'DB': (cool_db - DB_BAND, cool_db + DB_BAND)}
+                     if cool_db is not None else {})
+        else:
+            bands = DEVIATION_BANDS.get(test_condition) or {}
         has_db = 'db' in applicable_checks and 'T_outdoor (DB)' in cycle_data.columns
-        has_wb = 'wb' in applicable_checks and 'T_outdoor (WB)' in cycle_data.columns
+        has_wb = (not cooling and 'wb' in applicable_checks
+                  and 'T_outdoor (WB)' in cycle_data.columns)
 
         # ---- 1. Outdoor DB/WB. Air-source only: water-to-water skips it so
         # Tsup / dTreturn / flow still render.
@@ -20384,6 +20669,9 @@ def plot_deviation():
             wb_set = ((float(wb_band[0]) + float(wb_band[1])) / 2.0) if wb_band else None
             db_steps = (_interval_individual_band_steps(periods, 'db', parent_start, parent_end)
                         if (clock_spans and has_db and db_set is not None) else [])
+            if cooling:
+                # Interval D is heating only: no ±5 K step on a cooling row.
+                db_steps = [st for st in db_steps if st.get('interval') != 'D']
             wb_steps = (_interval_individual_band_steps(periods, 'wb', parent_start, parent_end)
                         if (clock_spans and has_wb and wb_set is not None) else [])
 
@@ -20459,43 +20747,9 @@ def plot_deviation():
             img_tsup = _figure_to_base64(fig_tsup)
 
         # ---- 3. dTreturn = T_return_emu - T_return_calc, against the set inlet.
-        img_dtreturn = None
-        if 'T_return_emu' in cycle_data.columns and 'T_return_calc' in cycle_data.columns:
-            dt_cfg = PERMISSIBLE_DEVIATIONS.get('dTreturn', {'lower': -2.0, 'upper': 2.0})
-            try:
-                dt_lower = float(dt_cfg.get('lower', -2.0))
-                dt_upper = float(dt_cfg.get('upper', 2.0))
-            except Exception:
-                dt_lower, dt_upper = -2.0, 2.0
-            dtreturn = cycle_data['T_return_emu'] - cycle_data['T_return_calc']
-            dt_steps = (_interval_individual_band_steps(periods, 'dtreturn',
-                                                        parent_start, parent_end)
-                        if clock_spans else [])
-
-            fig_dt, ax_dt = plt.subplots(figsize=PLOT_FIGSIZE)
-            ax_dt.plot(cycle_data['time_elapsed'], dtreturn,
-                       label='dTreturn = T_return_emu − T_return_calc',
-                       linewidth=1.5, color='purple', zorder=3)
-            _shade_guideline_clock_spans(ax_dt, clock_spans)
-            ax_dt.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.6,
-                          label='0 K', zorder=2)
-            if dt_steps:
-                drawn = _draw_interval_band_steps(ax_dt, dt_steps, 0.0, 'dtreturn', 'dTreturn')
-                _draw_parent_overlay(ax_dt, (dt_lower, dt_upper), 'purple')
-                band_text = 'interval individual ' + ', '.join(drawn)
-            else:
-                ax_dt.axhspan(dt_lower, dt_upper, color='purple', alpha=0.12,
-                              label=f'{PARENT_OVERLAY_LABEL} '
-                                    f'({dt_lower:+.1f}…{dt_upper:+.1f}) K', zorder=0)
-                ax_dt.axhline(y=dt_lower, color='purple', linestyle=':', linewidth=1, alpha=0.7)
-                ax_dt.axhline(y=dt_upper, color='purple', linestyle=':', linewidth=1, alpha=0.7)
-                band_text = f'parent / full-cycle {dt_lower:+.1f}…{dt_upper:+.1f} K'
-            ax_dt.set_xlabel('Time Elapsed (s)', fontsize=12)
-            ax_dt.set_ylabel('Temperature difference (K)', fontsize=12)
-            ax_dt.set_title(_compact_plot_title('dtreturn', interval_fill=bool(dt_steps)))
-            ax_dt.legend(loc='best', fontsize=9)
-            ax_dt.grid(True, alpha=0.3)
-            img_dtreturn = _figure_to_base64(fig_dt)
+        # A cooling row is drawn with its own ±0.5 K band, never −2…+2 K.
+        img_dtreturn, dtreturn_reason = _dtreturn_deviation_figure(
+            entry, cycle_data, periods, clock_spans, parent_start, parent_end)
 
         # ---- 4. Flow, in the same modal. Variable-flow or no configured set is
         # a skip with a reason, not a failure of the whole reply.
@@ -20510,6 +20764,7 @@ def plot_deviation():
             'image_dtreturn': img_dtreturn,
             'image_flow': img_flow,
             'flow_message': flow_reason or None,
+            'dtreturn_message': dtreturn_reason or None,
             'band_mode': band_mode,
             'clocks_shaded': bool(clock_spans),
             'clock_layers': sorted({sp['layer'] for sp in clock_spans}),

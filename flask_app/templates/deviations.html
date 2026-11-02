@@ -1186,6 +1186,11 @@
                         plotHtml += '<h5 class="mb-2">dTreturn</h5>';
                         plotHtml += `<img src="${response.image_dtreturn}" alt="dTreturn" class="img-fluid" style="width:100%; max-width:100%;">`;
                         plotHtml += '</div>';
+                    } else if (response.dtreturn_message) {
+                        // Columns are there but no figure (e.g. no Interval H inlet width configured).
+                        plotHtml += '<div class="alert alert-info mt-3">';
+                        plotHtml += '<i class="fas fa-info-circle"></i> dTreturn plot not shown: ' + response.dtreturn_message;
+                        plotHtml += '</div>';
                     } else {
                         plotHtml += '<div class="alert alert-info mt-3">';
                         plotHtml += '<i class="fas fa-info-circle"></i> dTreturn plot not available (T_return_emu / T_return_calc missing).';
