@@ -259,6 +259,28 @@
           }
         }
       }
+    },
+    "ecodesign_cooling_fan_coil": {
+      "display_name": "Ecodesign cooling – fan coil",
+      "description": "Fan-coil cooling, one outdoor grid, water outlet setpoints (tsup_set). Not scored.",
+      "conditions": {
+        "A": {
+          "tdb_set": 35.0,
+          "tsup_set": 7.0
+        },
+        "B": {
+          "tdb_set": 30.0,
+          "tsup_set": 8.5
+        },
+        "C": {
+          "tdb_set": 25.0,
+          "tsup_set": 10.0
+        },
+        "D": {
+          "tdb_set": 20.0,
+          "tsup_set": 11.5
+        }
+      }
     }
   }
 }

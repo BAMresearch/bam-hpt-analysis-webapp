@@ -218,6 +218,8 @@ Nav bar, left to right, roughly in workflow order.
 
 The default condition **set** is Ecodesign Table 3 heating conditions (`ecodesign_heating`; the legacy alias `BAM_RRT` is still accepted). Average / MT is the default climate × application **slice** inside that set, not the name of the set.
 
+A Plotdaten file with `duty` = `cooling` is stored on Add to DB, and from the paste box on the main page, as `ecodesign_cooling_fan_coil` (fan coil, letters A–D, water outlets 7 / 8.5 / 10 / 11.5 °C). A file with no `duty` column stays on the heating set. A file that mixes more than one duty is not added. The cooling set is not scored on Deviations or Guideline Windows (dry-bulb, wet-bulb, supply, inlet difference and flow stay n/a), and the heating wet-bulb rule (dry-bulb − 1 K) is not applied to it. Its letters are listed read-only under the heating table on `/profiles`.
+
 Check this before analysing a new unit. A wrong or missing profile shows up later as implausible deviations, because the setpoints the deviations are measured against came from the wrong place.
 
 Shared profiles — including the HPT placeholders `HPT_RRT1` … `HPT_RRT6_STAGED` and the `EXAMPLE_*` profiles — are versioned in `flask_app/config/profiles/`. Profiles you create for real units belong in `flask_app/config/profiles/local/`, which is deliberately excluded from version control so unit parameters never reach the repository.

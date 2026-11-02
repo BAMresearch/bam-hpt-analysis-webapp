@@ -113,6 +113,28 @@ def get_default_condition_set_id() -> str:
     return _resolve_condition_set_id(raw)
 
 
+COOLING_CONDITION_SET_ID = 'ecodesign_cooling_fan_coil'
+
+
+def condition_set_id_for_duty(duty: Any) -> str:
+    """Condition set for a Plotdaten ``duty`` value.
+
+    ``cooling`` (any case, surrounding spaces ignored) is the fan-coil cooling
+    set. Anything else, including empty or missing, is the default heating set.
+    """
+    s = '' if duty is None else str(duty).strip().lower()
+    if s == 'cooling':
+        return COOLING_CONDITION_SET_ID
+    return get_default_condition_set_id()
+
+
+def is_cooling_condition_set(condition_set_id: Optional[str]) -> bool:
+    """True for the fan-coil cooling set, which is stored but not scored."""
+    if condition_set_id is None:
+        return False
+    return _resolve_condition_set_id(str(condition_set_id).strip()) == COOLING_CONDITION_SET_ID
+
+
 def get_condition_set(condition_set_id: Optional[str] = None) -> Dict[str, Any]:
     doc = load_condition_sets_document()
     sets = doc.get('condition_sets') or {}

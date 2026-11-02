@@ -843,23 +843,74 @@ def _profile_picker_items():
     return items
 
 
-def _stamp_profile_on_rowids(rowids, profile_id):
-    """Write profile_id, default condition set, and hp_id onto new results rows."""
+def _condition_set_from_duty_values(values):
+    """(condition_set_id, None) from a file's ``duty`` values, or (None, message).
+
+    No non-empty value keeps the default heating set. One file is one duty: if the
+    values map to more than one condition set, nothing from the file is inserted.
+    """
+    seen = set()
+    for v in values:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            continue
+        s = str(v).strip()
+        if s:
+            seen.add(unit_config.condition_set_id_for_duty(s))
+    if not seen:
+        return unit_config.get_default_condition_set_id(), None
+    if len(seen) > 1:
+        return None, 'the file has more than one duty; nothing from it was added'
+    return next(iter(seen)), None
+
+
+def _plotdaten_file_condition_set(file_name):
+    """Read only the ``duty`` column of the Plotdaten file being added (all sheets)."""
+    file_path = os.path.join(config['data_dir'], file_name)
+    if not os.path.isfile(file_path):
+        return unit_config.get_default_condition_set_id(), None  # insert reports the missing file
+    try:
+        sheets = pd.read_excel(file_path, sheet_name=None,
+                               usecols=lambda c: str(c).strip().lower() == 'duty')
+    except Exception as exc:
+        print(f"[duty] could not read duty column of {file_name}: {exc}")
+        return unit_config.get_default_condition_set_id(), None  # insert reports the read error
+    values = []
+    for sheet in sheets.values():
+        for col in sheet.columns:
+            values.extend(sheet[col].tolist())
+    return _condition_set_from_duty_values(values)
+
+
+def _non_default_cs(rowid_cs):
+    """Only rows whose file set differs from the default need an explicit stamp."""
+    default_cs = unit_config.get_default_condition_set_id()
+    return {rid: cid for rid, cid in (rowid_cs or {}).items() if cid and cid != default_cs}
+
+
+def _stamp_profile_on_rowids(rowids, profile_id, condition_set_ids=None):
+    """Write profile_id, condition set, and hp_id onto new results rows.
+
+    ``condition_set_ids`` maps rowid → set id read from the file's ``duty``. A
+    mapped id is written as is; other rows only fill an empty id with the default.
+    """
     if not rowids:
         return
     pid = (str(profile_id).strip() if profile_id not in (None, '') else '') or None
     ensure_results_columns({'profile_id': 'TEXT', 'condition_set_id': 'TEXT', 'hp_id': 'INTEGER'})
     default_cs = unit_config.get_default_condition_set_id()
     derived_hp_id = unit_config.hp_id_from_profile(pid) if pid else None
+    explicit_cs = {int(k): v for k, v in (condition_set_ids or {}).items() if v}
     conn = get_db_connection()
     try:
         for rid in rowids:
+            forced = explicit_cs.get(int(rid))
             conn.execute(
                 "UPDATE results SET profile_id = ?, "
-                "condition_set_id = COALESCE(NULLIF(condition_set_id, ''), ?), "
+                "condition_set_id = CASE WHEN ? IS NOT NULL THEN ? "
+                "ELSE COALESCE(NULLIF(condition_set_id, ''), ?) END, "
                 "hp_id = CASE WHEN hp_id IS NULL OR TRIM(CAST(hp_id AS TEXT)) = '' THEN ? ELSE hp_id END "
                 "WHERE rowid = ?",
-                (pid, default_cs, derived_hp_id, int(rid)),
+                (pid, forced, forced, default_cs, derived_hp_id, int(rid)),
             )
         conn.commit()
     finally:
@@ -2889,6 +2940,8 @@ def add_bulk_data():
         entries_skipped = 0
         errors = []
         inserted_rowids = []
+        file_cs = {}       # file → (condition_set_id, error) from its duty column
+        rowid_cs = {}      # inserted rowid → condition_set_id
         
         # Split by lines and process each row
         lines = bulk_data.split('\n')
@@ -2937,11 +2990,20 @@ def add_bulk_data():
                     entries_skipped += 1
                     continue
                 
+                # Same duty read as Cycle Extract: one file is one duty.
+                if file_name not in file_cs:
+                    file_cs[file_name] = _plotdaten_file_condition_set(file_name)
+                    if file_cs[file_name][1]:
+                        errors.append(f"{file_name}: {file_cs[file_name][1]}")
+                if file_cs[file_name][1]:
+                    continue
+
                 print(f"Processing new data for {file_name}, {data_set}")
                 rowid = process_new_data(file_name, data_set, start_time, end_time, return_rowid=True)
                 if rowid:
                     entries_added += 1
                     inserted_rowids.append(int(rowid))
+                    rowid_cs[int(rowid)] = file_cs[file_name][0]
                     print(f"Successfully processed entry {entries_added}")
                 else:
                     errors.append(f"Line {i+1}: File not found or no data in time range - '{line}'")
@@ -2954,6 +3016,12 @@ def add_bulk_data():
                 errors.append(f"Line {i+1}: {str(e)} - '{line}'")
         
         print(f"Final results: added={entries_added}, skipped={entries_skipped}, errors={len(errors)}")
+
+        if inserted_rowids:
+            # Condition set from the file's duty, stored now so the review pop-up
+            # never has to fill an empty one. No profile is chosen on this form.
+            _stamp_profile_on_rowids(inserted_rowids, None,
+                                     condition_set_ids=_non_default_cs(rowid_cs))
         
         # Flash appropriate message
         if entries_added > 0:
@@ -6060,7 +6128,15 @@ def api_apply_new_entries_metadata():
                     values['profile_id'] = None
                 else:
                     if not values.get('condition_set_id'):
-                        values['condition_set_id'] = unit_config.get_default_condition_set_id()
+                        # Keep a stored set (e.g. cooling from duty); fill only an empty one.
+                        stored_cs = cur.execute(
+                            "SELECT condition_set_id FROM results WHERE rowid = ?", (rowid,)
+                        ).fetchone()
+                        stored_cs = str(stored_cs[0] or '').strip() if stored_cs else ''
+                        if stored_cs:
+                            values.pop('condition_set_id', None)
+                        else:
+                            values['condition_set_id'] = unit_config.get_default_condition_set_id()
                     if values.get('hp_id') is None:
                         derived = unit_config.hp_id_from_profile(values['profile_id'])
                         if derived is not None:
@@ -13159,6 +13235,15 @@ def _pct_outside_half(series, setpoint, half, total):
     return count / total * 100.0
 
 
+# Cooling rows are stored, not scored: DB / WB / Tsup / dTreturn / flow stay n/a.
+COOLING_NOT_SCORED = 'cooling set — not scored'
+
+
+def _entry_is_cooling(entry):
+    """True when the row's condition set is the fan-coil cooling set."""
+    return unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
+
+
 def _entry_db_setpoint(entry, file_name):
     """Outdoor dry-bulb set used by Deviations, including a stored fallback."""
     entry = _entry_with_hp_id(entry)
@@ -13199,6 +13284,8 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
         return missing
     if not isinstance(spec, dict) or not spec:
         return {k: (None, 'no bands are configured for this interval') for k in quantities}
+    if _entry_is_cooling(entry):
+        return {k: (None, COOLING_NOT_SCORED) for k in quantities}
     entry = _entry_with_hp_id(entry)
     applicable = _entry_applicable_checks(entry)
 
@@ -13396,6 +13483,8 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities)
         return missing
     if not isinstance(spec, dict) or not spec:
         return {k: (None, 'no mean bands are configured for this interval') for k in quantities}
+    if _entry_is_cooling(entry):
+        return {k: (None, COOLING_NOT_SCORED) for k in quantities}
     entry = _entry_with_hp_id(entry)
     applicable = _entry_applicable_checks(entry)
     window_dev = _union_span_frame(df_dev, spans)
@@ -13858,6 +13947,30 @@ def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=No
     row['scores_cached'] = False
 
 
+def _guideline_cooling_unscored(row, reason=COOLING_NOT_SCORED) -> None:
+    """DB / WB / flow / dTreturn cells of a cooling row n/a — never 0, never a cached number.
+
+    Same cells the scorers leave n/a for the cooling set; applied on read so a
+    payload cached before the cooling skip cannot show a heating-style score.
+    ΔCOP, the evaluation means and the pieces are not touched.
+    """
+    for slot in ('h', 'eq', 'eval'):
+        for metric in ('dtreturn', 'db', 'wb', 'flow'):
+            row[f'{slot}_{metric}_pct'] = None
+            row.setdefault(f'{metric}_reasons', {})[slot] = reason
+    for k in ('db', 'dtreturn'):
+        row[f'd_{k}_pct'] = None
+        row.setdefault('d_reasons', {})[k] = reason
+    for k in ('db', 'wb', 'flow', 'dtreturn'):
+        row[f's_{k}_pct'] = None
+        row.setdefault('s_reasons', {})[k] = reason
+    for iv, keys in MEAN_DEV_ROW_KEYS.items():
+        reasons = row.setdefault(MEAN_DEV_REASON_KEYS[iv], {})
+        for quantity, key in keys.items():
+            row[key] = None
+            reasons[quantity] = reason
+
+
 def _guideline_payload_has_pieces(payload) -> bool:
     """True when a cached payload was written after the piece means existed."""
     return isinstance((payload or {}).get('piece_reasons'), dict)
@@ -14194,7 +14307,10 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
             # the raw sheet (T_return_emu / T_return_calc are there already).
             df_dev = _series_for_entry_deviations(parent, df_full)
             for slot, (w_start, w_end) in dt_windows.items():
-                pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
+                if _entry_is_cooling(parent):
+                    pct, reason = None, COOLING_NOT_SCORED
+                else:
+                    pct, reason = _window_dtreturn_pct(df_full, w_start, w_end, dt_bands[slot])
                 row[f'{slot}_dtreturn_pct'] = pct
                 row['dtreturn_reasons'][slot] = reason
                 # H's own widths, and the same spec for equilibrium / evaluation:
@@ -14531,16 +14647,19 @@ def _guideline_row_sets(entry, cache=None) -> dict:
         except Exception:
             return None
 
-    db_set = _safe(_entry_db_setpoint, entry, file_name)
+    cooling = _entry_is_cooling(entry)
+    # A cooling row was not scored, so no set was subtracted and none is named.
+    db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
     # Same call the flow mean was scored with, so the set shown is that set.
-    flow = _safe(get_flow_set_for_hp, hp_id, file_name=file_name,
-                 profile_id=entry.get('profile_id')) or (None, None)
+    flow = (None, None) if cooling else (_safe(
+        get_flow_set_for_hp, hp_id, file_name=file_name,
+        profile_id=entry.get('profile_id')) or (None, None))
     climate, application = _safe(_entry_climate_application, entry) or (None, None)
     out = {
         'db': db_set,
         # Same wet-bulb convention as the parent table and the mean columns.
         'wb': (db_set - 1.0) if db_set is not None else None,
-        'tsup': _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
+        'tsup': None if cooling else _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
         'flow': _guideline_num(flow[1]),
         'flow_type': flow[0],
         'climate': climate,
@@ -14646,6 +14765,8 @@ def _guideline_window_rows(rowids=None) -> dict:
             hit = cached.get(rid)
             if hit and hit[0] == _guideline_score_fingerprint(stored.get(rid, []), buffer_s):
                 _apply_guideline_score_payload(row, hit[1])
+                if _entry_is_cooling(entry):
+                    _guideline_cooling_unscored(row)
                 if _guideline_payload_has_pieces(hit[1]):
                     n_scored += 1
                 else:
@@ -15157,9 +15278,17 @@ def api_cycle_extract_apply():
         except Exception:
             pass
 
+        file_cs = {}       # file → (condition_set_id, error) from its duty column
+        rowid_cs = {}      # inserted rowid → condition_set_id
         for r in rows:
             sid = str(r['id'])
             fn = r['file_name']
+            if fn not in file_cs:
+                file_cs[fn] = _plotdaten_file_condition_set(fn)
+                if file_cs[fn][1]:
+                    errors.append(f"{fn}: {file_cs[fn][1]}")
+            if file_cs[fn][1]:
+                continue
             ds = r.get('data_set')
             st = r['start_time']
             et = r['end_time']
@@ -15221,6 +15350,7 @@ def api_cycle_extract_apply():
                 if rowid:
                     added += 1
                     inserted_rowids.append(int(rowid))
+                    rowid_cs[int(rowid)] = file_cs[fn][0]
                 else:
                     errors.append(f"{fn} ds={ds_eff} {st_eff}-{et_eff}: no data")
             except Exception as e:
@@ -15228,7 +15358,8 @@ def api_cycle_extract_apply():
 
         if inserted_rowids:
             session_note_inserted_rowids(inserted_rowids)
-            _stamp_profile_on_rowids(inserted_rowids, batch_profile_id)
+            _stamp_profile_on_rowids(inserted_rowids, batch_profile_id,
+                                     condition_set_ids=_non_default_cs(rowid_cs))
 
         return jsonify({
             'success': True,
@@ -15260,6 +15391,8 @@ def api_cycle_extract_add_manual():
         errors_list = []
         inserted_rowids = []
         notices = []
+        file_cs = {}       # file → (condition_set_id, error) from its duty column
+        rowid_cs = {}      # inserted rowid → condition_set_id
 
         for e in entries:
             fn = (e.get('file_name') or '').strip()
@@ -15268,6 +15401,12 @@ def api_cycle_extract_add_manual():
             et = e.get('end_time')
             if not fn or st is None or et is None:
                 errors_list.append(f'Missing fields: {e}')
+                continue
+            if fn not in file_cs:
+                file_cs[fn] = _plotdaten_file_condition_set(fn)
+                if file_cs[fn][1]:
+                    errors_list.append(f"{fn}: {file_cs[fn][1]}")
+            if file_cs[fn][1]:
                 continue
             try:
                 ds = float(ds) if ds is not None else 1.0
@@ -15298,6 +15437,7 @@ def api_cycle_extract_add_manual():
                 if rowid:
                     added += 1
                     inserted_rowids.append(int(rowid))
+                    rowid_cs[int(rowid)] = file_cs[fn][0]
                 else:
                     errors_list.append(f'{fn} ds={ds} {st}-{et}: no data')
             except Exception as ex:
@@ -15305,7 +15445,8 @@ def api_cycle_extract_add_manual():
 
         if inserted_rowids:
             session_note_inserted_rowids(inserted_rowids)
-            _stamp_profile_on_rowids(inserted_rowids, batch_profile_id)
+            _stamp_profile_on_rowids(inserted_rowids, batch_profile_id,
+                                     condition_set_ids=_non_default_cs(rowid_cs))
 
         return jsonify({
             'success': True, 'added': added, 'skipped': skipped,
@@ -16334,22 +16475,28 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             'file_name': file_name,
             'hp_id': hp_id if hp_id is not None else entry.get('hp_id'),
         })
-        db_setpoint = unit_config.get_tdb_setpoint_for(
-            test_condition, climate=climate, application=application,
-            condition_set_id=entry.get('condition_set_id'),
-        )
-        if db_setpoint is None:
-            db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
-        if db_setpoint is None:
-            try:
-                stored = entry.get('dev_db_setpoint')
-                db_setpoint = float(stored) if stored is not None else None
-            except (TypeError, ValueError):
-                db_setpoint = None
-        db_bands = DEVIATION_BANDS.get(test_condition)
-        if db_setpoint is not None and not db_bands:
-            db_bands = calculate_deviation_bands({test_condition: db_setpoint}, DB_BAND, WB_BAND).get(test_condition)
-        if db_setpoint is None or not db_bands:
+        # Cooling set is stored, not scored: no dry-bulb, wet-bulb or supply comparison,
+        # and the heating wet-bulb rule (dry-bulb − 1 K) is not applied.
+        cooling_unscored = unit_config.is_cooling_condition_set(entry.get('condition_set_id'))
+        db_setpoint = None
+        db_bands = None
+        if not cooling_unscored:
+            db_setpoint = unit_config.get_tdb_setpoint_for(
+                test_condition, climate=climate, application=application,
+                condition_set_id=entry.get('condition_set_id'),
+            )
+            if db_setpoint is None:
+                db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
+            if db_setpoint is None:
+                try:
+                    stored = entry.get('dev_db_setpoint')
+                    db_setpoint = float(stored) if stored is not None else None
+                except (TypeError, ValueError):
+                    db_setpoint = None
+            db_bands = DEVIATION_BANDS.get(test_condition)
+            if db_setpoint is not None and not db_bands:
+                db_bands = calculate_deviation_bands({test_condition: db_setpoint}, DB_BAND, WB_BAND).get(test_condition)
+        if not cooling_unscored and (db_setpoint is None or not db_bands):
             warning = (
                 f"{file_name}: no outdoor setpoint for condition {test_condition} "
                 f"(climate={climate}, application={application})."
@@ -16411,7 +16558,7 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
             avg_timestep = 0
         
         # Calculate tsup_setpoint based on test condition × climate × application
-        tsup_setpoint = get_tsup_setpoint(
+        tsup_setpoint = None if cooling_unscored else get_tsup_setpoint(
             test_condition, file_name,
             condition_set_id=entry.get('condition_set_id'),
             climate=climate, application=application,
@@ -16448,7 +16595,8 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_dtreturn_pos = None
         max_dtreturn_neg = None
         dt_lower, dt_upper = _dtreturn_band_bounds(dtreturn_band)
-        dtreturn = _dtreturn_series(cycle_data)
+        # Cooling set: inlet difference is not scored (stays unset, never 0).
+        dtreturn = None if cooling_unscored else _dtreturn_series(cycle_data)
         if dtreturn is not None:
             if not _has_valid_points(dtreturn):
                 _note_missing_quantity(file_name, data_set, 'return temperature difference (dTreturn)', warning_list)
@@ -16474,7 +16622,8 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         entry_for_flow.setdefault('file_name', file_name)
         if hp_id is not None:
             entry_for_flow.setdefault('hp_id', hp_id)
-        if not _entry_is_variable_flow(entry_for_flow):
+        # Cooling set: the profile flow is the heating flow, so it is not compared.
+        if not cooling_unscored and not _entry_is_variable_flow(entry_for_flow):
             flow_type, flow_set_value = get_flow_set_for_hp(
                 hp_id, file_name=file_name, profile_id=entry_for_flow.get('profile_id')
             ) if (hp_id or file_name) else (None, None)
@@ -16581,6 +16730,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
     if hp_id is not None:
         entry_for_checks.setdefault('hp_id', hp_id)
     applicable_checks = _entry_applicable_checks(entry_for_checks)
+    # Cooling set is stored, not scored: DB / WB / Tsup / dTreturn / flow stay unset.
+    cooling_unscored = unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
 
     # Metrics that require test_condition / DB setpoint bands
     needs_db_bands = 'db' in applicable_checks and any(m in metrics for m in ('db_outside', 'db_pct', 'max_db', 'db_extremes'))
@@ -16605,6 +16756,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             warning = f"Cannot extract test condition from filename for {file_name}"
             if warning_list is not None:
                 warning_list.append(warning)
+        elif cooling_unscored:
+            out['test_condition'] = test_condition
         else:
             db_setpoint = unit_config.get_tdb_setpoint_for(test_condition)
             wb_setpoint = (db_setpoint - 1) if db_setpoint is not None else None
@@ -16687,7 +16840,7 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
                 out['max_tsup_pos'], out['max_tsup_neg'] = _signed_extremes(tsup_series - tsup_setpoint)
 
     # dTreturn metrics (asymmetric band)
-    if any(m in metrics for m in ('dtreturn_outside', 'dtreturn_pct', 'max_dtreturn', 'dtreturn_extremes')):
+    if not cooling_unscored and any(m in metrics for m in ('dtreturn_outside', 'dtreturn_pct', 'max_dtreturn', 'dtreturn_extremes')):
         if 'T_return_emu' in cycle_data.columns and 'T_return_calc' in cycle_data.columns:
             dt_cfg = load_permissible_deviations().get('dTreturn', {'lower': -2.0, 'upper': 2.0})
             try:
@@ -16712,7 +16865,7 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
                 out['max_dtreturn_pos'], out['max_dtreturn_neg'] = _signed_extremes(dtreturn)
 
     # Flow metrics (fixed-flow set only)
-    if any(m in metrics for m in ('flow_outside', 'flow_pct', 'mean_flow_dev', 'flow_extremes')):
+    if not cooling_unscored and any(m in metrics for m in ('flow_outside', 'flow_pct', 'mean_flow_dev', 'flow_extremes')):
         entry_for_flow = dict(entry or {})
         entry_for_flow.setdefault('file_name', file_name)
         if hp_id is not None:
@@ -17782,16 +17935,20 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
         except Exception:
             return None
 
-    db_set = _safe(_entry_db_setpoint, entry, file_name)
-    flow = _safe(_entry_flow_set, entry, hp_id, file_name) or (None, None, '')
+    cooling = _entry_is_cooling(entry)
+    # Cooling: no outdoor, supply or flow set, so nothing is coloured against one.
+    db_set = None if cooling else _safe(_entry_db_setpoint, entry, file_name)
+    flow = (None, None, '') if cooling else (
+        _safe(_entry_flow_set, entry, hp_id, file_name) or (None, None, ''))
     pdesign = _safe(get_pdesign_for_hp, hp_id, conn,
                     file_name=file_name, profile_id=entry.get('profile_id'))
     _ua, q_set = compute_ua_and_qset(pdesign, db_set)
     out = {
+        'cooling': cooling,
         'db': db_set,
         # Same wet-bulb convention as the parent table and the interval means.
         'wb': (db_set - 1.0) if db_set is not None else None,
-        'tsup': _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
+        'tsup': None if cooling else _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
         'tmean': _safe(_tmean_setpoint_from_entry, entry, tc),
         'q_set': q_set,
         'flow_set_type': flow[0],
@@ -17861,6 +18018,8 @@ def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
         return ('', '')
     sp = setpoints or {}
     unit = PERIOD_STAT_COLOUR_UNITS[quantity]
+    if sp.get('cooling') and quantity in ('db', 'wb', 'tsup', 'dtreturn', 'flow'):
+        return ('', COOLING_NOT_SCORED)
 
     if quantity == 'flow':
         # Fixed flow only, and only the column that matches the stored set type.
@@ -19939,6 +20098,9 @@ def _flow_deviation_figure(entry, hp_id, file_name, data_set, cycle_data,
     A variable-flow entry has no flow band at all - that is a skip with a
     reason, never an error that takes the rest of the modal with it.
     """
+    if _entry_is_cooling(entry):
+        # The profile flow is the heating flow; a cooling row is not compared with it.
+        return None, 'Flow band does not apply: ' + COOLING_NOT_SCORED + '.'
     if _entry_is_variable_flow(entry):
         return None, 'Flow band does not apply to variable-flow tests (judged on Tmean / Tsup).'
     flow_type, flow_set_value, reason = _entry_flow_set(entry, hp_id, file_name)
@@ -20051,7 +20213,8 @@ def plot_deviation():
         test_condition = stats['test_condition']
         tsup_setpoint = stats.get('tsup_setpoint')
         applicable_checks = _entry_applicable_checks({**entry, 'file_name': file_name, 'hp_id': hp_id})
-        bands = DEVIATION_BANDS.get(test_condition) or {}
+        # Cooling: the letter bands are the heating ones, so none is drawn.
+        bands = {} if _entry_is_cooling(entry) else (DEVIATION_BANDS.get(test_condition) or {})
         has_db = 'db' in applicable_checks and 'T_outdoor (DB)' in cycle_data.columns
         has_wb = 'wb' in applicable_checks and 'T_outdoor (WB)' in cycle_data.columns
 

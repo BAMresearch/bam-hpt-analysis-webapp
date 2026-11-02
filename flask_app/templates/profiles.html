@@ -265,6 +265,24 @@
         <code>tmean_set</code> is the Table 3 variable-flow mean target and is used by the Mean Tmean check on the
         permissible deviation analysis page (variable-flow entries only).
       </p>
+
+      {% set cool = (condition_sets_doc.condition_sets or {}).get('ecodesign_cooling_fan_coil') %}
+      {% if cool %}
+      <h5 class="mt-4">{{ cool.display_name or 'ecodesign_cooling_fan_coil' }}</h5>
+      <p class="text-muted small mb-2">Technical id: <code>ecodesign_cooling_fan_coil</code> · read only</p>
+      <p class="small">{{ cool.description }} Stored on Add to DB when the Plotdaten file has <code>duty</code> = <code>cooling</code>.</p>
+      <table class="table table-sm" id="coolingCondTable">
+        <thead><tr><th>Letter</th><th>Outdoor dry-bulb (°C)</th><th>Water outlet (°C)</th></tr></thead>
+        <tbody>
+          {% for letter in ['A', 'B', 'C', 'D'] %}
+            {% set row = (cool.conditions or {}).get(letter) %}
+            {% if row %}
+            <tr><td>{{ letter }}</td><td>{{ row.tdb_set }}</td><td>{{ row.tsup_set }}</td></tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
     </div>
   </div>
 </div>
