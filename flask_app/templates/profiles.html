@@ -196,6 +196,56 @@
             <small class="form-text text-muted mt-0 mb-2">Cooling design capacity and cooling flow are typed here and stored on the profile. They are not calculated from each other and not scored.</small>
           </div>
         </div>
+        <div class="form-row" id="pumpRow">
+          <div class="form-group col-md-3">
+            <label>Indoor pump arrangement (pump_arrangement)</label>
+            <select class="form-control" name="pump_arrangement">
+              <option value="">(not set)</option>
+              <option value="integrated">integrated</option>
+              <option value="not_supplied">not_supplied</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>Indoor pump type (pump_type)</label>
+            <select class="form-control" name="pump_type">
+              <option value="">(glandless)</option>
+              <option value="glandless">glandless</option>
+              <option value="dry_motor">dry_motor</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3" id="pumpIeGroup" style="display:none">
+            <label>Indoor pump motor efficiency IE (pump_ie)</label>
+            <input class="form-control" name="pump_ie" type="number" step="any" min="0" max="1" placeholder="fraction, e.g. 0.85">
+          </div>
+          <div class="col-12">
+            <small class="form-text text-muted mt-0 mb-2">EN 14511-3 pump correction. Not set keeps the previous correction. Integrated: the pump is part of the unit; not_supplied: the pump is not part of the unit. A dry-motor pump needs IE (a fraction between 0 and 1) before the correction changes.</small>
+          </div>
+        </div>
+        <div class="form-row" id="sourcePumpRow" style="display:none">
+          <div class="form-group col-md-3">
+            <label>Source pump arrangement (source_pump_arrangement)</label>
+            <select class="form-control" name="source_pump_arrangement">
+              <option value="">(not set)</option>
+              <option value="integrated">integrated</option>
+              <option value="not_supplied">not_supplied</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label>Source pump type (source_pump_type)</label>
+            <select class="form-control" name="source_pump_type">
+              <option value="">(glandless)</option>
+              <option value="glandless">glandless</option>
+              <option value="dry_motor">dry_motor</option>
+            </select>
+          </div>
+          <div class="form-group col-md-3" id="source_pumpIeGroup" style="display:none">
+            <label>Source pump motor efficiency IE (source_pump_ie)</label>
+            <input class="form-control" name="source_pump_ie" type="number" step="any" min="0" max="1" placeholder="fraction, e.g. 0.85">
+          </div>
+          <div class="col-12">
+            <small class="form-text text-muted mt-0 mb-2">Water-to-water source pump: corrects electric power only, never capacity. Not set means no source correction.</small>
+          </div>
+        </div>
         <div class="form-row">
           <div class="form-group col-md-3">
             <label>default_climate</label>
@@ -354,6 +404,11 @@
     f.cooling_flow_mode.value = p.cooling_flow_mode || '';
     f.cooling_flow_type.value = p.cooling_flow_type || '';
     f.cooling_flow_set_value.value = (p.cooling_flow_set_value != null) ? p.cooling_flow_set_value : '';
+    ['', 'source_'].forEach(pre => {
+      f[pre + 'pump_arrangement'].value = p[pre + 'pump_arrangement'] || '';
+      f[pre + 'pump_type'].value = p[pre + 'pump_type'] || '';
+      f[pre + 'pump_ie'].value = (p[pre + 'pump_ie'] != null) ? p[pre + 'pump_ie'] : '';
+    });
     f.wb_rule.value = p.wb_rule || 'db_minus_1k';
     f.owner.value = p.owner || '';
     f.filename_patterns.value = (p.filename_patterns || []).join(',');
@@ -365,6 +420,32 @@
     f.original_entry_count.value = (entryCount != null && entryCount !== '') ? String(entryCount) : '0';
     updateSourceFlowRow();
     updateCoolingDesignRow();
+    updatePumpRows();
+  }
+
+  // EN 14511-3 pump: type only for an integrated pump, IE only for a dry-motor one.
+  // The source pump row is shown only for unit_type water_water.
+  function updatePumpRows() {
+    const f = document.getElementById('profileForm');
+    document.getElementById('sourcePumpRow').style.display =
+      f.unit_type.value === 'water_water' ? '' : 'none';
+    ['', 'source_'].forEach(pre => {
+      const integrated = f[pre + 'pump_arrangement'].value === 'integrated';
+      f[pre + 'pump_type'].disabled = !integrated;
+      const dry = integrated && f[pre + 'pump_type'].value === 'dry_motor';
+      document.getElementById(pre + 'pumpIeGroup').style.display = dry ? '' : 'none';
+    });
+  }
+
+  // Pump fields to save: only what was typed; a hidden field is sent empty (unset).
+  function pumpPayload(f, pre) {
+    const integrated = f[pre + 'pump_arrangement'].value === 'integrated';
+    const dry = integrated && f[pre + 'pump_type'].value === 'dry_motor';
+    return {
+      [pre + 'pump_arrangement']: f[pre + 'pump_arrangement'].value,
+      [pre + 'pump_type']: integrated ? f[pre + 'pump_type'].value : '',
+      [pre + 'pump_ie']: dry ? f[pre + 'pump_ie'].value.trim() : ''
+    };
   }
 
   // Air-to-water cooling design: shown only for unit_type air_water. Stored, not scored.
@@ -406,6 +487,7 @@
     f.reset();
     updateSourceFlowRow();
     updateCoolingDesignRow();
+    updatePumpRows();
     f.original_profile_id.value = '';
     f.original_destination.value = '';
     f.original_entry_count.value = '0';
@@ -427,8 +509,11 @@
   profileFormEl.source_flow_mode.addEventListener('change', updateSourceFlowRow);
   profileFormEl.unit_type.addEventListener('change', updateCoolingDesignRow);
   profileFormEl.cooling_flow_mode.addEventListener('change', updateCoolingDesignRow);
+  ['unit_type', 'pump_arrangement', 'pump_type', 'source_pump_arrangement', 'source_pump_type']
+    .forEach(name => profileFormEl[name].addEventListener('change', updatePumpRows));
   updateSourceFlowRow();
   updateCoolingDesignRow();
+  updatePumpRows();
 
   document.getElementById('profileForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -487,6 +572,12 @@
       payload.cooling_flow_mode = f.cooling_flow_mode.value;
       payload.cooling_flow_type = coolFixed ? f.cooling_flow_type.value : '';
       payload.cooling_flow_set_value = coolFixed ? f.cooling_flow_set_value.value : '';
+    }
+    // Indoor pump on every unit type; IE outside 0 to 1 is refused by the server.
+    Object.assign(payload, pumpPayload(f, ''));
+    // Other unit types omit the source pump keys so a save does not clear them.
+    if (f.unit_type.value === 'water_water') {
+      Object.assign(payload, pumpPayload(f, 'source_'));
     }
     const resp = await fetch('/api/profiles', {
       method: 'POST',

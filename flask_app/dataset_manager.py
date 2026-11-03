@@ -156,6 +156,9 @@ ANALYSIS_MEAN_COLUMNS = {
     # Measured cooling capacity and its COP (cooling rows only; never in a heating field)
     "avg_cooling_capacity_uncorr": "REAL",
     "cop_cooling_uncorr": "REAL",
+    # Pump-corrected cooling capacity and its COP (cooling rows; not scored)
+    "avg_cooling_capacity_corr": "REAL",
+    "cop_cooling_corr": "REAL",
     "has_time_series": "INTEGER",
     "time_series_data": "TEXT",
     **OPTIONAL_MONITORING_MEAN_COLUMNS,

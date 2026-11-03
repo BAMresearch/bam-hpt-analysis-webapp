@@ -14,6 +14,8 @@
   "cop_uncorr": true,
   "avg_cooling_capacity_uncorr": true,
   "cop_cooling_uncorr": true,
+  "avg_cooling_capacity_corr": true,
+  "cop_cooling_corr": true,
   "avg_heating_capacity_corr": true,
   "avg_power_input_corr": true,
   "cop_corr": true,

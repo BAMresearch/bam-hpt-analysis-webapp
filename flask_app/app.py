@@ -397,6 +397,7 @@ MEANS_BLOCK_A_COLUMNS = (
 MEANS_BLOCK_B_COLUMNS = (
     'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
     'avg_cooling_capacity_uncorr', 'cop_cooling_uncorr',
+    'avg_cooling_capacity_corr', 'cop_cooling_corr',
     'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
     'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
     'QCorrwBUH', 'PCorrwBUH', 'COPCorrwBUH', 'Ts_buh',
@@ -2071,6 +2072,88 @@ COOLING_CAPACITY_MEAN_COLUMNS = {
     'avg_cooling_capacity_uncorr': 'REAL',
     'cop_cooling_uncorr': 'REAL',
 }
+# Pump-corrected cooling capacity and its COP (cooling rows with a pump arrangement
+# set on the profile only; never in a heating field, never scored)
+COOLING_CAPACITY_CORR_COLUMNS = {
+    'avg_cooling_capacity_corr': 'REAL',
+    'cop_cooling_corr': 'REAL',
+}
+COOLING_CAPACITY_BAM_CORR_SERIES = 'Cooling capacity (BAM corrected)'
+# EN 14511-3:2022 4.1.3.4.2: a pump not supplied with the unit above 300 W
+# hydraulic power is treated as dry-motor with this IE. Never a profile default.
+NOT_SUPPLIED_PUMP_IE = 0.88
+
+
+def _pump_eta_f3(p_hyd):
+    """Annex F.3 glandless circulator efficiency (C20 = 0.49, EEI = 0.23); P_hyd in W."""
+    return ((p_hyd*0.35844) / ((1.7*p_hyd) + (17*(1 - np.exp(-0.3*p_hyd))))) * (0.49 / 0.23)
+
+
+def pump_correction_terms(p_hyd, arrangement='integrated', pump_type='glandless', ie=None):
+    """Per-timestep ``(eta, power_term_kW, capacity_term_kW)`` of EN 14511-3:2022 Annex F.
+
+    ``p_hyd`` is the hydraulic power in W (a magnitude). Both terms are positive;
+    the caller applies the sign of the arrangement.
+
+    * integrated glandless: F.3, capacity ``P_hyd·(1−η)/η``
+    * integrated dry-motor: F.4 up to 500 W, F.5 above; capacity ``P_hyd·(IE−η)/η``
+      with the profile's ``ie`` (the caller makes sure it is set)
+    * not_supplied: F.3 up to 300 W (glandless), F.4 up to 500 W and F.5 above,
+      both with IE = 0.88
+
+    Power term is ``P_hyd/η``. Exactly zero hydraulic power gives two zero terms
+    (η stays undefined there), so such a sample is corrected by 0, not NaN.
+    """
+    p = pd.Series(pd.to_numeric(p_hyd, errors='coerce'), dtype=float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        f3 = _pump_eta_f3(p)
+        f4 = 0.0721 * np.power(p, 0.3183)
+        f5 = 0.092 * np.log(p.where(p > 0)) - 0.0403
+        if arrangement == 'not_supplied':
+            eta = np.where(p <= 300, f3, np.where(p <= 500, f4, f5))
+            ie_used = np.where(p <= 300, 1.0, NOT_SUPPLIED_PUMP_IE)
+        elif pump_type == 'dry_motor':
+            eta = np.where(p <= 500, f4, f5)
+            ie_used = float(ie)
+        else:
+            eta = np.asarray(f3, dtype=float)
+            ie_used = 1.0
+        power = p / eta / 1000
+        capacity = p * (ie_used - eta) / eta / 1000
+    zero = (p == 0).to_numpy()
+    power = np.where(zero, 0.0, power)
+    capacity = np.where(zero, 0.0, capacity)
+    return (pd.Series(eta, index=p.index, dtype=float),
+            pd.Series(power, index=p.index, dtype=float),
+            pd.Series(capacity, index=p.index, dtype=float))
+
+
+def _profile_pump_settings(profile, file_name, notices=None):
+    """``(indoor, source)`` pump settings for ``analysis_window_means``.
+
+    Each is ``unit_config.resolve_pump``'s dict, or None when that pump is unset
+    or cannot be used yet. An integrated dry-motor pump without a usable IE
+    returns None (both corrections stay on the unset path) and adds one notice.
+    """
+    def usable(side, label):
+        pump = unit_config.resolve_pump(profile, side)
+        if not pump.get('arrangement'):
+            return None
+        if pump['arrangement'] == 'integrated' and pump['pump_type'] == 'dry_motor' \
+                and pump.get('ie') is None:
+            pid = (profile or {}).get('profile_id') or '?'
+            note = (f"{file_name}: profile {pid} sets an integrated dry-motor {label} pump but "
+                    f"no usable IE (motor efficiency, 0–1). The dry-motor correction waits for "
+                    f"IE; " + ("the previous pump correction is kept." if side == 'indoor'
+                               else "no source pump correction is applied."))
+            if notices is not None:
+                notices.append(note)
+            print(note)
+            return None
+        return pump
+    if not profile:
+        return None, None
+    return usable('indoor', 'indoor'), usable('source', 'source')
 
 
 def _frame_is_cooling(df) -> bool:
@@ -2342,7 +2425,8 @@ ANALYSIS_MEAN_INSERT_KEYS = (
 )
 
 
-def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=None) -> dict:
+def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=None,
+                          profile=None) -> dict:
     """Analysis-time means of one time window, keyed by results column name.
 
     This is the block Apply runs on a cycle before it stores it: the period
@@ -2355,6 +2439,11 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
     evaluation window, so both read one formula. `df_window` gains the
     intermediate series (P_hyd, power_BUH, ...) as it always has inside Apply.
     A required column that the sheet does not carry raises KeyError.
+
+    ``profile`` is the row's resolved unit profile. Its EN 14511-3 pump
+    arrangement chooses the pump correction (see ``pump_correction_terms``).
+    No profile, or an unset indoor arrangement, keeps the previous correction:
+    glandless F.3 with the sign taken from the measured pressure.
     """
     if lab_corr_missing is None:
         lab_corr_missing = any(c not in df_window.columns for c in ANALYSIS_LAB_CORR_COLUMNS)
@@ -2429,18 +2518,61 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
         # Set T_supply_afterBUH accordingly
         df_window['T_supply_afterBUH'] = df_window['T_supply'] + df_window['power_BUH']/(df_window['mass flow'] * 4.183)
 
-    # Calculate pump efficiency and BAM corrections
-    df_window['efficiency'] = ((df_window['P_hyd']*0.35844) / ((1.7*df_window['P_hyd']) + (17*(1 - np.exp(-0.3*df_window['P_hyd']))))) * (0.49 / 0.23)
-    df_window['powercorrection_BAM'] = (df_window['P_hyd']/df_window['efficiency'])/1000
-    df_window['heatingcorrection_BAM'] = (df_window['P_hyd']*(1-df_window['efficiency'])/df_window['efficiency'])/1000
+    # Pump efficiency and BAM pump corrections (EN 14511-3:2022 Annex F), per timestep.
+    indoor_pump, source_pump = _profile_pump_settings(profile, file_name, notices)
+    if indoor_pump is None:
+        # Unset path: glandless F.3, sign from the measured pressure (as before).
+        eta, pcorr, qcorr = pump_correction_terms(df_window['P_hyd'])
+    else:
+        eta, pcorr, qcorr = pump_correction_terms(
+            df_window['P_hyd'], indoor_pump['arrangement'],
+            indoor_pump['pump_type'], indoor_pump['ie'])
+    df_window['efficiency'] = eta
+    df_window['powercorrection_BAM'] = pcorr
+    df_window['heatingcorrection_BAM'] = qcorr
 
     # Calculate BAM corrected values
-    df_window['Heating Capacity (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
-        df_window[cap_col] - df_window['heatingcorrection_BAM'],
-        df_window[cap_col] + df_window['heatingcorrection_BAM'])
-    df_window['Electric Power Input (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
-        df_window['Electric Power Input (without correction)'] - df_window['powercorrection_BAM'],
-        df_window['Electric Power Input (without correction)'] + df_window['powercorrection_BAM'])
+    p_uncorr_series = df_window['Electric Power Input (without correction)']
+    if indoor_pump is None:
+        df_window['Heating Capacity (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
+            df_window[cap_col] - df_window['heatingcorrection_BAM'],
+            df_window[cap_col] + df_window['heatingcorrection_BAM'])
+        df_window['Electric Power Input (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
+            p_uncorr_series - df_window['powercorrection_BAM'],
+            p_uncorr_series + df_window['powercorrection_BAM'])
+    else:
+        # The arrangement chooses the sign, not the measured pressure. Integrated:
+        # power and heating capacity minus their terms, cooling capacity plus.
+        # Not supplied: the opposite.
+        sign = -1.0 if indoor_pump['arrangement'] == 'integrated' else 1.0
+        df_window['Electric Power Input (BAM corrected)'] = p_uncorr_series + sign * pcorr
+        if is_cooling:
+            df_window['Heating Capacity (BAM corrected)'] = np.nan
+            df_window[COOLING_CAPACITY_BAM_CORR_SERIES] = df_window[cap_col] - sign * qcorr
+        else:
+            df_window['Heating Capacity (BAM corrected)'] = df_window[cap_col] + sign * qcorr
+
+    # Water-to-water source pump: electric power only, same power term, never capacity.
+    if source_pump is not None:
+        src_cols = ('volume flow_source', 'Pressure difference_source')
+        src_missing = [c for c in src_cols if c not in df_window.columns
+                       or not pd.to_numeric(df_window[c], errors='coerce').notna().any()]
+        if src_missing:
+            note = (f"{file_name}: source pump arrangement is set but {' and '.join(src_missing)} "
+                    f"{'is' if len(src_missing) == 1 else 'are'} missing; no source pump "
+                    f"correction is applied.")
+            if notices is not None:
+                notices.append(note)
+            print(note)
+        else:
+            p_hyd_source = ((pd.to_numeric(df_window['volume flow_source'], errors='coerce') / 3600)
+                            * pd.to_numeric(df_window['Pressure difference_source'], errors='coerce').abs()
+                            * 100000).abs()
+            _eta_s, pcorr_source, _q_s = pump_correction_terms(
+                p_hyd_source, source_pump['arrangement'], source_pump['pump_type'], source_pump['ie'])
+            sign_s = -1.0 if source_pump['arrangement'] == 'integrated' else 1.0
+            df_window['Electric Power Input (BAM corrected)'] = (
+                df_window['Electric Power Input (BAM corrected)'] + sign_s * pcorr_source)
 
     # Add the new calculated values to averages
     avg_eff_pump = df_window['efficiency'].mean()
@@ -2454,10 +2586,14 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
     )
     avg_heating_capacity_bam_corr = df_window['Heating Capacity (BAM corrected)'].mean()
     avg_power_input_bam_corr = df_window['Electric Power Input (BAM corrected)'].mean()
+    avg_cooling_capacity_corr = None
     if is_cooling:
-        # The pump correction still applies the heating sign to capacity; on a
-        # cooling row its capacity result is not stored (the power result is).
+        # Never a heating field on a cooling row. With an indoor arrangement set the
+        # pump-corrected cooling capacity (cooling sign) has its own field; the unset
+        # path's capacity result uses the heating sign and is not stored.
         avg_heating_capacity_bam_corr = None
+        if indoor_pump is not None:
+            avg_cooling_capacity_corr = _finite_mean(df_window, COOLING_CAPACITY_BAM_CORR_SERIES)
 
     # Calculate BAM corrected COP
     cop_bam_corr = None if is_cooling else avg_heating_capacity_bam_corr / avg_power_input_bam_corr
@@ -2471,7 +2607,10 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
             note = (
                 f"{file_name}: lab-corrected Q/P missing — stored 'corrected' power "
                 f"from BAM pump correction (P={avg_power_input_bam_corr:.4g} kW); "
-                f"no corrected capacity is stored on a cooling row."
+                + (f"the pump-corrected cooling capacity is stored in its own field "
+                   f"(Q={avg_cooling_capacity_corr:.4g} kW)."
+                   if avg_cooling_capacity_corr is not None else
+                   "no corrected capacity is stored on a cooling row.")
             )
         else:
             note = (
@@ -2489,6 +2628,17 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
             avg_values['Heating Capacity (corrected)']
             / avg_values['Electric Power Input (corrected)']
         )
+
+    # Corrected cooling COP: corrected cooling-capacity mean over the mean stored in
+    # the existing corrected-power field (ratio of the two means).
+    p_corr_mean = avg_values.get('Electric Power Input (corrected)')
+    try:
+        p_corr_mean = float(p_corr_mean) if p_corr_mean is not None else None
+    except (TypeError, ValueError):
+        p_corr_mean = None
+    if p_corr_mean is not None and not np.isfinite(p_corr_mean):
+        p_corr_mean = None
+    cop_cooling_corr = _ratio_of_means(avg_cooling_capacity_corr, p_corr_mean)
 
     means = {db_col: avg_values[sheet_col]
              for sheet_col, db_col in ANALYSIS_AVERAGE_DB_COLUMNS.items()}
@@ -2512,6 +2662,8 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
         # Stored by a separate UPDATE after the insert (not in insert_query)
         'avg_cooling_capacity_uncorr': avg_cooling_capacity_uncorr,
         'cop_cooling_uncorr': cop_cooling_uncorr,
+        'avg_cooling_capacity_corr': avg_cooling_capacity_corr,
+        'cop_cooling_corr': cop_cooling_corr,
     })
     return means
 
@@ -2550,7 +2702,30 @@ def analysis_wbuh_fields(means: dict) -> dict:
     return out
 
 
-def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None, cycle_marking=None):
+def _row_pump_profile(cursor, file_name, data_set, start_time, end_time, profile_id=None):
+    """The unit profile whose pump fields correct this row, or None.
+
+    The row's stored ``profile_id`` wins; a new row (not stored yet, or stamped
+    only after the insert) uses the ``profile_id`` its caller is about to stamp.
+    Only an explicit id is used — no filename or HP guess.
+    """
+    pid = None
+    try:
+        cursor.execute(
+            "SELECT profile_id FROM results "
+            "WHERE file_name = ? AND data_set = ? AND start_time = ? AND end_time = ?",
+            (file_name, data_set, start_time, end_time))
+        hit = cursor.fetchone()
+        if hit is not None and hit[0] not in (None, ''):
+            pid = str(hit[0]).strip() or None
+    except sqlite3.OperationalError:
+        pid = None
+    if pid is None and profile_id not in (None, ''):
+        pid = str(profile_id).strip() or None
+    return unit_config.get_profile(pid) if pid else None
+
+
+def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None, cycle_marking=None, profile_id=None):
 
     try:
         rowid = None
@@ -2568,8 +2743,14 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
             if note not in notices:
                 notices.append(note)
 
+        pump_profile = _row_pump_profile(
+            cursor, file_name, data_set,
+            old_start_time if (update_existing and old_start_time is not None) else start_time,
+            old_end_time if (update_existing and old_end_time is not None) else end_time,
+            profile_id=profile_id)
         means = analysis_window_means(
-            df_filtered, file_name, lab_corr_missing=lab_corr_missing, notices=notices
+            df_filtered, file_name, lab_corr_missing=lab_corr_missing, notices=notices,
+            profile=pump_profile,
         )
         avg_t_mean_log = means['avg_t_mean_log']
         t_mean_from_avgs = means['t_mean_from_avgs']
@@ -2675,6 +2856,17 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
             except sqlite3.OperationalError:
                 ensure_results_columns(COOLING_CAPACITY_MEAN_COLUMNS)
                 cursor.execute(cooling_update, cooling_values)
+            # Pump-corrected cooling capacity and its COP (n/a on a heating row and
+            # when the profile sets no indoor pump arrangement)
+            cooling_corr_values = (means['avg_cooling_capacity_corr'],
+                                   means['cop_cooling_corr'], rowid)
+            cooling_corr_update = """UPDATE results SET avg_cooling_capacity_corr = ?,
+                       cop_cooling_corr = ? WHERE rowid = ?"""
+            try:
+                cursor.execute(cooling_corr_update, cooling_corr_values)
+            except sqlite3.OperationalError:
+                ensure_results_columns(COOLING_CAPACITY_CORR_COLUMNS)
+                cursor.execute(cooling_corr_update, cooling_corr_values)
             write_optional_means(cursor, df_filtered, rowid)
             # Cycle Extract owns pelec_transition_time: stamp it here, on the one
             # path that writes a parent row, so Apply no longer depends on
@@ -2806,6 +2998,7 @@ def index():
         calculated_columns = [
             'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
             'avg_cooling_capacity_uncorr', 'cop_cooling_uncorr',
+            'avg_cooling_capacity_corr', 'cop_cooling_corr',
             'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
             'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
             'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu', 'avg_t_return_calc',
@@ -2929,7 +3122,7 @@ def index():
     finally:
         conn.close()
 
-def process_new_data(file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, return_rowid: bool = False, notices_out=None, cycle_marking=None, exclude_end_sample=False):
+def process_new_data(file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, return_rowid: bool = False, notices_out=None, cycle_marking=None, exclude_end_sample=False, profile_id=None):
     """Process new data and update database if needed.
 
     If notices_out is a list, user-facing processing notes (mass-flow derivation,
@@ -2939,6 +3132,8 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
     from a Suggest cut (``SUGGEST_CUT_APPLY``); only a new row uses it.
     ``exclude_end_sample`` leaves the sample at ``end_time`` to the row that starts
     there; the stored end stays ``end_time``.
+    ``profile_id`` is the profile a new row is about to be stamped with; its pump
+    fields choose the pump correction (a stored row's own profile_id wins).
     """
     print(f"=== PROCESS_NEW_DATA CALLED ===")
     print(f"Processing file: {file_name}, dataset: {data_set}, time range: {start_time}-{end_time}, update_existing={update_existing}")
@@ -2975,6 +3170,7 @@ def process_new_data(file_name, data_set, start_time, end_time, update_existing=
                     update_existing=update_existing, old_start_time=old_start_time,
                     old_end_time=old_end_time, notices_out=local_notices,
                     clocked_out=clocked, cycle_marking=cycle_marking,
+                    profile_id=profile_id,
                 )
                 tagged = [_tag_notice_with_file(file_name, n) for n in local_notices]
                 if notices_out is not None:
@@ -3252,7 +3448,8 @@ def edit_entry():
             
             # Create new entry with new values
             start_ts = datetime.now()
-            success = process_new_data(new_file_name, new_data_set, new_start_time, new_end_time, update_existing=False)
+            success = process_new_data(new_file_name, new_data_set, new_start_time, new_end_time, update_existing=False,
+                                       profile_id=(old_row_snapshot or {}).get('profile_id'))
             duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
             if success and old_row_snapshot:
                 preserve_row_metadata_after_key_change(
@@ -15960,7 +16157,8 @@ def api_cycle_extract_apply():
                 cycle_notices = []
                 rowid = process_new_data(fn, ds_eff, st_eff, et_eff, return_rowid=True,
                                          notices_out=cycle_notices, cycle_marking=cycle_marking,
-                                         exclude_end_sample=exclude_end)
+                                         exclude_end_sample=exclude_end,
+                                         profile_id=batch_profile_id)
                 for n in cycle_notices:
                     if n not in notices:
                         notices.append(n)
@@ -16047,7 +16245,8 @@ def api_cycle_extract_add_manual():
 
             try:
                 cycle_notices = []
-                rowid = process_new_data(fn, ds, st, et, return_rowid=True, notices_out=cycle_notices)
+                rowid = process_new_data(fn, ds, st, et, return_rowid=True, notices_out=cycle_notices,
+                                         profile_id=batch_profile_id)
                 for n in cycle_notices:
                     if n not in notices:
                         notices.append(n)
@@ -23125,6 +23324,35 @@ def api_profiles_save():
             data['cooling_flow_type'] = ctype
         if data.get('cooling_flow_set_value') is not None and not data.get('cooling_flow_type'):
             return jsonify({'success': False, 'message': 'Choose mass or volume for the cooling flow value'})
+        # EN 14511-3 pump arrangement: only what was typed is stored. An empty field
+        # is removed from the profile (unset), never written as a default.
+        pump_clear = []
+        for key in unit_config.PUMP_PROFILE_KEYS:
+            if key not in data:
+                continue
+            raw = data[key]
+            text = '' if raw is None else str(raw).strip()
+            if text == '':
+                data.pop(key)
+                pump_clear.append(key)
+            elif key.endswith('pump_arrangement'):
+                if text.lower() not in unit_config.PUMP_ARRANGEMENTS:
+                    return jsonify({'success': False,
+                                    'message': f'{key} must be integrated, not_supplied or empty'})
+                data[key] = text.lower()
+            elif key.endswith('pump_type'):
+                ptype = unit_config.normalize_pump_type(text)
+                if ptype not in unit_config.PUMP_TYPES:
+                    return jsonify({'success': False,
+                                    'message': f'{key} must be glandless, dry_motor or empty'})
+                data[key] = ptype
+            else:
+                ie = unit_config.pump_ie_value(text)
+                if ie is None:
+                    return jsonify({'success': False, 'message': (
+                        f'{key} must be the motor efficiency as a fraction greater than 0 '
+                        f'and at most 1 (for example 0.85, not 85)')})
+                data[key] = ie
         if isinstance(data.get('filename_patterns'), str):
             data['filename_patterns'] = [p.strip() for p in data['filename_patterns'].split(',') if p.strip()]
         if isinstance(data.get('hp_id_aliases'), str):
@@ -23139,7 +23367,8 @@ def api_profiles_save():
                 'message': f'profile_id {new_id} already exists. Choose another id or edit that profile.',
             })
 
-        path = unit_config.save_profile(data, destination=destination)
+        save_kwargs = {'clear_keys': tuple(pump_clear)} if pump_clear else {}
+        path = unit_config.save_profile(data, destination=destination, **save_kwargs)
         removed_old = False
         if original_id and os.path.normpath(old_path) != os.path.normpath(new_path) and os.path.isfile(old_path):
             removed_old = unit_config.delete_profile(original_id, original_dest)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import re
 import warnings
@@ -455,6 +456,61 @@ def resolve_cooling_design(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+# --- EN 14511-3:2022 pump arrangement (pump correction) ---------------------
+
+PUMP_ARRANGEMENTS = ('integrated', 'not_supplied')
+PUMP_TYPES = ('glandless', 'dry_motor')
+# Indoor pump keys (every unit type) and source pump keys (water-to-water only).
+INDOOR_PUMP_KEYS = ('pump_arrangement', 'pump_type', 'pump_ie')
+SOURCE_PUMP_KEYS = ('source_pump_arrangement', 'source_pump_type', 'source_pump_ie')
+PUMP_PROFILE_KEYS = INDOOR_PUMP_KEYS + SOURCE_PUMP_KEYS
+
+
+def normalize_pump_type(value: Any) -> str:
+    """'' for empty; 'dry_motor' also for 'dry-motor' / 'dry motor'."""
+    return str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+
+
+def pump_ie_value(value: Any) -> Optional[float]:
+    """Motor efficiency IE as a fraction 0 < IE <= 1; None when empty or unusable."""
+    if value in (None, ''):
+        return None
+    try:
+        ie = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ie) or ie <= 0 or ie > 1:
+        return None
+    return ie
+
+
+def resolve_pump(profile: Optional[Dict[str, Any]], side: str = 'indoor') -> Dict[str, Any]:
+    """Pump arrangement for the EN 14511-3 pump correction.
+
+    Returns {arrangement, pump_type, ie}; all None when unset. ``side`` is
+    'indoor' (pump_* keys, every unit type) or 'source' (source_pump_* keys,
+    water_water only). arrangement is 'integrated' or 'not_supplied'. Only an
+    integrated pump carries a type: empty counts as glandless. ``ie`` is read
+    only for an integrated dry-motor pump and stays None when empty or outside
+    0 < IE <= 1; it is never defaulted (0.88 is the not-supplied value, applied
+    by the correction itself).
+    """
+    out: Dict[str, Any] = {'arrangement': None, 'pump_type': None, 'ie': None}
+    prefix = 'source_' if side == 'source' else ''
+    if not profile or (side == 'source' and not _is_water_water(profile)):
+        return out
+    arrangement = str(profile.get(prefix + 'pump_arrangement') or '').strip().lower()
+    if arrangement not in PUMP_ARRANGEMENTS:
+        return out
+    out['arrangement'] = arrangement
+    if arrangement == 'integrated':
+        ptype = normalize_pump_type(profile.get(prefix + 'pump_type'))
+        out['pump_type'] = 'dry_motor' if ptype == 'dry_motor' else 'glandless'
+        if out['pump_type'] == 'dry_motor':
+            out['ie'] = pump_ie_value(profile.get(prefix + 'pump_ie'))
+    return out
+
+
 # --- Unit types / checks ----------------------------------------------------
 
 def load_unit_types() -> Dict[str, Any]:
@@ -555,8 +611,13 @@ def profile_json_path(profile_id: str, destination: str = 'local') -> str:
     return os.path.join(dest_map[dest], f'{profile_id}.json')
 
 
-def save_profile(profile: Dict[str, Any], destination: str = 'local') -> str:
-    """Write a profile JSON. destination: local | shared | examples."""
+def save_profile(profile: Dict[str, Any], destination: str = 'local',
+                 clear_keys: Tuple[str, ...] = ()) -> str:
+    """Write a profile JSON. destination: local | shared | examples.
+
+    ``clear_keys`` are removed from the stored file (a field left empty is not
+    written at all, rather than stored as null).
+    """
     pid = profile.get('profile_id')
     if not pid:
         raise ValueError('profile_id is required')
@@ -574,6 +635,9 @@ def save_profile(profile: Dict[str, Any], destination: str = 'local') -> str:
         loaded = _read_json(path, default={})
         if isinstance(loaded, dict):
             existing = loaded
+    for key in clear_keys or ():
+        existing.pop(key, None)
+        to_save.pop(key, None)
     existing.update(to_save)
     _write_json(path, existing)
     reload_all()
