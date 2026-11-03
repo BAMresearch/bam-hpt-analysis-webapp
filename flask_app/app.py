@@ -396,6 +396,7 @@ MEANS_BLOCK_A_COLUMNS = (
 )
 MEANS_BLOCK_B_COLUMNS = (
     'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
+    'avg_cooling_capacity_uncorr', 'cop_cooling_uncorr',
     'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
     'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
     'QCorrwBUH', 'PCorrwBUH', 'COPCorrwBUH', 'Ts_buh',
@@ -1312,6 +1313,12 @@ def compute_single_column_value(df_filtered: pd.DataFrame, column_name: str) -> 
         if column_name == 'avg_dp' and 'Pressure difference' in df_filtered.columns:
             return float(df_filtered['Pressure difference'].mean())
         # Heating/Power means and COPs
+        # Heating fields read only the heating column, so a cooling frame gives n/a.
+        # The cooling capacity and its COP have their own fields.
+        if column_name in ('avg_heating_capacity_uncorr', 'cop_uncorr',
+                           'avg_heating_capacity_corr', 'cop_corr') \
+                and _frame_is_cooling(df_filtered):
+            return None
         if column_name == 'avg_heating_capacity_uncorr' and 'Heating Capacity (without corr)' in df_filtered.columns:
             return float(df_filtered['Heating Capacity (without corr)'].mean())
         if column_name == 'avg_power_input_uncorr' and 'Electric Power Input (without correction)' in df_filtered.columns:
@@ -1319,6 +1326,13 @@ def compute_single_column_value(df_filtered: pd.DataFrame, column_name: str) -> 
         if column_name == 'cop_uncorr' and all(c in df_filtered.columns for c in ['Heating Capacity (without corr)', 'Electric Power Input (without correction)']):
             p = df_filtered['Electric Power Input (without correction)'].mean()
             return float(df_filtered['Heating Capacity (without corr)'].mean() / p) if p else None
+        if column_name in ('avg_cooling_capacity_uncorr', 'cop_cooling_uncorr'):
+            if not _frame_is_cooling(df_filtered):
+                return None
+            q = _finite_mean(df_filtered, COOLING_CAPACITY_UNCORR_COLUMN)
+            if column_name == 'avg_cooling_capacity_uncorr':
+                return q
+            return _ratio_of_means(q, _finite_mean(df_filtered, 'Electric Power Input (without correction)'))
         if column_name == 'avg_heating_capacity_corr' and 'Heating Capacity (corrected)' in df_filtered.columns:
             return float(df_filtered['Heating Capacity (corrected)'].mean())
         if column_name == 'avg_heating_capacity_corr_wbuh':
@@ -2050,6 +2064,56 @@ def create_plot(selected_records, plot_columns, plot_type='overlay'):
         print(f"Error creating plot: {e}")
         return None
 
+HEATING_CAPACITY_UNCORR_COLUMN = 'Heating Capacity (without corr)'
+COOLING_CAPACITY_UNCORR_COLUMN = 'Cooling capacity (without corr)'
+# Results fields of the measured cooling capacity and its COP (cooling rows only)
+COOLING_CAPACITY_MEAN_COLUMNS = {
+    'avg_cooling_capacity_uncorr': 'REAL',
+    'cop_cooling_uncorr': 'REAL',
+}
+
+
+def _frame_is_cooling(df) -> bool:
+    """True when the frame's ``duty`` values name the cooling condition set.
+
+    Same reading as Add to DB: no duty, or more than one, is not cooling.
+    """
+    cols = [c for c in getattr(df, 'columns', []) if str(c).strip().lower() == 'duty']
+    if not cols:
+        return False
+    values = []
+    for c in cols:
+        values.extend(df[c].tolist())
+    cs_id, _err = _condition_set_from_duty_values(values)
+    return bool(cs_id) and unit_config.is_cooling_condition_set(cs_id)
+
+
+def uncorr_capacity_column(df) -> str:
+    """Sheet column of the measured (uncorrected) capacity for this frame.
+
+    A cooling row reads the cooling column only, even when a heating column is
+    also present; any other row reads the heating column only. A heating mean is
+    stored in ``avg_heating_capacity_uncorr``; a cooling mean in
+    ``avg_cooling_capacity_uncorr``, never in a heating field.
+    """
+    return COOLING_CAPACITY_UNCORR_COLUMN if _frame_is_cooling(df) else HEATING_CAPACITY_UNCORR_COLUMN
+
+
+def _finite_mean(df, column):
+    """Mean of the finite values of ``column``; None (n/a) when absent or empty, never 0."""
+    if column not in getattr(df, 'columns', []):
+        return None
+    s = pd.to_numeric(df[column], errors='coerce').replace([np.inf, -np.inf], np.nan)
+    return float(s.mean()) if s.notna().any() else None
+
+
+def _ratio_of_means(q, p):
+    """COP as the ratio of two means; None when either is n/a or the power is 0."""
+    if q is None or p is None or not p:
+        return None
+    return float(q) / float(p)
+
+
 def process_file(file_name, data_set, start_time, end_time):
     """Process a single Excel file and return filtered DataFrame"""
     file_path = os.path.join(config['data_dir'], file_name)
@@ -2093,8 +2157,9 @@ def process_file(file_name, data_set, start_time, end_time):
         # Do NOT invent lab-corrected Q/P here. If missing, calculate_and_insert
         # will fill the DB "corr" fields from BAM-corrected values and notify the user.
         if lab_corr_missing:
-            if 'Heating Capacity (without corr)' not in df.columns:
-                print(f"ERROR: Missing heating capacity (without corr) in {file_name}")
+            cap_col = uncorr_capacity_column(df)
+            if cap_col not in df.columns:
+                print(f"ERROR: Missing {cap_col} in {file_name}")
                 return None
             if 'Electric Power Input (without correction)' not in df.columns:
                 print(f"ERROR: Missing electric power (without correction) in {file_name}")
@@ -2294,10 +2359,22 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
     if lab_corr_missing is None:
         lab_corr_missing = any(c not in df_window.columns for c in ANALYSIS_LAB_CORR_COLUMNS)
 
+    # A cooling row's measured capacity is the cooling column. Its mean and COP go to
+    # avg_cooling_capacity_uncorr / cop_cooling_uncorr; every heating capacity and
+    # heating COP field stays n/a on that row, so heating and cooling never share one.
+    cap_col = uncorr_capacity_column(df_window)
+    if cap_col not in df_window.columns:
+        raise KeyError(cap_col)
+    is_cooling = cap_col == COOLING_CAPACITY_UNCORR_COLUMN
+
     # Averages for columns that exist; lab-corrected may be filled from BAM below
     avg_values = {}
     for col in config['average_columns']:
-        if col in df_window.columns:
+        if col == HEATING_CAPACITY_UNCORR_COLUMN:
+            avg_values[col] = None if is_cooling else _finite_mean(df_window, cap_col)
+        elif is_cooling and col == 'Heating Capacity (corrected)':
+            avg_values[col] = None  # heating field: never filled on a cooling row
+        elif col in df_window.columns:
             avg_values[col] = df_window[col].mean()
         elif col in ANALYSIS_LAB_CORR_COLUMNS:
             avg_values[col] = None  # placeholder until BAM fallback
@@ -2306,11 +2383,13 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
         else:
             raise KeyError(col)
 
-    # Uncorrected COP (always from without-corr)
-    cop_uncorr = (
-        avg_values['Heating Capacity (without corr)']
-        / avg_values['Electric Power Input (without correction)']
-    )
+    # Uncorrected COP (always from without-corr): ratio of the two means
+    avg_values.setdefault(HEATING_CAPACITY_UNCORR_COLUMN,
+                          None if is_cooling else _finite_mean(df_window, cap_col))
+    avg_power_uncorr = avg_values['Electric Power Input (without correction)']
+    cop_uncorr = _ratio_of_means(avg_values[HEATING_CAPACITY_UNCORR_COLUMN], avg_power_uncorr)
+    avg_cooling_capacity_uncorr = _finite_mean(df_window, cap_col) if is_cooling else None
+    cop_cooling_uncorr = _ratio_of_means(avg_cooling_capacity_uncorr, avg_power_uncorr)
 
     # Calculate pressure difference
     ignore_percentage = 0.01
@@ -2357,8 +2436,8 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
 
     # Calculate BAM corrected values
     df_window['Heating Capacity (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
-        df_window['Heating Capacity (without corr)'] - df_window['heatingcorrection_BAM'],
-        df_window['Heating Capacity (without corr)'] + df_window['heatingcorrection_BAM'])
+        df_window[cap_col] - df_window['heatingcorrection_BAM'],
+        df_window[cap_col] + df_window['heatingcorrection_BAM'])
     df_window['Electric Power Input (BAM corrected)'] = np.where(df_window['adjusted_pressure_difference'] > 0,
         df_window['Electric Power Input (without correction)'] - df_window['powercorrection_BAM'],
         df_window['Electric Power Input (without correction)'] + df_window['powercorrection_BAM'])
@@ -2375,23 +2454,36 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
     )
     avg_heating_capacity_bam_corr = df_window['Heating Capacity (BAM corrected)'].mean()
     avg_power_input_bam_corr = df_window['Electric Power Input (BAM corrected)'].mean()
+    if is_cooling:
+        # The pump correction still applies the heating sign to capacity; on a
+        # cooling row its capacity result is not stored (the power result is).
+        avg_heating_capacity_bam_corr = None
 
     # Calculate BAM corrected COP
-    cop_bam_corr = avg_heating_capacity_bam_corr / avg_power_input_bam_corr
+    cop_bam_corr = None if is_cooling else avg_heating_capacity_bam_corr / avg_power_input_bam_corr
 
     # If lab-corrected Q/P missing: use BAM-corrected for the DB "corr" fields
     if lab_corr_missing:
         avg_values['Heating Capacity (corrected)'] = avg_heating_capacity_bam_corr
         avg_values['Electric Power Input (corrected)'] = avg_power_input_bam_corr
         cop_corr = cop_bam_corr
-        note = (
-            f"{file_name}: lab-corrected Q/P missing — stored 'corrected' averages "
-            f"from BAM pump correction (Q={avg_heating_capacity_bam_corr:.4g} kW, "
-            f"P={avg_power_input_bam_corr:.4g} kW)."
-        )
+        if is_cooling:
+            note = (
+                f"{file_name}: lab-corrected Q/P missing — stored 'corrected' power "
+                f"from BAM pump correction (P={avg_power_input_bam_corr:.4g} kW); "
+                f"no corrected capacity is stored on a cooling row."
+            )
+        else:
+            note = (
+                f"{file_name}: lab-corrected Q/P missing — stored 'corrected' averages "
+                f"from BAM pump correction (Q={avg_heating_capacity_bam_corr:.4g} kW, "
+                f"P={avg_power_input_bam_corr:.4g} kW)."
+            )
         if notices is not None:
             notices.append(note)
         print(note)
+    elif is_cooling:
+        cop_corr = None  # heating COP: never filled on a cooling row
     else:
         cop_corr = (
             avg_values['Heating Capacity (corrected)']
@@ -2417,6 +2509,9 @@ def analysis_window_means(df_window, file_name, lab_corr_missing=None, notices=N
         'avg_t_mean_log': avg_t_mean_log,
         't_mean_from_avgs': t_mean_from_avgs,
         'avg_dt_ln': avg_dt_ln,
+        # Stored by a separate UPDATE after the insert (not in insert_query)
+        'avg_cooling_capacity_uncorr': avg_cooling_capacity_uncorr,
+        'cop_cooling_uncorr': cop_cooling_uncorr,
     })
     return means
 
@@ -2570,6 +2665,16 @@ def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, e
                        WHERE rowid = ?""",
                     (avg_t_mean_log, t_mean_from_avgs, avg_dt_ln, rowid)
                 )
+            # Measured cooling capacity and its COP (n/a on a heating row)
+            cooling_values = (means['avg_cooling_capacity_uncorr'],
+                              means['cop_cooling_uncorr'], rowid)
+            cooling_update = """UPDATE results SET avg_cooling_capacity_uncorr = ?,
+                       cop_cooling_uncorr = ? WHERE rowid = ?"""
+            try:
+                cursor.execute(cooling_update, cooling_values)
+            except sqlite3.OperationalError:
+                ensure_results_columns(COOLING_CAPACITY_MEAN_COLUMNS)
+                cursor.execute(cooling_update, cooling_values)
             write_optional_means(cursor, df_filtered, rowid)
             # Cycle Extract owns pelec_transition_time: stamp it here, on the one
             # path that writes a parent row, so Apply no longer depends on
@@ -2700,6 +2805,7 @@ def index():
         standard_columns = ['file_name', 'data_set', 'start_time', 'end_time']
         calculated_columns = [
             'avg_heating_capacity_uncorr', 'avg_power_input_uncorr', 'cop_uncorr',
+            'avg_cooling_capacity_uncorr', 'cop_cooling_uncorr',
             'avg_heating_capacity_corr', 'avg_power_input_corr', 'cop_corr',
             'avg_heating_capacity_bam_corr', 'avg_power_input_bam_corr', 'cop_bam_corr',
             'avg_t_db', 'avg_t_wb', 'avg_t_supply', 'avg_t_return_emu', 'avg_t_return_calc',
@@ -5566,8 +5672,17 @@ def calculate_derived_columns_for_entry(cursor, rowid):
                         print(f"Error evaluating formula for {column_name} (entry {rowid}): {e}")
                         import traceback
                         traceback.print_exc()
+                        # Not computable is n/a: never keep a stale value (e.g. a cooling
+                        # row whose heating capacity is empty must not keep an old QCorrwBUH).
+                        cursor.execute(f"""
+                            UPDATE results
+                            SET "{actual_column_name}" = NULL
+                            WHERE rowid = ?
+                        """, (rowid,))
+                        eval_context[column_name] = None
+                        eval_context[column_name_lower] = None
                         calculated.add(column_name)  # Mark as calculated to avoid infinite loop
-                        
+
                 except Exception as e:
                     print(f"Error calculating {column_name} for entry {rowid}: {e}")
                     import traceback
@@ -13091,8 +13206,12 @@ def _prepare_sheet_for_analysis(df_full, file_name):
         df['has_buh'] = not (buh.notna().all() and len(buh) > 0 and (buh == 0).all())
     df['T_supply_set'] = config['t_supply_set_mapping'].get(extract_letter(file_name), None)
 
-    missing = [c for c in config['average_columns']
-               if c not in df.columns and c not in ANALYSIS_SUPPLIED_COLUMNS
+    # The measured capacity is the cooling column on a cooling sheet.
+    cap_col = uncorr_capacity_column(df)
+    missing = [cap_col if c == HEATING_CAPACITY_UNCORR_COLUMN else c
+               for c in config['average_columns']
+               if (cap_col if c == HEATING_CAPACITY_UNCORR_COLUMN else c) not in df.columns
+               and c not in ANALYSIS_SUPPLIED_COLUMNS
                and c not in ANALYSIS_OPTIONAL_SHEET_COLUMNS]
     if missing:
         return None, lab_corr_missing, f"sheet has no {', '.join(missing)}"

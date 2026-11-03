@@ -153,6 +153,9 @@ ANALYSIS_MEAN_COLUMNS = {
     "avg_power_buh": "REAL",
     "avg_power_buh_from_ts": "REAL",
     "avg_t_sup_buh": "REAL",
+    # Measured cooling capacity and its COP (cooling rows only; never in a heating field)
+    "avg_cooling_capacity_uncorr": "REAL",
+    "cop_cooling_uncorr": "REAL",
     "has_time_series": "INTEGER",
     "time_series_data": "TEXT",
     **OPTIONAL_MONITORING_MEAN_COLUMNS,

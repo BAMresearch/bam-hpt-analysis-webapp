@@ -13,6 +13,8 @@
     "avg_heating_capacity_uncorr",
     "avg_power_input_uncorr",
     "cop_uncorr",
+    "avg_cooling_capacity_uncorr",
+    "cop_cooling_uncorr",
     "avg_heating_capacity_corr",
     "avg_power_input_corr",
     "cop_corr",
