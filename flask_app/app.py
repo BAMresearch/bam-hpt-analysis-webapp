@@ -2725,6 +2725,32 @@ def _row_pump_profile(cursor, file_name, data_set, start_time, end_time, profile
     return unit_config.get_profile(pid) if pid else None
 
 
+def _entry_pump_profile(entry):
+    """The profile Apply corrects this stored row's pump with, or None.
+
+    Read from the row's own ``profile_id`` and loaded the way Apply loads it
+    (``unit_config.get_profile``). No stored id is the unset pump path.
+    """
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        try:
+            entry = dict(entry)
+        except (TypeError, ValueError):
+            return None
+    pid = entry.get('profile_id')
+    pid = (str(pid).strip() if pid not in (None, '') else '') or None
+    return unit_config.get_profile(pid) if pid else None
+
+
+def _profile_sets_pump_arrangement(profile) -> bool:
+    """True when the profile sets an indoor or a source pump arrangement."""
+    if not profile:
+        return False
+    return any(unit_config.resolve_pump(profile, side).get('arrangement')
+               for side in ('indoor', 'source'))
+
+
 def calculate_and_insert(cursor, df_filtered, file_name, data_set, start_time, end_time, update_existing=False, old_start_time=None, old_end_time=None, notices_out=None, clocked_out=None, cycle_marking=None, profile_id=None):
 
     try:
@@ -13415,13 +13441,17 @@ def _prepare_sheet_for_analysis(df_full, file_name):
     return df, lab_corr_missing, ''
 
 
-def _analysis_means_for_window(df_sheet, file_name, stf: float, etf: float, lab_corr_missing: bool):
+def _analysis_means_for_window(df_sheet, file_name, stf: float, etf: float, lab_corr_missing: bool,
+                               profile=None):
     """The parent's analysis-time means, computed on one window. None if not possible.
 
     The evaluation means must be the same quantities as the entry's, so the
     window goes through ``analysis_window_means`` (the block Apply runs) plus the
     BUH-corrected derived fields — not through the raw sheet columns, which BAM
     Plotdaten does not carry for Q and P.
+
+    ``profile`` is the row's stored profile (``_entry_pump_profile``), so the
+    window gets Apply's pump correction. None is the unset pump path.
     """
     window = df_sheet[(df_sheet['time_elapsed'] >= stf) & (df_sheet['time_elapsed'] <= etf)].copy()
     if window.empty:
@@ -13432,7 +13462,8 @@ def _analysis_means_for_window(df_sheet, file_name, stf: float, etf: float, lab_
         if buh.notna().all() and len(buh) > 0 and (buh == 0).all():
             window['has_buh'] = False
     try:
-        means = analysis_window_means(window, file_name, lab_corr_missing=lab_corr_missing)
+        means = analysis_window_means(window, file_name, lab_corr_missing=lab_corr_missing,
+                                      profile=profile)
     except Exception as e:
         print(f"[guideline windows] {file_name} {stf}–{etf} s: analysis means failed: {e}")
         return None
@@ -14198,6 +14229,54 @@ def _guideline_dbwb_unscored(row, reason) -> None:
     row['dbwb_reasons'] = {slot: reason for slot in DB_MINUS_WB_SLOTS}
 
 
+GUIDELINE_PUMP_STALE = (
+    'Q, P and COP are not yet computed with this profile\'s pump correction '
+    '— use Compute missing scores on this page'
+)
+
+
+def _guideline_pump_payload_stale(entry, payload) -> bool:
+    """True when a cached payload's window Q / P / COP predate the profile's pump correction.
+
+    Only a row whose stored profile sets an indoor or a source pump arrangement
+    can be stale for this; with no arrangement the unset correction was already
+    the right one. Opens no sheet.
+    """
+    if (payload or {}).get('pump_profile_scored'):
+        return False
+    return _profile_sets_pump_arrangement(_entry_pump_profile(entry))
+
+
+def _guideline_pump_on_load(entry, row, payload) -> bool:
+    """Empty a cached row's window Q, P and COP when they predate the pump profile.
+
+    Returns ``stale``. The evaluation Q / P / COP, each piece's Q / P / COP and
+    eval ΔCOP with its two slice COPs are emptied; every other stored number
+    (clocks, Tsup, durations, deviations) stays. A cell that was already empty
+    keeps its own reason.
+    """
+    if not _guideline_pump_payload_stale(entry, payload):
+        return False
+    for k in ('eval_q', 'eval_p', 'eval_cop'):
+        row[k] = None
+    piece_reasons = dict(row.get('piece_reasons') or {})
+    for slot in GUIDELINE_PIECE_SLOTS:
+        had = False
+        for qty in ('q', 'p', 'cop'):
+            key = f'piece_{slot}_{qty}'
+            had = had or row.get(key) is not None
+            row[key] = None
+        if had:
+            piece_reasons[slot] = GUIDELINE_PUMP_STALE
+    row['piece_reasons'] = piece_reasons
+    if any(row.get(k) is not None for k in ('eval_delta_cop', 'delta_cop_first', 'delta_cop_last')):
+        row['eval_delta_cop'] = None
+        row['delta_cop_first'] = None
+        row['delta_cop_last'] = None
+        row['delta_cop_reason'] = GUIDELINE_PUMP_STALE
+    return True
+
+
 def _guideline_dbwb_payload_stale(entry, payload) -> bool:
     """True when a cached payload predates DB − WB on a row that has that check.
 
@@ -14561,6 +14640,9 @@ def _guideline_score_payload_from_row(row) -> dict:
     if row.get('db_wb_scored'):
         # The three dry-bulb minus wet-bulb cells were scored by today's rule.
         payload['db_wb_scored'] = True
+    if row.get('pump_profile_scored'):
+        # Window Q, P and COP used the row's stored profile for the pump correction.
+        payload['pump_profile_scored'] = True
     return payload
 
 
@@ -14947,17 +15029,19 @@ def _defrost_piece_spans(begins_in, start, end, pelec, buffer_s):
 
 
 def _guideline_window_quantities(df_sheet, df_full, file_name, start, end,
-                                 lab_corr_missing, prep_reason):
+                                 lab_corr_missing, prep_reason, profile=None):
     """``({'tsup', 'q', 'p', 'cop'}, reason)`` on one window — the evaluation means' path.
 
     ``analysis_window_means`` plus the BUH-corrected fields, read through the
     same deviation getters as the evaluation columns, so COP is mean Q over
     mean P. The stored-series fallback is the evaluation one as well.
+    ``profile`` is the row's stored profile, for Apply's pump correction.
     """
     vals = {'tsup': None, 'q': None, 'p': None, 'cop': None}
     means = None
     if df_sheet is not None:
-        means = _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing)
+        means = _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing,
+                                           profile=profile)
     if means is not None:
         vals['tsup'] = _guideline_num(get_mean_supply_for_deviations(means))
         vals['q'] = _guideline_num(get_mean_q_for_deviations(means))
@@ -15005,6 +15089,7 @@ def _apply_guideline_pieces(row, parent, df_sheet, df_full, file_name,
         spans.update({'d1pre': None, 'd2body': None})
         reasons.update({'d1pre': why, 'd2body': why})
 
+    profile = _entry_pump_profile(parent)
     for slot in GUIDELINE_PIECE_SLOTS:
         for qty in GUIDELINE_PIECE_QUANTITIES:
             row[f'piece_{slot}_{qty}'] = None
@@ -15013,7 +15098,8 @@ def _apply_guideline_pieces(row, parent, df_sheet, df_full, file_name,
             continue
         row[f'piece_{slot}_dur_s'] = _guideline_num(span[1] - span[0])
         vals, why = _guideline_window_quantities(
-            df_sheet, df_full, file_name, span[0], span[1], lab_corr_missing, prep_reason)
+            df_sheet, df_full, file_name, span[0], span[1], lab_corr_missing, prep_reason,
+            profile=profile)
         for qty, val in vals.items():
             row[f'piece_{slot}_{qty}'] = val
         reasons[slot] = why
@@ -15137,11 +15223,16 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                                     lab_corr_missing, prep_reason, _guideline_buffer_s())
 
             row['scores_cached'] = True
+            # Pieces, evaluation means and ΔCOP below all use the row's stored
+            # profile, so a page load can keep them on a row that sets a pump.
+            row['pump_profile_scored'] = True
+            pump_profile = _entry_pump_profile(parent)
             if ev is None:
                 row['delta_cop_reason'] = 'no evaluation window is saved'
                 continue
             delta_cop = _interval_delta_cop(file_name, data_set, ev['start_time'],
-                                            ev['end_time'], interval_cfg, sheets)
+                                            ev['end_time'], interval_cfg, sheets,
+                                            profile=pump_profile)
             row['eval_delta_cop'] = _guideline_num(delta_cop.get('value_pct'))
             row['delta_cop_reason'] = delta_cop.get('reason') or ''
             _apply_delta_cop_audit(row, delta_cop)
@@ -15153,7 +15244,8 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
                 row[k] = None
             means = None
             if df_sheet is not None:
-                means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing)
+                means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing,
+                                                   profile=pump_profile)
             if means is not None:
                 row['eval_tsup'] = _guideline_num(get_mean_supply_for_deviations(means))
                 row['eval_q'] = _guideline_num(get_mean_q_for_deviations(means))
@@ -15560,13 +15652,17 @@ def _guideline_window_rows(rowids=None) -> dict:
                 # Dry-bulb minus wet-bulb: an older payload on a row that has the
                 # check keeps its other numbers and these three cells stay empty.
                 dbwb_stale = _guideline_dbwb_on_load(entry, row, hit[1])
+                # Window Q / P / COP scored before the profile's pump correction, on
+                # a row whose profile sets a pump: those cells stay empty.
+                pump_stale = _guideline_pump_on_load(entry, row, hit[1])
                 if not _guideline_payload_has_pieces(hit[1]):
                     # Stored before the pieces: keep its numbers, piece cells n/a.
                     _guideline_pieces_missing(row)
                     n_missing += 1
-                elif cooling_flow_stale or dbwb_stale:
-                    # Flow (cooling) or DB − WB cells empty until Compute missing
-                    # scores rescores the row; every other stored number stays.
+                elif cooling_flow_stale or dbwb_stale or pump_stale:
+                    # Flow (cooling), DB − WB or pump-corrected Q / P / COP cells empty
+                    # until Compute missing scores rescores the row; every other
+                    # stored number stays.
                     n_missing += 1
                 else:
                     n_scored += 1
@@ -15798,7 +15894,8 @@ def api_guideline_windows_delta_cop_trace():
         import contextlib
         with contextlib.redirect_stdout(io.StringIO()):
             trace = _interval_delta_cop_trace(row['file_name'], row['data_set'], row['eq_end'],
-                                              row['h_end'], cfg, lengths, {})
+                                              row['h_end'], cfg, lengths, {},
+                                              profile=_entry_pump_profile(entry))
         return jsonify({**base, **trace})
     except Exception as e:
         import traceback
@@ -15856,7 +15953,8 @@ def api_guideline_windows_score_files():
                     and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods
                     and not (_entry_is_cooling(entry)
                              and _guideline_cooling_payload_stale(entry, hit[1]))
-                    and not _guideline_dbwb_payload_stale(entry, hit[1])):
+                    and not _guideline_dbwb_payload_stale(entry, hit[1])
+                    and not _guideline_pump_payload_stale(entry, hit[1])):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -15933,11 +16031,13 @@ def api_guideline_windows_compute_scores():
                 if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
                         and not (_entry_is_cooling(entry)
                                  and _guideline_cooling_payload_stale(entry, hit[1]))
-                        and not _guideline_dbwb_payload_stale(entry, hit[1])):
+                        and not _guideline_dbwb_payload_stale(entry, hit[1])
+                        and not _guideline_pump_payload_stale(entry, hit[1])):
                     # A cooling row whose flow was not scored against today's fixed
                     # cooling flow, or whose inlet predates the cooling inlet score,
                     # is rescored in full below; so is a row whose payload predates
-                    # dry-bulb minus wet-bulb on a row that has that check.
+                    # dry-bulb minus wet-bulb on a row that has that check, and one
+                    # whose profile sets a pump but whose window Q / P / COP predate it.
                     if _guideline_payload_has_pieces(hit[1]):
                         skipped += 1
                     else:
@@ -16461,7 +16561,8 @@ PERIOD_MEAN_METRICS = (
     'avg_t_mean_log', 't_mean_from_avgs',
 )
 # Bump when period mean-stat columns or computation change (triggers backfill).
-PERIOD_STATS_SCHEMA = 3
+# 4: period Q / P / COP use the parent's stored profile for the pump correction.
+PERIOD_STATS_SCHEMA = 4
 
 
 def _period_stats_stale_sql(alias: str = 'cp') -> str:
@@ -16514,12 +16615,13 @@ def _period_prepared_sheet(df_full, file_name):
     return prepared
 
 
-def _period_qpc_from_analysis(df_full, file_name, stf: float, etf: float) -> dict:
+def _period_qpc_from_analysis(df_full, file_name, stf: float, etf: float, profile=None) -> dict:
     """Period Q, P and COP the way the evaluation means get them, or {} if not possible.
 
     Plotdaten carries no QCorrwBUH / PCorrwBUH / COPCorrwBUH series, so the raw
     column read left these cells empty; ``analysis_window_means`` plus the
     BUH-corrected fields does not need them. COP is mean Q over mean P.
+    ``profile`` is the parent's stored profile, for Apply's pump correction.
     """
     if not file_name or df_full is None:
         return {}
@@ -16529,7 +16631,8 @@ def _period_qpc_from_analysis(df_full, file_name, stf: float, etf: float) -> dic
         df_sheet, lab_corr_missing, _reason = _period_prepared_sheet(df_full, file_name)
         if df_sheet is None:
             return {}
-        means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing)
+        means = _analysis_means_for_window(df_sheet, file_name, stf, etf, lab_corr_missing,
+                                           profile=profile)
     if means is None:
         return {}
     out = {
@@ -16540,40 +16643,53 @@ def _period_qpc_from_analysis(df_full, file_name, stf: float, etf: float) -> dic
     return {k: v for k, v in out.items() if v is not None}
 
 
-def _period_cache_values(df_full, stf: float, etf: float, file_name=None):
+def _period_cache_values(df_full, stf: float, etf: float, file_name=None, profile=None):
     """Combined dTreturn + operating-point caches for one period window.
 
     With ``file_name`` the Q / P / COP come from the analysis-time means (the
-    evaluation columns' calculation); the raw-column read stays the fallback.
+    evaluation columns' calculation), pump-corrected with the parent's stored
+    ``profile``; the raw-column read stays the fallback.
     """
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg = _dtreturn_stats_from_df(
         df_full, stf, etf
     )
     pst = _period_stats_from_df(df_full, stf, etf)
-    pst.update(_period_qpc_from_analysis(df_full, file_name, stf, etf))
+    pst.update(_period_qpc_from_analysis(df_full, file_name, stf, etf, profile=profile))
     return n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst
 
 
-def _period_parent_file_name(conn, entry_rowid=None, period_id=None):
-    """The parent's ``file_name`` for a period row, or None."""
-    try:
-        if period_id is not None:
-            r = conn.execute(
-                "SELECT r.file_name FROM cycle_periods cp JOIN results r ON r.rowid = cp.entry_rowid "
-                "WHERE cp.id=?", (int(period_id),)).fetchone()
-        else:
-            r = conn.execute("SELECT file_name FROM results WHERE rowid=?",
-                             (int(entry_rowid),)).fetchone()
-    except (sqlite3.Error, TypeError, ValueError):
-        return None
-    return r[0] if r is not None else None
+def _period_parent(conn, entry_rowid=None, period_id=None):
+    """``(file_name, profile)`` of a period row's parent; ``(None, None)`` if not found.
+
+    ``profile`` is the parent's stored profile (``_entry_pump_profile``), or None.
+    A database without a ``profile_id`` column gives the file name and no profile.
+    """
+    for cols in ('r.file_name, r.profile_id', 'r.file_name'):
+        try:
+            if period_id is not None:
+                r = conn.execute(
+                    f"SELECT {cols} FROM cycle_periods cp JOIN results r ON r.rowid = cp.entry_rowid "
+                    "WHERE cp.id=?", (int(period_id),)).fetchone()
+            else:
+                r = conn.execute(f"SELECT {cols} FROM results r WHERE r.rowid=?",
+                                 (int(entry_rowid),)).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        except (sqlite3.Error, TypeError, ValueError):
+            return None, None
+        if r is None:
+            return None, None
+        pid = r[1] if len(r) > 1 else None
+        return r[0], _entry_pump_profile({'profile_id': pid})
+    return None, None
 
 
 def _insert_cycle_period_row(conn, rid, p, df_full, detection_method: str, buffer_s: int) -> None:
     """Insert one cycle_periods row with dTreturn and mean-value caches."""
     stf, etf = float(p['start_time']), float(p['end_time'])
+    parent_file, parent_profile = _period_parent(conn, entry_rowid=rid)
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst = _period_cache_values(
-        df_full, stf, etf, _period_parent_file_name(conn, entry_rowid=rid)
+        df_full, stf, etf, parent_file, profile=parent_profile
     )
     conn.execute(
         "INSERT INTO cycle_periods "
@@ -16596,8 +16712,9 @@ def _insert_cycle_period_row(conn, rid, p, df_full, detection_method: str, buffe
 
 def _refresh_cycle_period_row_stats(conn, period_id: int, df_full, stf: float, etf: float) -> None:
     """Recompute cached stats for an existing cycle_periods row."""
+    parent_file, parent_profile = _period_parent(conn, period_id=period_id)
     n_valid, n_nan, sample, max_abs, max_signed, p99_abs, dt_min, dt_max, dt_avg, pst = _period_cache_values(
-        df_full, stf, etf, _period_parent_file_name(conn, period_id=period_id)
+        df_full, stf, etf, parent_file, profile=parent_profile
     )
     conn.execute(
         "UPDATE cycle_periods SET dtreturn_n_valid=?, dtreturn_n_nan=?, dtreturn_sample=?, "
@@ -17948,13 +18065,14 @@ def _interval_cop_from_means(means):
     return q / p
 
 
-def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets) -> dict:
+def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets, profile=None) -> dict:
     """ΔCOP over the saved evaluation window: first slice against last slice.
 
     The two slices go through the same analysis-time path as the entry's own Q
     and P, so a sheet that carries only uncorrected series still
     answers. Anything that makes a slice unusable leaves the value empty — a
-    missing ΔCOP is never 0 %.
+    missing ΔCOP is never 0 %. ``profile`` is the row's stored profile, for
+    Apply's pump correction.
     """
     slice_min = cfg['delta_cop_slice_min']
     slice_s = slice_min * 60.0
@@ -17980,9 +18098,11 @@ def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets) -> dict:
     out['first_window'] = [stf, stf + slice_s]
     out['last_window'] = [etf - slice_s, etf]
     out['cop_first'] = _interval_cop_from_means(
-        _analysis_means_for_window(df_sheet, file_name, stf, stf + slice_s, lab_corr_missing))
+        _analysis_means_for_window(df_sheet, file_name, stf, stf + slice_s, lab_corr_missing,
+                                   profile=profile))
     out['cop_last'] = _interval_cop_from_means(
-        _analysis_means_for_window(df_sheet, file_name, etf - slice_s, etf, lab_corr_missing))
+        _analysis_means_for_window(df_sheet, file_name, etf - slice_s, etf, lab_corr_missing,
+                                   profile=profile))
     if out['cop_first'] is None or out['cop_last'] is None:
         out['reason'] = f'a {slice_min:g} min slice has no Q or P'
         return out
@@ -17993,7 +18113,8 @@ def _interval_delta_cop(file_name, data_set, stf, etf, cfg, sheets) -> dict:
     return out
 
 
-def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, sheets) -> dict:
+def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, sheets,
+                              profile=None) -> dict:
     """ΔCOP of an ``eval_min`` window walking from the saved equilibrium end to the saved H end.
 
     Read-only, for the Guideline Windows figure. Every point is
@@ -18030,7 +18151,8 @@ def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, 
     if h_end - eval_s - starts[-1] > 1e-6:
         starts.append(h_end - eval_s)
     for start in starts:
-        dc = _interval_delta_cop(file_name, data_set, start, start + eval_s, cfg, sheets)
+        dc = _interval_delta_cop(file_name, data_set, start, start + eval_s, cfg, sheets,
+                                 profile=profile)
         out['points'].append({
             'start': start, 'end': start + eval_s,
             'value_pct': _guideline_num(dc.get('value_pct')),
@@ -18038,12 +18160,14 @@ def _interval_delta_cop_trace(file_name, data_set, eq_end, h_end, cfg, lengths, 
             'cop_last': _guideline_num(dc.get('cop_last')),
             'reason': dc.get('reason') or '',
         })
-    out['cop_points'] = _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets)
-    out['growing_points'] = _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets)
+    out['cop_points'] = _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets,
+                                                   profile=profile)
+    out['growing_points'] = _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets,
+                                                        profile=profile)
     return out
 
 
-def _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets) -> list:
+def _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets, profile=None) -> list:
     """ΔCOP of a growing interval ``[eq_end, E]``, E walking from two slices to ``h_end``.
 
     Each point is ``_interval_delta_cop`` on ``[eq_end, E]``: the first slice
@@ -18063,7 +18187,7 @@ def _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets)
         ends.append(h_end)
     points = []
     for end in ends:
-        dc = _interval_delta_cop(file_name, data_set, eq_end, end, cfg, sheets)
+        dc = _interval_delta_cop(file_name, data_set, eq_end, end, cfg, sheets, profile=profile)
         points.append({
             'start': eq_end, 'end': end,
             'value_pct': _guideline_num(dc.get('value_pct')),
@@ -18074,7 +18198,7 @@ def _interval_delta_cop_growing(file_name, data_set, eq_end, h_end, cfg, sheets)
     return points
 
 
-def _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets) -> list:
+def _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets, profile=None) -> list:
     """The corrected COP of every ``delta_cop_slice_min`` block from the equilibrium end to H end.
 
     The second line of the ΔCOP figure. Each block is the same slice
@@ -18099,7 +18223,8 @@ def _interval_slice_cop_series(file_name, data_set, eq_end, h_end, cfg, sheets) 
         cop = None
         if df_sheet is not None:
             cop = _guideline_num(_interval_cop_from_means(
-                _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing)))
+                _analysis_means_for_window(df_sheet, file_name, start, end, lab_corr_missing,
+                                           profile=profile)))
         why = '' if cop is not None else (reason if df_sheet is None else 'this block has no Q or P')
         points.append({'start': start, 'end': end, 'cop': cop, 'reason': why or ''})
     return points
@@ -18163,7 +18288,8 @@ def _interval_deviation_payload(entry, rowid, hp_id, periods, cfg, df_entry, she
     eval_span = spans.get('evaluation')
     if eval_span:
         payload['delta_cop'] = _interval_delta_cop(
-            file_name, data_set, eval_span[0][0], eval_span[0][1], cfg, sheets)
+            file_name, data_set, eval_span[0][0], eval_span[0][1], cfg, sheets,
+            profile=_entry_pump_profile(entry))
     else:
         payload['delta_cop'] = {
             'value_pct': None, 'cop_first': None, 'cop_last': None,
