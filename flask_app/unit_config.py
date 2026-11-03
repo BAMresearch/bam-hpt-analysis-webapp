@@ -436,7 +436,8 @@ def resolve_cooling_design(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     value, either of which may be None. Both numbers are typed by the analyst:
     neither is derived from the other. Never reads the heating pdesign_kw /
     flow_mode / flow_type / flow_set_value or the source_flow_* keys. A cooling
-    row's flow is compared with the fixed cooling flow; the capacity is not scored.
+    row's flow is compared with the fixed cooling flow, and its stored cooling
+    capacity with the building cooling load scaled from ``pdesignc_kw``.
     """
     out: Dict[str, Any] = {'pdesignc_kw': None, 'mode': None,
                            'flow_type': None, 'flow_set_value': None}

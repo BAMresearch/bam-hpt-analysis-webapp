@@ -263,6 +263,10 @@
                             <td>Heating capacity Q</td>
                             <td>{{ band_cell(deviations.get('mean_q_band_pct'), '% of Qset') }}</td>
                         </tr>
+                        <tr>
+                            <td>Cooling capacity, cooling row</td>
+                            <td>{{ band_cell(deviations.get('mean_q_band_pct'), '% of cooling load') }}</td>
+                        </tr>
                     </tbody>
                 </table>
                 <p class="text-muted small mb-1">
@@ -406,6 +410,8 @@
                     <th title="Cycle mean of T_mean_log minus the ecodesign Table 3 mean. Variable-flow tests only; the 0.5 K band is a working tolerance (ecodesign defines none).">Mean Tmean Dev (K)</th>
                     <th>Mean Q dev (kW)</th>
                     <th>Mean Q dev (%)</th>
+                    <th title="Cooling row only: stored cooling capacity minus the building cooling load at its letter.">Cooling load dev (kW)</th>
+                    <th title="Cooling row only: per cent of the building cooling load at its letter.">Cooling load dev (%)</th>
                     <th>Mean flow dev (%)</th>
                     <th class="dev-extra">Total Points<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_total_points" title="Update this stat">Update</button></th>
                     <th class="dev-extra">Max DB + (K)<br><button type="button" class="btn btn-sm btn-outline-primary update-dev-btn" data-stat="dev_max_db_pos" title="Update this stat">Update</button></th>
@@ -441,9 +447,9 @@
                     <th><input type="text" class="column-filter" data-column="18" placeholder="Filter: >0.5, <2" title="Mean Tmean dev (K)"></th>
                     <th><input type="text" class="column-filter" data-column="19" placeholder="Filter: >0.5, <2" title="Mean Q dev (kW)"></th>
                     <th><input type="text" class="column-filter" data-column="20" placeholder="Filter: >5, >10" title="Mean Q dev (%)"></th>
-                    <th><input type="text" class="column-filter" data-column="21" placeholder="Filter: >1, >2" title="Mean flow dev (%)"></th>
-                    <th class="dev-extra"><input type="text" class="column-filter" data-column="22" placeholder="Filter numbers..."></th>
-                    <th class="dev-extra"><input type="text" class="column-filter" data-column="23" placeholder="Filter numbers..."></th>
+                    <th><input type="text" class="column-filter" data-column="21" placeholder="Filter: >0.5, <2" title="Cooling load dev (kW)"></th>
+                    <th><input type="text" class="column-filter" data-column="22" placeholder="Filter: >5, >10" title="Cooling load dev (%)"></th>
+                    <th><input type="text" class="column-filter" data-column="23" placeholder="Filter: >1, >2" title="Mean flow dev (%)"></th>
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="24" placeholder="Filter numbers..."></th>
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="25" placeholder="Filter numbers..."></th>
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="26" placeholder="Filter numbers..."></th>
@@ -451,6 +457,8 @@
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="28" placeholder="Filter numbers..."></th>
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="29" placeholder="Filter numbers..."></th>
                     <th class="dev-extra"><input type="text" class="column-filter" data-column="30" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="31" placeholder="Filter numbers..."></th>
+                    <th class="dev-extra"><input type="text" class="column-filter" data-column="32" placeholder="Filter numbers..."></th>
                     <th class="dev-extra"></th>
                     <th></th>
 </tr>
@@ -621,6 +629,21 @@
                         {% if entry.mean_q_dev_pct is not none %}
                             {% if (entry.mean_q_dev_pct|abs) > q_limit %}<span class="badge-violation">{% else %}<span class="badge-good">{% endif %}
                             {{ "%+.2f"|format(entry.mean_q_dev_pct) }}%</span>
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td title="{% if entry.cooling_load_kw is not none %}Stored cooling capacity minus the cooling load {{ "%.2f"|format(entry.cooling_load_kw) }} kW (design cooling capacity × (tdb_set − 16) / (tdb_A − 16)).{% else %}No cooling load — heating row, no design cooling capacity on the profile, no cooling dry-bulb set, or no stored cooling capacity.{% endif %}">
+                        {% if entry.mean_qc_dev_kw is not none %}
+                            {{ "%+.3f"|format(entry.mean_qc_dev_kw) }}
+                        {% else %}
+                            <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td title="{% if entry.cooling_load_kw is not none %}Per cent of the cooling load {{ "%.2f"|format(entry.cooling_load_kw) }} kW, band ±{{ "%g"|format(q_limit|float) }} %.{% else %}No cooling load — heating row, no design cooling capacity on the profile, no cooling dry-bulb set, or no stored cooling capacity.{% endif %}">
+                        {% if entry.mean_qc_dev_pct is not none %}
+                            {% if (entry.mean_qc_dev_pct|abs) > q_limit %}<span class="badge-violation">{% else %}<span class="badge-good">{% endif %}
+                            {{ "%+.2f"|format(entry.mean_qc_dev_pct) }}%</span>
                         {% else %}
                             <span class="text-muted">-</span>
                         {% endif %}

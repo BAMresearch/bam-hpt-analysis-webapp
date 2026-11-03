@@ -13676,14 +13676,11 @@ def _entry_cooling_setpoints(entry, test_condition=None):
     return _cooling_setpoints(entry.get('condition_set_id'), tc)
 
 
-def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
-    """``(flow_type, flow_set_value, reason)`` a cooling row's flow is compared with.
+def _entry_cooling_design(entry, file_name=None, hp_id=None):
+    """``resolve_cooling_design`` of the row's profile (all None when unresolved).
 
-    Only the profile's cooling flow (``resolve_cooling_design``): mode ``fixed``,
-    type ``mass`` / ``volume`` and a number > 0. Otherwise ``(None, None, why)``.
-    Never the heating ``flow_set_value``, never ``hp_design`` and never the
-    heating ``flow_mode`` — one profile may be variable-flow heating and
-    fixed-flow cooling, or the other way round. Call only for a cooling row.
+    The one place app.py reads the profile's cooling keys: the cooling flow and
+    the design cooling capacity behind the cooling load both come from here.
     """
     entry = entry or {}
     try:
@@ -13694,7 +13691,19 @@ def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
         )
     except Exception:
         profile = None
-    design = unit_config.resolve_cooling_design(profile)
+    return unit_config.resolve_cooling_design(profile)
+
+
+def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
+    """``(flow_type, flow_set_value, reason)`` a cooling row's flow is compared with.
+
+    Only the profile's cooling flow (``resolve_cooling_design``): mode ``fixed``,
+    type ``mass`` / ``volume`` and a number > 0. Otherwise ``(None, None, why)``.
+    Never the heating ``flow_set_value``, never ``hp_design`` and never the
+    heating ``flow_mode`` — one profile may be variable-flow heating and
+    fixed-flow cooling, or the other way round. Call only for a cooling row.
+    """
+    design = _entry_cooling_design(entry, file_name=file_name, hp_id=hp_id)
     if design.get('mode') == 'variable':
         return None, None, COOLING_FLOW_VARIABLE
     ft, fv = design.get('flow_type'), design.get('flow_set_value')
@@ -13706,6 +13715,93 @@ def _entry_cooling_flow_set(entry, file_name=None, hp_id=None):
             or fv is None or not np.isfinite(fv) or fv <= 0):
         return None, None, COOLING_FLOW_NOT_SET
     return ft, fv, ''
+
+
+def _finite_or_none(value):
+    """``float(value)`` when it is a finite number, else None."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def get_mean_cooling_capacity(entry):
+    """Stored cooling capacity (kW) a cooling row's load check uses.
+
+    ``avg_cooling_capacity_corr`` when it is a finite number, otherwise
+    ``avg_cooling_capacity_uncorr``. Never a heating capacity field.
+    """
+    entry = entry or {}
+    corr = _finite_or_none(entry.get('avg_cooling_capacity_corr'))
+    if corr is not None:
+        return corr
+    return _finite_or_none(entry.get('avg_cooling_capacity_uncorr'))
+
+
+def compute_cooling_load(design_kw, tdb_set, tdb_a):
+    """Building cooling load at a letter: Pdesignc × (tdb_set − 16) / (tdb_A − 16).
+
+    16 °C is ``TSET_INDOOR_HEATING`` (the balance point of the heating load
+    line). ``tdb_a`` is letter A's outdoor dry bulb on the same cooling set, so
+    letter A gets the full design capacity. None when the design capacity or
+    either dry bulb is missing, or when ``tdb_set`` / ``tdb_a`` is not above 16 °C.
+    """
+    pdc = _finite_or_none(design_kw)
+    t = _finite_or_none(tdb_set)
+    ta = _finite_or_none(tdb_a)
+    if pdc is None or pdc <= 0 or t is None or ta is None:
+        return None
+    balance = TSET_INDOOR_HEATING
+    if t <= balance or ta <= balance:
+        return None
+    return pdc * (t - balance) / (ta - balance)
+
+
+def _entry_cooling_load_kw(entry, hp_id=None, test_condition=None):
+    """Building cooling load (kW) at a cooling row's letter, or None.
+
+    Design cooling capacity from the row's profile (``_entry_cooling_design``), the
+    letter's cooling ``tdb_set`` (same value the dry-bulb score uses) and
+    letter A's ``tdb_set`` of that cooling set. None on a heating row.
+    """
+    entry = entry or {}
+    if not _entry_is_cooling(entry):
+        return None
+    tdb_set = _entry_cooling_setpoints(entry, test_condition)[0]
+    tdb_a = _cooling_setpoints(entry.get('condition_set_id'), 'A')[0]
+    if tdb_set is None or tdb_a is None:
+        return None
+    try:
+        design = _entry_cooling_design(entry, hp_id=hp_id)
+    except (TypeError, ValueError):
+        return None  # an unreadable typed value counts as not set
+    return compute_cooling_load(design.get('pdesignc_kw'), tdb_set, tdb_a)
+
+
+def _entry_cooling_load(entry, hp_id=None, test_condition=None):
+    """Cooling-load check of a cooling row: ``{cooling_load_kw, mean_qc_dev_kw, mean_qc_dev_pct}``.
+
+    All None on a heating row, when the profile has no design cooling capacity, when the
+    letter has no cooling ``tdb_set`` (or it is not above 16 °C), or when neither
+    cooling-capacity mean is stored. Computed when the page is built; no column.
+    """
+    out = {'cooling_load_kw': None, 'mean_qc_dev_kw': None, 'mean_qc_dev_pct': None}
+    entry = entry or {}
+    if not _entry_is_cooling(entry):
+        return out
+    mean_qc = get_mean_cooling_capacity(entry)
+    if mean_qc is None:
+        return out
+    load = _entry_cooling_load_kw(entry, hp_id=hp_id, test_condition=test_condition)
+    if load is None or load == 0:
+        return out
+    out['cooling_load_kw'] = round(load, 3)
+    out['mean_qc_dev_kw'] = round(mean_qc - load, 3)
+    out['mean_qc_dev_pct'] = round(100.0 * (mean_qc - load) / load, 2)
+    return out
 
 
 def _entry_db_setpoint(entry, file_name):
@@ -18651,7 +18747,7 @@ def deviations():
             )
             # Qset is the heating design capacity at this dry-bulb: never on a
             # cooling row, whose dry-bulb set is the cooling one and whose
-            # cooling capacity is not scored.
+            # cooling capacity is scored against the cooling load below.
             db_set = None if _entry_is_cooling(entry) else stats.get('db_setpoint')
             ua, qset = compute_ua_and_qset(pdesign, db_set)
             stats['qset_kw'] = round(qset, 3) if qset is not None else None
@@ -18662,7 +18758,11 @@ def deviations():
             else:
                 stats['mean_q_dev_kw'] = None
                 stats['mean_q_dev_pct'] = None
-            
+            # Cooling row only: stored cooling capacity against the building
+            # cooling load at its letter (own keys; Qset above stays empty).
+            stats.update(_entry_cooling_load(entry, hp_id=hp_id,
+                                             test_condition=stats.get('test_condition')))
+
             # Combine entry info with deviation stats
             # Start with a copy of all entry data to preserve all columns
             combined = dict(entry)  # Make a full copy of entry first
@@ -22465,6 +22565,30 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
                             ylo = qset * (1 - fac)
                             yhi = qset * (1 + fac)
                             setpoint_val = qset
+                    # Cooling capacity on the y-axis: cooling points of this
+                    # letter add the building cooling load ± the same mean_q_pct.
+                    # No load (no Pdesignc, no tdb_set) means no cooling band.
+                    if ('cooling' in y_param_lower and mean_q_pct >= 0
+                            and 'condition_set_id' in letter_rows.columns):
+                        cool_rows = letter_rows[letter_rows['condition_set_id'].apply(
+                            lambda v: unit_config.is_cooling_condition_set(v if pd.notna(v) else None))]
+                        if len(cool_rows):
+                            cool_row = cool_rows.iloc[0]
+
+                            def _cell(col):
+                                v = cool_row.get(col) if col in cool_rows.columns else None
+                                return v if v is not None and not (isinstance(v, float) and pd.isna(v)) else None
+                            cool_pid = _cell('profile_id')
+                            load = _entry_cooling_load_kw({
+                                'condition_set_id': _cell('condition_set_id'),
+                                'file_name': str(_cell('file_name') or band_file_name or '') or None,
+                                'profile_id': (str(cool_pid).strip() if cool_pid is not None and str(cool_pid).strip()
+                                               else (profile_id or (hp_label if hp_label in unit_config.load_all_profiles() else None))),
+                                'hp_id': hp_for_design,
+                            }, test_condition=cond)
+                            if load is not None and load > 0:
+                                fac = mean_q_pct / 100.0
+                                extra_bands.append((load * (1 - fac), load * (1 + fac), load))
                 elif ('mass' in y_param_lower and 'flow' in y_param_lower) or ('volume' in y_param_lower and 'flow' in y_param_lower) or y_param_lower.strip() in ('mass flow', 'volume flow', 'avg_mass_flow', 'avg_volume_flow'):
                     # Flow bands only for fixed-flow tests; match mass/volume to set value type.
                     is_mass_flow_param = 'mass' in y_param_lower and 'flow' in y_param_lower
