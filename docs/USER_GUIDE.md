@@ -356,7 +356,7 @@ The page itself carries one short paragraph. What the stored scores are, when a 
 
 Filters (Kind, COP dataset, Clocks) run in the browser on rows already loaded. **Clear filters** resets them. Status is **Showing X of Y rows**.
 
-The three **mean deviation** groups (H, D, S — one arithmetic mean per interval against its setpoint) start hidden. Hover a filled mean cell for the set it was read against (and the test letter and climate / application slice) together with its band; neither page has a **Setpoint** column. Tick **Show mean deviations** beside the filters for them. The individual **%**, the clock times and **eval ΔCOP** are never hidden, and **Download CSV** keeps every column whatever the checkbox says.
+The three **mean deviation** groups (H, D, S — one arithmetic mean per interval against its setpoint) start hidden. Hover a filled mean cell for the set it was read against (and the test letter and climate / application slice) together with its band; neither page has a **Setpoint** column. Tick **Show mean deviations** beside the filters for them. The individual **%**, the clock times and **eval ΔCOP** are never hidden, and **Download CSV** keeps every column whatever the checkbox says. On an air-source heating row, **DB−WB** scores outdoor dry-bulb minus wet-bulb against a 1 K target at ±0.6 K on the H mean and on the S mean and S samples; defrost, the parent Deviations page, water-to-water and cooling are not included, and the separate dry-bulb and wet-bulb checks are unchanged.
 
 Empty score cells are **n/a, never `0`**: no such window (on–off, short H, unknown, unsaved clocks), or scores not stored yet. Unsaved proposals do not appear. Hover an n/a cell for the stored reason.
 

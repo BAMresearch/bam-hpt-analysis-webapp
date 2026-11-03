@@ -13000,14 +13000,17 @@ GUIDELINE_WINDOW_CSV_COLUMNS = [
     ('d_db_pct', 'D_DB_pct'), ('d_dtreturn_pct', 'D_dTreturn_pct'),
     ('s_db_pct', 'S_DB_pct'), ('s_wb_pct', 'S_WB_pct'),
     ('s_flow_pct', 'S_flow_pct'), ('s_dtreturn_pct', 'S_dTreturn_pct'),
+    ('s_dbwb_pct', 'S_DBminusWB_pct'),
     # Mean deviations: one number per interval, K or % of set — not a
     # share of samples, so every header carries its unit.
     ('h_mean_db_k', 'H_mean_DB_K'), ('h_mean_wb_k', 'H_mean_WB_K'),
     ('h_mean_dtreturn_k', 'H_mean_dTreturn_K'),
     ('h_mean_flow_pct', 'H_mean_flow_pct_of_set'),
+    ('h_mean_dbwb_k', 'H_mean_DBminusWB_K'),
     ('d_mean_db_k', 'D_mean_DB_K'), ('d_mean_wb_k', 'D_mean_WB_K'),
     ('s_mean_db_k', 'S_mean_DB_K'), ('s_mean_wb_k', 'S_mean_WB_K'),
     ('s_mean_flow_pct', 'S_mean_flow_pct_of_set'),
+    ('s_mean_dbwb_k', 'S_mean_DBminusWB_K'),
     ('eval_delta_cop', 'eval_dCOP_pct'),
     # The two slice COPs behind that %, and the seconds each slice covers, so
     # the export can be checked without recomputing. Not on-screen columns.
@@ -13749,6 +13752,164 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities,
     return out
 
 
+# --- Dry-bulb minus wet-bulb on Guideline Windows ----------------------------
+# One extra heating check, Guideline Windows only: T_outdoor (DB) − T_outdoor (WB)
+# against the dry-bulb setpoint minus the wet-bulb setpoint. With wb_rule
+# ``db_minus_1k`` that target is 1 K. The tolerance is its own key in
+# interval_deviations.json (H mean, S individual, S mean); D, equilibrium and
+# evaluation have none and are never scored. The separate dry-bulb and wet-bulb
+# checks above are untouched: each still reads its own series against its own set.
+DB_MINUS_WB_TARGET_K = {'db_minus_1k': 1.0}
+DB_MINUS_WB_VALUE_KEYS = ('h_mean_dbwb_k', 's_dbwb_pct', 's_mean_dbwb_k')
+# Reason slots in ``dbwb_reasons``: one per cell above, in the same order.
+DB_MINUS_WB_SLOTS = ('h_mean', 's', 's_mean')
+DBWB_COOLING = 'cooling set — dry-bulb minus wet-bulb is not scored'
+DBWB_NO_WB = ('no outdoor wet-bulb check on this unit — '
+              'dry-bulb minus wet-bulb is not scored')
+DBWB_OTHER_RULE = ('the wet-bulb rule is not dry-bulb minus 1 K — '
+                   'no dry-bulb minus wet-bulb target')
+GUIDELINE_DBWB_STALE = ('dry-bulb minus wet-bulb is not yet scored on this row — '
+                        'use Compute missing scores on this page')
+
+
+def _entry_wb_rule(entry):
+    """The row's wet-bulb rule: the profile's ``wb_rule``, else its condition set's."""
+    entry = entry or {}
+    try:
+        profile, _ = unit_config.resolve_profile(
+            file_name=entry.get('file_name'), hp_id=entry.get('hp_id'),
+            profile_id=entry.get('profile_id'))
+    except Exception:
+        profile = None
+    rule = str((profile or {}).get('wb_rule') or '').strip()
+    if not rule:
+        try:
+            rule = str(unit_config.get_condition_set(
+                entry.get('condition_set_id')).get('wb_rule') or '').strip()
+        except Exception:
+            rule = ''
+    return rule
+
+
+def _entry_dbwb_target(entry):
+    """``(target_k, reason)`` of the dry-bulb minus wet-bulb check on one row.
+
+    Only an air-source heating row with a wet-bulb check whose wet-bulb rule is
+    dry-bulb minus 1 K has a target (1 K). A cooling row, a water-to-water row
+    and any other rule give ``(None, why)`` — a stable n/a, never another target.
+    SQLite and configuration only; no sheet.
+    """
+    entry = _entry_with_hp_id(entry or {})
+    if _entry_is_cooling(entry):
+        return None, DBWB_COOLING
+    applicable = _entry_applicable_checks(entry)
+    if 'db' not in applicable or 'wb' not in applicable:
+        return None, DBWB_NO_WB
+    target = DB_MINUS_WB_TARGET_K.get(_entry_wb_rule(entry))
+    if target is None:
+        return None, DBWB_OTHER_RULE
+    return float(target), ''
+
+
+def _window_dbwb(df_dev, spans, entry, file_name, half_pct=None, half_mean=None):
+    """``{'pct': (v, why), 'mean': (v, why)}`` of DB − WB on the union of ``spans``.
+
+    ``pct`` is the share of samples whose DB − WB is outside target ± ``half_pct``
+    (same count as the other individual %), ``mean`` is mean(DB − WB) − target in
+    K. A half-width of None means that cell is not scored on this interval. A
+    missing DB or WB column, or a sample missing either, is n/a — never 0.
+    """
+    out = {}
+    wanted = {'pct': half_pct, 'mean': half_mean}
+
+    def _all(why):
+        return {k: (None, why) for k in wanted}
+
+    if not _clean_interval_spans(spans):
+        return _all(MEAN_DEV_NO_WINDOW)
+    target, why = _entry_dbwb_target(entry)
+    if target is None:
+        return _all(why)
+    window = _union_span_frame(df_dev, spans)
+    if window is None:
+        return _all('the sheet could not be read')
+    if window.empty:
+        return _all('the sheet holds no samples in this window')
+    for col in ('T_outdoor (DB)', 'T_outdoor (WB)'):
+        if col not in window.columns:
+            return _all(f'the sheet has no {col}')
+    if _entry_db_setpoint(_entry_with_hp_id(entry or {}), file_name) is None:
+        # No dry-bulb set means no wet-bulb set either, so no target.
+        return _all('no outdoor setpoint for this test condition')
+    diff = (pd.to_numeric(window['T_outdoor (DB)'], errors='coerce')
+            - pd.to_numeric(window['T_outdoor (WB)'], errors='coerce'))
+    if not _has_valid_points(diff):
+        return _all('no valid dry-bulb / wet-bulb sample pairs in this window')
+    for key, half in wanted.items():
+        if half is None:
+            out[key] = (None, 'no dry-bulb minus wet-bulb band is configured for this interval')
+        elif key == 'pct':
+            out[key] = (_guideline_num(_pct_outside_half(diff, target, half, len(window))), '')
+        else:
+            mean = _series_mean(diff)
+            out[key] = (_guideline_num(mean - target), '')
+    return out
+
+
+def _apply_dbwb_scores(row, df_dev, parent, spec_h, spec_s) -> None:
+    """Fill the three DB − WB cells of a scored row: H mean, S individual, S mean."""
+    reasons = row.setdefault('dbwb_reasons', {})
+    h = _window_dbwb(df_dev, [(row.get('h_start'), row.get('h_end'))], parent,
+                     row.get('file_name'),
+                     half_mean=_interval_spec_half(spec_h, 'mean_db_minus_wb_k'))
+    row['h_mean_dbwb_k'], reasons['h_mean'] = h['mean']
+    if row.get('kind') != 'on_off':
+        s = {'pct': (None, 'not an on–off cycle'), 'mean': (None, 'not an on–off cycle')}
+    else:
+        s = _window_dbwb(df_dev, _spans_from_row(row, 's'), parent, row.get('file_name'),
+                         half_pct=_interval_spec_half(spec_s, 'db_minus_wb_k'),
+                         half_mean=_interval_spec_half(spec_s, 'mean_db_minus_wb_k'))
+    row['s_dbwb_pct'], reasons['s'] = s['pct']
+    row['s_mean_dbwb_k'], reasons['s_mean'] = s['mean']
+    # Marks the payload as scored by this rule, so a later page load keeps it.
+    row['db_wb_scored'] = True
+
+
+def _guideline_dbwb_unscored(row, reason) -> None:
+    """The three DB − WB cells of one row n/a with one reason. Nothing else moves."""
+    for k in DB_MINUS_WB_VALUE_KEYS:
+        row[k] = None
+    row['dbwb_reasons'] = {slot: reason for slot in DB_MINUS_WB_SLOTS}
+
+
+def _guideline_dbwb_payload_stale(entry, payload) -> bool:
+    """True when a cached payload predates DB − WB on a row that has that check.
+
+    A cooling, water-to-water or other-rule row is never stale for this: its
+    cells are n/a for a stable reason. Opens no sheet.
+    """
+    if (payload or {}).get('db_wb_scored'):
+        return False
+    return _entry_dbwb_target(entry)[0] is not None
+
+
+def _guideline_dbwb_on_load(entry, row, payload) -> bool:
+    """Apply the DB − WB rule to a row read back from the cache. Returns ``stale``.
+
+    No target → the three cells n/a with that stable reason. An older payload on
+    a row that has the check → n/a with the recompute hint, and the row counts
+    as missing scores. Otherwise the cached numbers stay.
+    """
+    target, why = _entry_dbwb_target(entry)
+    if target is None:
+        _guideline_dbwb_unscored(row, why)
+        return False
+    if (payload or {}).get('db_wb_scored'):
+        return False
+    _guideline_dbwb_unscored(row, GUIDELINE_DBWB_STALE)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Guideline Windows score cache.
 #
@@ -13812,12 +13973,12 @@ GUIDELINE_SCORE_VALUE_KEYS = (
     'd_mean_db_k', 'd_mean_wb_k',
     's_mean_db_k', 's_mean_wb_k', 's_mean_flow_pct',
     'eval_delta_cop',
-) + GUIDELINE_DELTA_COP_AUDIT_KEYS + GUIDELINE_PIECE_VALUE_KEYS
+) + GUIDELINE_DELTA_COP_AUDIT_KEYS + GUIDELINE_PIECE_VALUE_KEYS + DB_MINUS_WB_VALUE_KEYS
 # The hover text beside those numbers. Stored with them, so an n/a cell keeps
 # saying *why* it is empty after a restart instead of turning into a bare blank.
 GUIDELINE_SCORE_REASON_KEYS = (
     'dtreturn_reasons', 'db_reasons', 'wb_reasons', 'flow_reasons', 'd_reasons', 's_reasons',
-    'h_mean_reasons', 'd_mean_reasons', 's_mean_reasons', 'piece_reasons',
+    'h_mean_reasons', 'd_mean_reasons', 's_mean_reasons', 'piece_reasons', 'dbwb_reasons',
 )
 GUIDELINE_SCORE_TEXT_KEYS = ('delta_cop_reason', 'note')
 
@@ -13935,9 +14096,13 @@ def _guideline_score_fingerprint(periods, buffer_s, intervals_digest=None) -> st
 # would have to re-run Compute missing scores over the whole database for no
 # change in any percentage. Never add a digest here whose widths really differ:
 # that would show an old number against a new band.
+# The third digest is the file before the dry-bulb minus wet-bulb keys were
+# added: those are new keys only, every existing width is unchanged, and a
+# payload stored before them is caught by its missing ``db_wb_scored`` flag.
 GUIDELINE_SCORE_EQUIVALENT_INTERVAL_DIGESTS = (
     'c4a50572573481baa55144ab90cb114d199fc5c9',
     '332463da0f991a27ff1a23d9aeade38e4af8d678',
+    '82ce1a3d3d9feca4b3ab309bc9c626e151a7e3f9',
 )
 
 # Databases this process has already swept, so the pass costs one scan per file
@@ -14077,6 +14242,9 @@ def _guideline_score_payload_from_row(row) -> dict:
     if row.get('cooling_db_scored'):
         # Cooling rows only: the dry-bulb cells were scored against the cooling tdb_set.
         payload['cooling_db_scored'] = True
+    if row.get('db_wb_scored'):
+        # The three dry-bulb minus wet-bulb cells were scored by today's rule.
+        payload['db_wb_scored'] = True
     return payload
 
 
@@ -14113,6 +14281,7 @@ def _guideline_scores_missing(row, reason=GUIDELINE_SCORES_MISSING_REASON, ev=No
     for iv in ('H', 'D', 'S'):
         row[MEAN_DEV_REASON_KEYS[iv]] = _mean_dev_reason_defaults(iv, reason)
     row['piece_reasons'] = {slot: reason for slot in GUIDELINE_PIECE_SLOTS}
+    row['dbwb_reasons'] = {slot: reason for slot in DB_MINUS_WB_SLOTS}
     row['delta_cop_reason'] = reason
     row['scores_cached'] = False
 
@@ -14342,6 +14511,10 @@ def _guideline_row_base(entry, periods, lengths, index=None):
         'h_mean_dtreturn_k': None, 'h_mean_flow_pct': None,
         'd_mean_db_k': None, 'd_mean_wb_k': None,
         's_mean_db_k': None, 's_mean_wb_k': None, 's_mean_flow_pct': None,
+        # Dry-bulb minus wet-bulb against its 1 K target: H mean, S individual,
+        # S mean only. No D, equilibrium or evaluation cell exists for it.
+        **{k: None for k in DB_MINUS_WB_VALUE_KEYS},
+        'dbwb_reasons': {slot: MEAN_DEV_NO_WINDOW for slot in DB_MINUS_WB_SLOTS},
         'eval_delta_cop': None,
         # The audit trail of that one %: both slice COPs and the seconds they
         # were read over. Hover and CSV read them; the table has no column.
@@ -14641,6 +14814,8 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
             if row['kind'] != 'on_off':
                 s_means = _mean_dev_na('S', 'not an on–off cycle')
             _apply_mean_devs(row, 'S', s_means)
+            # Dry-bulb minus wet-bulb: H mean, S individual and S mean only.
+            _apply_dbwb_scores(row, df_dev, parent, spec_h, spec_s)
 
             _apply_guideline_pieces(row, parent, df_sheet, df_full, file_name,
                                     lab_corr_missing, prep_reason, _guideline_buffer_s())
@@ -14946,6 +15121,8 @@ def _guideline_row_sets(entry, cache=None) -> dict:
         # Heating only: a cooling row's wet-bulb is not scored and has no set.
         'wb': (db_set - 1.0) if (db_set is not None and not cooling) else None,
         'tsup': None if cooling else _safe(_tsup_setpoint_from_entry, entry, file_name=file_name),
+        # Dry-bulb minus wet-bulb target in K (1 K with db_minus_1k), or None.
+        'dbwb': (_safe(_entry_dbwb_target, entry) or (None, ''))[0],
         'flow': _guideline_num(flow[1]),
         'flow_type': flow[0],
         'climate': climate,
@@ -15064,13 +15241,16 @@ def _guideline_window_rows(rowids=None) -> dict:
                         keep_db=keep_db,
                         db_reason=None if keep_db else GUIDELINE_COOLING_DB_STALE)
                     cooling_flow_stale = cooling_flow_stale or not keep_inlet or not keep_db
+                # Dry-bulb minus wet-bulb: an older payload on a row that has the
+                # check keeps its other numbers and these three cells stay empty.
+                dbwb_stale = _guideline_dbwb_on_load(entry, row, hit[1])
                 if not _guideline_payload_has_pieces(hit[1]):
                     # Stored before the pieces: keep its numbers, piece cells n/a.
                     _guideline_pieces_missing(row)
                     n_missing += 1
-                elif cooling_flow_stale:
-                    # Flow cells empty until Compute missing scores rescores against
-                    # the cooling flow; every other stored number stays.
+                elif cooling_flow_stale or dbwb_stale:
+                    # Flow (cooling) or DB − WB cells empty until Compute missing
+                    # scores rescores the row; every other stored number stays.
                     n_missing += 1
                 else:
                     n_scored += 1
@@ -15107,11 +15287,15 @@ def _guideline_window_rows(rowids=None) -> dict:
         's_wb_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'wb_k'),
         's_flow_pct_band': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'flow_instantaneous_pct'),
         's_dtreturn_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'dtreturn_k'),
+        's_dbwb_k': _interval_spec_half((interval_cfg.get('intervals') or {}).get('S'), 'db_minus_wb_k'),
         # The mean half-widths, so the headings can name the band the mean
         # columns were read against (H mean DB ±0.3 K, not the parent 0.6 K).
         **{f'mean_{iv.lower()}_{"flow_pct" if q == "flow" else q + "_k"}':
            _mean_dev_half((interval_cfg.get('intervals') or {}).get(iv), q)
            for iv in ('H', 'D', 'S') for q in MEAN_DEV_QUANTITIES[iv]},
+        **{f'mean_{iv.lower()}_dbwb_k':
+           _interval_spec_half((interval_cfg.get('intervals') or {}).get(iv), 'mean_db_minus_wb_k')
+           for iv in ('H', 'S')},
     }
 
 
@@ -15197,6 +15381,7 @@ def api_guideline_windows():
             's_wb_k': result.get('s_wb_k'),
             's_flow_pct_band': result.get('s_flow_pct_band'),
             's_dtreturn_k': result.get('s_dtreturn_k'),
+            's_dbwb_k': result.get('s_dbwb_k'),
             # The mean half-widths, so the mean headings name their own band.
             **{k: v for k, v in result.items() if k.startswith('mean_')},
         })
@@ -15354,7 +15539,8 @@ def api_guideline_windows_score_files():
             if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
                     and _guideline_payload_has_pieces(hit[1]) and rid not in stale_periods
                     and not (_entry_is_cooling(entry)
-                             and _guideline_cooling_payload_stale(entry, hit[1]))):
+                             and _guideline_cooling_payload_stale(entry, hit[1]))
+                    and not _guideline_dbwb_payload_stale(entry, hit[1])):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -15430,10 +15616,12 @@ def api_guideline_windows_compute_scores():
                 hit = cached.get(rid)
                 if (hit and hit[0] == _guideline_score_fingerprint(periods, buffer_s)
                         and not (_entry_is_cooling(entry)
-                                 and _guideline_cooling_payload_stale(entry, hit[1]))):
+                                 and _guideline_cooling_payload_stale(entry, hit[1]))
+                        and not _guideline_dbwb_payload_stale(entry, hit[1])):
                     # A cooling row whose flow was not scored against today's fixed
                     # cooling flow, or whose inlet predates the cooling inlet score,
-                    # is rescored in full below; heating rows as before.
+                    # is rescored in full below; so is a row whose payload predates
+                    # dry-bulb minus wet-bulb on a row that has that check.
                     if _guideline_payload_has_pieces(hit[1]):
                         skipped += 1
                     else:
