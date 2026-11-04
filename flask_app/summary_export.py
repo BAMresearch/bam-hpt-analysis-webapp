@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -97,7 +98,21 @@ SUMMARY_COLUMNS: Tuple[str, ...] = (
     "avg_frequency",
     "avg_cos_phi",
     "avg_real_buh_power",
+    # Hybrid, appended after the monitoring means. Same names as the DB columns except
+    # system_efficiency, which is calculated by system_efficiency() and never stored.
+    "avg_gas_heat_input",
+    "hybrid_method",
+    "system_efficiency",
 )
+
+HYBRID_COLUMNS: Tuple[str, ...] = (
+    "avg_gas_heat_input",
+    "hybrid_method",
+    "system_efficiency",
+)
+
+# Fixed factor on electric power in the combined hybrid system efficiency. Not a profile field.
+SYSTEM_EFFICIENCY_ELECTRIC_FACTOR = 1.9
 
 # Export names that are also the DB column names (optional monitoring means).
 OPTIONAL_MONITORING_COLUMNS: Tuple[str, ...] = (
@@ -203,6 +218,10 @@ COLUMN_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
         "Notes",
         ("notes",),
     ),
+    (
+        "Hybrid",
+        HYBRID_COLUMNS,
+    ),
 )
 
 # Kept in SUMMARY_COLUMNS for a stable future hand-off layout, but hidden from the
@@ -278,7 +297,61 @@ _DB_FIELD_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "dev_max_flow_neg_pct": ("dev_max_flow_neg_pct",),
     "notes": ("Notes", "notes"),
     **{c: (c,) for c in OPTIONAL_MONITORING_COLUMNS},
+    "avg_gas_heat_input": ("avg_gas_heat_input",),
+    "hybrid_method": ("hybrid_method",),
 }
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def system_efficiency(
+    hybrid_method: Any,
+    capacity_corr: Any,
+    power_corr: Any,
+    gas: Any,
+) -> Optional[float]:
+    """Combined hybrid system efficiency: capacity / (gas + 1.9 x electric power).
+
+    Calculated on demand, never stored. Inputs are the stored corrected heating
+    capacity (avg_heating_capacity_corr), the stored corrected electric power
+    (avg_power_input_corr) and the gas mean (avg_gas_heat_input). Returns None
+    (empty, never 0) unless the method is ``combined`` and all three are finite
+    and the denominator is finite and greater than 0. Gas 0 is a real reading.
+    """
+    if str(hybrid_method or "").strip().lower() != "combined":
+        return None
+    q = _finite_number(capacity_corr)
+    p = _finite_number(power_corr)
+    g = _finite_number(gas)
+    if q is None or p is None or g is None:
+        return None
+    denom = g + SYSTEM_EFFICIENCY_ELECTRIC_FACTOR * p
+    if not math.isfinite(denom) or denom <= 0:
+        return None
+    result = q / denom
+    return result if math.isfinite(result) else None
+
+
+def row_system_efficiency(row: Any) -> Optional[float]:
+    """system_efficiency() from a results row (dict or sqlite Row) keyed by DB column."""
+    return system_efficiency(
+        _get(row, "hybrid_method"),
+        _get(row, "avg_heating_capacity_corr"),
+        _get(row, "avg_power_input_corr"),
+        _get(row, "avg_gas_heat_input"),
+    )
 
 
 def export_prefs_path() -> str:
@@ -427,6 +500,13 @@ def db_row_to_summary(
 
     profile_id = out.get("profile_id")
     out["appliance_type"] = _appliance_type(str(profile_id) if profile_id is not None else None)
+
+    out["system_efficiency"] = system_efficiency(
+        out.get("hybrid_method"),
+        out.get("avg_Q_corr"),
+        out.get("avg_P_corr"),
+        out.get("avg_gas_heat_input"),
+    )
 
     # Pass flags reserved for C3
     out["pass_instantaneous"] = None

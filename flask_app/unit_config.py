@@ -457,6 +457,92 @@ def resolve_cooling_design(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+# --- Hybrid switch temperatures (stored, not scored) ------------------------
+
+HYBRID_UNIT_TYPE = 'hybrid_air_water'
+# point → profile key. Outdoor dry bulb (°C) where the heat pump switches on,
+# and where the boiler switches off.
+HYBRID_SWITCH_KEYS = {'thp_on': 't_hp_on_c', 'tfb_off': 't_fb_off_c'}
+# Only these heating letters span the outlet line. E (design) and F (extra
+# point) are never neighbours.
+HYBRID_SWITCH_LETTERS = ('A', 'B', 'C', 'D')
+
+
+def _is_hybrid(profile: Optional[Dict[str, Any]]) -> bool:
+    return str((profile or {}).get('unit_type') or '').strip().lower() == HYBRID_UNIT_TYPE
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _round1_half_away(value: float) -> float:
+    """One decimal, half away from zero (46.45 → 46.5, −0.25 → −0.3)."""
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(repr(value)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+
+
+def resolve_hybrid_switch(profile: Optional[Dict[str, Any]], point: str,
+                          climate: Optional[str] = None,
+                          application: Optional[str] = None) -> Dict[str, Any]:
+    """Outdoor and water conditions at a hybrid switch temperature.
+
+    ``point`` is ``thp_on`` (profile ``t_hp_on_c``) or ``tfb_off`` (``t_fb_off_c``).
+    Returns {} unless the profile is ``hybrid_air_water`` and that temperature is
+    typed. Otherwise {tdb, twb, tsup, tmean}: ``tdb`` is the typed temperature,
+    ``twb`` is tdb − 1 when the profile ``wb_rule`` is ``db_minus_1k`` or empty.
+    ``tsup`` / ``tmean`` are the straight line between the two of heating letters
+    A–D (that climate × application slice, sorted by dry bulb) that strictly
+    bracket ``tdb``, rounded to one decimal; empty outside them (no extrapolation).
+    Climate / application: arguments, then profile, then the heating set default.
+    Deviations scores a thp_on / tfb_off row against tdb, twb and tsup
+    (app.hybrid_switch_setpoints); tmean is shown only.
+    """
+    key = HYBRID_SWITCH_KEYS.get(str(point or '').strip().lower())
+    if key is None or not _is_hybrid(profile):
+        return {}
+    tdb = _finite_float(profile.get(key))
+    if tdb is None:
+        return {}
+    rule = str(profile.get('wb_rule') or '').strip().lower()
+    out: Dict[str, Any] = {
+        'tdb': tdb,
+        'twb': (tdb - 1.0) if rule in ('', 'db_minus_1k') else None,
+        'tsup': None,
+        'tmean': None,
+    }
+    heating_id = get_default_condition_set_id()
+    clim, app = resolve_climate_application(climate, application, profile, heating_id)
+    cmap = get_condition_map(heating_id, climate=clim, application=app)
+    points = []
+    for letter in HYBRID_SWITCH_LETTERS:
+        vals = cmap.get(letter)
+        if not isinstance(vals, dict):
+            continue
+        x = _finite_float(vals.get('tdb_set'))
+        if x is not None:
+            points.append((x, _finite_float(vals.get('tsup_set')),
+                           _finite_float(vals.get('tmean_set'))))
+    points.sort(key=lambda p: p[0])
+    for lo, hi in zip(points, points[1:]):
+        if lo[0] < tdb < hi[0]:
+            frac = (tdb - lo[0]) / (hi[0] - lo[0])
+            if lo[1] is not None and hi[1] is not None:
+                out['tsup'] = _round1_half_away(lo[1] + frac * (hi[1] - lo[1]))
+            if lo[2] is not None and hi[2] is not None:
+                out['tmean'] = _round1_half_away(lo[2] + frac * (hi[2] - lo[2]))
+            break
+    return out
+
+
 # --- EN 14511-3:2022 pump arrangement (pump correction) ---------------------
 
 PUMP_ARRANGEMENTS = ('integrated', 'not_supplied')

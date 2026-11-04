@@ -196,6 +196,21 @@
             <small class="form-text text-muted mt-0 mb-2">Cooling design capacity and cooling flow are typed here and stored on the profile. They are not calculated from each other and not scored.</small>
           </div>
         </div>
+        <div class="form-row" id="hybridSwitchRow" style="display:none">
+          <div class="form-group col-md-3">
+            <label>Heat pump switches on at outdoor °C (t_hp_on_c)</label>
+            <input class="form-control" name="t_hp_on_c" type="number" step="any">
+            <small class="form-text text-muted" id="hybridThpOnInfo"></small>
+          </div>
+          <div class="form-group col-md-3">
+            <label>Boiler switches off at outdoor °C (t_fb_off_c)</label>
+            <input class="form-control" name="t_fb_off_c" type="number" step="any">
+            <small class="form-text text-muted" id="hybridTfbOffInfo"></small>
+          </div>
+          <div class="col-12">
+            <small class="form-text text-muted mt-0 mb-2">Outdoor dry-bulb temperatures, typed and stored on the profile. The water outlet shown is calculated from heating letters A–D and is not stored. A heat-pump-on or boiler-off test is scored against the dry bulb, the wet bulb and this outlet.</small>
+          </div>
+        </div>
         <div class="form-row" id="pumpRow">
           <div class="form-group col-md-3">
             <label>Indoor pump arrangement (pump_arrangement)</label>
@@ -404,6 +419,8 @@
     f.cooling_flow_mode.value = p.cooling_flow_mode || '';
     f.cooling_flow_type.value = p.cooling_flow_type || '';
     f.cooling_flow_set_value.value = (p.cooling_flow_set_value != null) ? p.cooling_flow_set_value : '';
+    f.t_hp_on_c.value = (p.t_hp_on_c != null) ? p.t_hp_on_c : '';
+    f.t_fb_off_c.value = (p.t_fb_off_c != null) ? p.t_fb_off_c : '';
     ['', 'source_'].forEach(pre => {
       f[pre + 'pump_arrangement'].value = p[pre + 'pump_arrangement'] || '';
       f[pre + 'pump_type'].value = p[pre + 'pump_type'] || '';
@@ -421,6 +438,48 @@
     updateSourceFlowRow();
     updateCoolingDesignRow();
     updatePumpRows();
+    updateHybridSwitchRow();
+  }
+
+  // Hybrid switch temperatures: shown only for unit_type hybrid_air_water. The
+  // outlet / wet bulb line is read back from the server (letters A–D), never saved.
+  let hybridPreviewSeq = 0;
+  async function updateHybridSwitchRow() {
+    const f = document.getElementById('profileForm');
+    const isHybrid = f.unit_type.value === 'hybrid_air_water';
+    document.getElementById('hybridSwitchRow').style.display = isHybrid ? '' : 'none';
+    const onInfo = document.getElementById('hybridThpOnInfo');
+    const offInfo = document.getElementById('hybridTfbOffInfo');
+    onInfo.textContent = '';
+    offInfo.textContent = '';
+    if (!isHybrid) return;
+    const seq = ++hybridPreviewSeq;
+    try {
+      const resp = await fetch('/api/profiles/hybrid_switch_preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          unit_type: f.unit_type.value,
+          t_hp_on_c: f.t_hp_on_c.value,
+          t_fb_off_c: f.t_fb_off_c.value,
+          default_climate: f.default_climate.value,
+          default_application: f.default_application.value,
+          wb_rule: f.wb_rule.value
+        })
+      });
+      const data = await resp.json();
+      if (seq !== hybridPreviewSeq || !data.success) return;
+      const line = (r) => {
+        if (!r || r.tdb == null) return '';
+        const bits = [];
+        if (r.tsup != null) bits.push('outlet ' + r.tsup + ' °C');
+        if (r.twb != null) bits.push('wet bulb ' + r.twb + ' °C');
+        if (r.tsup == null) bits.push('outside letters A–D, no outlet');
+        return bits.join(', ') + (data.slice ? ' (' + data.slice + ')' : '');
+      };
+      onInfo.textContent = line(data.thp_on);
+      offInfo.textContent = line(data.tfb_off);
+    } catch (e) { /* preview only */ }
   }
 
   // EN 14511-3 pump: type only for an integrated pump, IE only for a dry-motor one.
@@ -488,6 +547,7 @@
     updateSourceFlowRow();
     updateCoolingDesignRow();
     updatePumpRows();
+    updateHybridSwitchRow();
     f.original_profile_id.value = '';
     f.original_destination.value = '';
     f.original_entry_count.value = '0';
@@ -511,9 +571,14 @@
   profileFormEl.cooling_flow_mode.addEventListener('change', updateCoolingDesignRow);
   ['unit_type', 'pump_arrangement', 'pump_type', 'source_pump_arrangement', 'source_pump_type']
     .forEach(name => profileFormEl[name].addEventListener('change', updatePumpRows));
+  ['unit_type', 'default_climate', 'default_application', 'wb_rule']
+    .forEach(name => profileFormEl[name].addEventListener('change', updateHybridSwitchRow));
+  ['t_hp_on_c', 't_fb_off_c']
+    .forEach(name => profileFormEl[name].addEventListener('input', updateHybridSwitchRow));
   updateSourceFlowRow();
   updateCoolingDesignRow();
   updatePumpRows();
+  updateHybridSwitchRow();
 
   document.getElementById('profileForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -572,6 +637,11 @@
       payload.cooling_flow_mode = f.cooling_flow_mode.value;
       payload.cooling_flow_type = coolFixed ? f.cooling_flow_type.value : '';
       payload.cooling_flow_set_value = coolFixed ? f.cooling_flow_set_value.value : '';
+    }
+    // Other unit types omit the hybrid switch keys so a save does not clear them.
+    if (f.unit_type.value === 'hybrid_air_water') {
+      payload.t_hp_on_c = f.t_hp_on_c.value;
+      payload.t_fb_off_c = f.t_fb_off_c.value;
     }
     // Indoor pump on every unit type; IE outside 0 to 1 is refused by the server.
     Object.assign(payload, pumpPayload(f, ''));

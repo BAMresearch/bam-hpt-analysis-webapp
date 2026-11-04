@@ -976,15 +976,36 @@ def ensure_results_columns(columns: dict[str, str]) -> None:
         conn.close()
 
 
-def compose_test_label(test_cond, flow_config):
-    """Human-readable Test_label from the condition letter and flow.
+HYBRID_METHODS = ('separated', 'combined')
+# Filename / metadata keys for the two hybrid switch points. Stored in test_cond;
+# never read as a letter (E or F). Deviations scores them against the profile's
+# switch setpoints (hybrid_switch_setpoints); the window pages do not.
+HYBRID_SWITCH_CONDS = ('thp_on', 'tfb_off')
 
-    Examples: ``B fixed``, ``A std``, ``E var``. Not a condition letter —
-    setpoints and kind still read ``test_cond``. Empty parts are omitted.
+
+def normalize_hybrid_method(value):
+    """(method or None, error or None). Empty is None; only separated / combined pass."""
+    if value is None:
+        return None, None
+    text = str(value).strip().lower()
+    if text == '':
+        return None, None
+    if text in HYBRID_METHODS:
+        return text, None
+    return None, f'hybrid_method must be separated, combined or empty (got {value!r})'
+
+
+def compose_test_label(test_cond, flow_config, method=None):
+    """Human-readable Test_label from the condition letter, flow and hybrid method.
+
+    Examples: ``B fixed``, ``A std``, ``E var``, ``B fixed separated``,
+    ``thp_on combined``. Not a condition letter — setpoints and kind still read
+    ``test_cond``. Empty parts are omitted.
     """
     letter = str(test_cond or '').strip()
     flow = str(flow_config or '').strip()
-    parts = [p for p in (letter, flow) if p]
+    meth = str(method or '').strip()
+    parts = [p for p in (letter, flow, meth) if p]
     return ' '.join(parts) if parts else None
 
 
@@ -1023,6 +1044,30 @@ def infer_metadata_from_filename(file_name: str) -> dict:
             test_cond = p.upper()
             break
 
+    # Hybrid switch points: _thpon_ / _tfboff_ or _thp_on_ / _tfb_off_. A letter
+    # wins. The 'off' of tfb_off is consumed so it is never read as flow 'off'.
+    lowered = [(p or '').lower() for p in parts]
+    consumed = set()
+    switch_found = set()
+    for i, t in enumerate(lowered):
+        nxt = lowered[i + 1] if i + 1 < len(lowered) else None
+        if t == 'thpon':
+            switch_found.add('thp_on')
+        elif t == 'tfboff':
+            switch_found.add('tfb_off')
+        elif t == 'thp' and nxt == 'on':
+            switch_found.add('thp_on')
+            consumed.add(i + 1)
+        elif t == 'tfb' and nxt == 'off':
+            switch_found.add('tfb_off')
+            consumed.add(i + 1)
+    if test_cond is None and len(switch_found) == 1:
+        test_cond = next(iter(switch_found))
+
+    # Hybrid method: one token separated / combined; both on one name → empty.
+    methods_found = {t for t in lowered if t in HYBRID_METHODS}
+    hybrid_method = next(iter(methods_found)) if len(methods_found) == 1 else None
+
     climate = None
     application = None
     for p in parts:
@@ -1041,7 +1086,7 @@ def infer_metadata_from_filename(file_name: str) -> dict:
     # Do not substring-match: 'average' contains 'var'. If no token, leave empty
     # so the unit profile's flow_mode decides (HPT_RRT1 = variable, RRT2 = fixed).
     flow_config = None
-    for t in (p.lower() for p in parts if p):
+    for t in (p.lower() for i, p in enumerate(parts) if p and i not in consumed):
         if t == 'off' or t.startswith('off'):
             flow_config = 'off'
             break
@@ -1059,8 +1104,9 @@ def infer_metadata_from_filename(file_name: str) -> dict:
         # inferred
         'hp_id': hp_id,
         'lab_id': lab_id,
-        'test_label': compose_test_label(test_cond, flow_config),
+        'test_label': compose_test_label(test_cond, flow_config, hybrid_method),
         'test_cond': test_cond,
+        'hybrid_method': hybrid_method,
         'climate': climate,
         'application': application,
         'flow_config': flow_config,
@@ -3119,6 +3165,16 @@ def index():
         )
         
         ordered_columns = visible_columns
+
+        # Combined hybrid system efficiency: calculated here, not a DB column, so it
+        # is attached to each row and slotted in right after cop_corr.
+        if means_column_is_visible('system_efficiency', column_visibility, deviation_columns):
+            for row in results:
+                row['system_efficiency'] = summary_export.row_system_efficiency(row)
+            if 'cop_corr' in ordered_columns:
+                ordered_columns.insert(ordered_columns.index('cop_corr') + 1, 'system_efficiency')
+            else:
+                ordered_columns.append('system_efficiency')
         
         # Detect COP_Dataset and scatter_dataset column names for toggle buttons
         cop_dataset_column = None
@@ -6229,7 +6285,12 @@ def update_text_column():
                 continue
             
             value = parts[4]  # Text value
-            
+            if column_name == 'hybrid_method':
+                value, method_err = normalize_hybrid_method(value)
+                if method_err:
+                    errors.append(f"Line {line_num}: {method_err}")
+                    continue
+
             # Update the database - try multiple matching strategies
             try:
                 # Strategy 1: Exact match
@@ -6346,6 +6407,7 @@ def api_new_entries_preview():
             'lab_id': 'INTEGER',
             'test_label': 'TEXT',
             'test_cond': 'TEXT',
+            'hybrid_method': 'TEXT',
             'climate': 'TEXT',
             'application': 'TEXT',
             'flow_config': 'TEXT',
@@ -6424,6 +6486,7 @@ def api_apply_new_entries_metadata():
             'lab_id': 'INTEGER',
             'test_label': 'TEXT',
             'test_cond': 'TEXT',
+            'hybrid_method': 'TEXT',
             'climate': 'TEXT',
             'application': 'TEXT',
             'flow_config': 'TEXT',
@@ -6438,10 +6501,20 @@ def api_apply_new_entries_metadata():
         })
 
         updatable = {
-            'hp_id', 'lab_id', 'test_label', 'test_cond', 'climate', 'application', 'flow_config',
-            'cop_dataset', 'scatter_dataset', 'indicator', 'notes', 'dpfix',
+            'hp_id', 'lab_id', 'test_label', 'test_cond', 'hybrid_method', 'climate', 'application',
+            'flow_config', 'cop_dataset', 'scatter_dataset', 'indicator', 'notes', 'dpfix',
             'dev_test_condition', 'profile_id', 'condition_set_id',
         }
+
+        # Hybrid method: only separated / combined / empty (NULL). Reject the whole
+        # save before any row is written.
+        for entry in entries:
+            values = entry.get('values') or {}
+            if 'hybrid_method' in values:
+                method, err = normalize_hybrid_method(values.get('hybrid_method'))
+                if err:
+                    return jsonify({'success': False, 'message': err})
+                values['hybrid_method'] = method
 
         conn = get_db_connection()
         try:
@@ -6456,9 +6529,11 @@ def api_apply_new_entries_metadata():
                 # If user set test_cond, keep dev_test_condition in sync unless explicitly provided
                 if 'test_cond' in values and 'dev_test_condition' not in values:
                     values['dev_test_condition'] = values.get('test_cond')
-                # Test_label is derived (e.g. "B fixed"); the letter stays on test_cond
+                # Test_label is derived (e.g. "B fixed", "B fixed separated"); the
+                # letter stays on test_cond, the method on hybrid_method.
                 values['test_label'] = compose_test_label(
-                    values.get('test_cond'), values.get('flow_config'))
+                    values.get('test_cond'), values.get('flow_config'),
+                    values.get('hybrid_method'))
                 # Review modal shows COP dataset only; keep scatter in lockstep unless sent separately
                 if 'cop_dataset' in values and 'scatter_dataset' not in values:
                     values['scatter_dataset'] = values.get('cop_dataset')
@@ -6643,7 +6718,12 @@ def bulk_update_text_columns():
                 value = update.get('value', '')
                 file_name = update.get('file_name', '')
                 data_set = update.get('data_set', '')
-                
+                if column_name == 'hybrid_method':
+                    value, method_err = normalize_hybrid_method(value)
+                    if method_err:
+                        errors.append(f"Row {rowid}: {method_err}")
+                        continue
+
                 try:
                     if rowid:
                         # Use rowid for direct update (most reliable)
@@ -8147,6 +8227,90 @@ def compute_ua_and_qset(pdesign_kw, db_setpoint):
         return ua, qset
     except (TypeError, ValueError):
         return None, None
+
+
+# Hybrid rows: which tests have their heating capacity compared with the building
+# load (compute_ua_and_qset). Separated: only C and D — the others are
+# maximum-capacity tests. Combined: A–D and the two switch temperatures.
+HYBRID_LOAD_SEPARATED_LETTERS = ('C', 'D')
+HYBRID_LOAD_COMBINED_LETTERS = ('A', 'B', 'C', 'D')
+HYBRID_LOAD_SEPARATED_MAX = ('separated hybrid maximum-capacity test — '
+                             'not compared with the building load')
+HYBRID_LOAD_SWITCH_NOT_SET = ('the switch temperature is not set on the profile — '
+                              'not compared with the building load')
+HYBRID_LOAD_NOT_COMPARED = 'this hybrid test is not compared with the building load'
+
+
+def hybrid_load_outdoor(method, test_condition, letter_tdb, profile=None):
+    """``(outdoor °C or None, reason or None)`` for the heating load of a hybrid row.
+
+    Call only when ``hybrid_method`` is set. ``letter_tdb`` is the letter's
+    outdoor setpoint the Deviations page already uses for a heating row.
+
+    - separated, C or D: ``letter_tdb``.
+    - combined, A–D: ``letter_tdb``.
+    - combined, ``thp_on`` / ``tfb_off``: ``tdb`` of ``resolve_hybrid_switch`` —
+      used only as the load's outdoor temperature, never as a scored setpoint.
+    - anything else: None, with the hover reason.
+
+    A None outdoor temperature with a None reason means the letter has no
+    outdoor setpoint (same as a heating row today). Never the measured mean.
+    """
+    meth = normalize_hybrid_method(method)[0]
+    tc = str(test_condition or '').strip().lower()
+    token = tc.split()[0] if tc else ''
+    if token in HYBRID_SWITCH_CONDS:
+        if meth != 'combined':
+            return None, HYBRID_LOAD_NOT_COMPARED
+        tdb = unit_config.resolve_hybrid_switch(profile, token).get('tdb')
+        return (tdb, None) if tdb is not None else (None, HYBRID_LOAD_SWITCH_NOT_SET)
+    letter = unit_config.condition_letter(test_condition)
+    if meth == 'separated':
+        if letter in HYBRID_LOAD_SEPARATED_LETTERS:
+            return letter_tdb, None
+        if letter:
+            return None, HYBRID_LOAD_SEPARATED_MAX
+        return None, HYBRID_LOAD_NOT_COMPARED
+    if meth == 'combined' and letter in HYBRID_LOAD_COMBINED_LETTERS:
+        return letter_tdb, None
+    return None, HYBRID_LOAD_NOT_COMPARED
+
+
+def hybrid_switch_token(entry):
+    """``thp_on`` / ``tfb_off`` when the row's stored condition is a switch point, else None.
+
+    Read from ``dev_test_condition``, then ``test_cond`` — never from the filename.
+    """
+    entry = entry or {}
+    tc = str(entry.get('dev_test_condition') or entry.get('test_cond') or '').strip().lower()
+    token = tc.split()[0] if tc else ''
+    return token if token in HYBRID_SWITCH_CONDS else None
+
+
+def hybrid_switch_setpoints(entry, file_name=None, hp_id=None):
+    """``(tdb, twb, tsup)`` Deviations scores a ``thp_on`` / ``tfb_off`` row against.
+
+    The values of ``resolve_hybrid_switch`` for the row's own climate ×
+    application, with the profile loaded the way the load check loads it.
+    Three None when the row is not a switch point, the profile is not hybrid or
+    the temperature is not typed. ``tmean`` is never a setpoint. Deviations,
+    Guideline Windows, Period Statistics and Scatter all read a switch row's
+    setpoints from here.
+    """
+    token = hybrid_switch_token(entry)
+    if token is None:
+        return None, None, None
+    entry = entry or {}
+    try:
+        profile, _ = unit_config.resolve_profile(
+            file_name=file_name or entry.get('file_name'),
+            hp_id=hp_id if hp_id is not None else entry.get('hp_id'),
+            profile_id=entry.get('profile_id'))
+    except Exception:
+        profile = None
+    r = unit_config.resolve_hybrid_switch(
+        profile, token, climate=entry.get('climate'), application=entry.get('application'))
+    return r.get('tdb'), r.get('twb'), r.get('tsup')
 
 def get_mean_heating_capacity(entry):
     """Get mean heating capacity (kW) from entry. Prefer BAM corr, then corr, then uncorr."""
@@ -13812,6 +13976,10 @@ def _entry_db_setpoint(entry, file_name):
     """
     if _entry_is_cooling(entry):
         return _entry_cooling_setpoints(entry)[0]
+    # A hybrid switch point's stored dry bulb is a Deviations setpoint only;
+    # the window pages and the load fallback keep it empty, as before.
+    if hybrid_switch_token(entry):
+        return None
     entry = _entry_with_hp_id(entry)
     letter = unit_config.condition_letter(
         entry.get('dev_test_condition') or entry.get('test_cond')
@@ -13834,6 +14002,29 @@ def _entry_db_setpoint(entry, file_name):
         except (TypeError, ValueError):
             db_set = None
     return db_set
+
+
+# A switch point whose profile gives no wet bulb or no water outlet keeps that
+# cell empty on the window pages; dry bulb − 1 K and a letter outlet are never used.
+HYBRID_SWITCH_NO_WB = 'the profile gives no wet bulb at this switch temperature'
+HYBRID_SWITCH_NO_TSUP = 'the profile gives no water outlet at this switch temperature'
+
+
+def _window_switch_setpoints(entry, file_name=None):
+    """``(tdb, twb, tsup)`` of a heating ``thp_on`` / ``tfb_off`` row, else None.
+
+    Guideline Windows, Period Statistics and their hovers read the switch row
+    from here; ``_entry_db_setpoint`` stays None for it, so the Deviations load
+    path is unchanged. None means "not a switch row": letters and cooling rows
+    keep the letter path. The condition is the stored one, never the filename.
+    """
+    entry = entry or {}
+    if _entry_is_cooling(entry) or not hybrid_switch_token(entry):
+        return None
+    try:
+        return hybrid_switch_setpoints(entry, file_name=file_name or entry.get('file_name'))
+    except Exception:
+        return None, None, None
 
 
 def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set, quantities,
@@ -13876,6 +14067,14 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
     window_dev = _cut(df_dev)
     window_raw = _cut(df_raw if df_raw is not None else df_dev)
     db_set = _entry_db_setpoint(entry, file_name)
+    wb_set = (db_set - 1.0) if db_set is not None else None
+    wb_why = 'no outdoor setpoint for this test condition'
+    switch = _window_switch_setpoints(entry, file_name)
+    if switch is not None:
+        # Switch point: the profile's own dry bulb and wet bulb, same widths.
+        db_set, wb_set = switch[0], switch[1]
+        if db_set is not None and wb_set is None:
+            wb_why = HYBRID_SWITCH_NO_WB
 
     if 'db' in quantities:
         half = _interval_spec_half(spec, 'db_k')
@@ -13908,11 +14107,11 @@ def _window_ds_band_pcts(df_dev, df_raw, spans, spec, entry, file_name, data_set
             out['wb'] = (None, 'the sheet holds no samples in this window')
         elif 'T_outdoor (WB)' not in window_dev.columns:
             out['wb'] = (None, 'the sheet has no T_outdoor (WB)')
-        elif db_set is None:
-            out['wb'] = (None, 'no outdoor setpoint for this test condition')
+        elif wb_set is None:
+            out['wb'] = (None, wb_why)
         else:
             pct = _pct_outside_half(
-                window_dev['T_outdoor (WB)'], db_set - 1.0, half, len(window_dev))
+                window_dev['T_outdoor (WB)'], wb_set, half, len(window_dev))
             out['wb'] = ((_guideline_num(pct), '') if pct is not None
                          else (None, 'no valid wet-bulb samples in this window'))
 
@@ -14098,6 +14297,11 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities,
         return ''
 
     db_set = _entry_db_setpoint(entry, file_name)
+    # Switch point: the profile's dry bulb, wet bulb and outlet. An empty wet
+    # bulb or outlet stays empty; dry bulb − 1 K and a letter outlet are not used.
+    switch = _window_switch_setpoints(entry, file_name)
+    if switch is not None:
+        db_set = switch[0]
 
     def _temperature_mean(quantity, column, setpoint, check_id, what, setpoint_reason):
         """mean(column) − setpoint in K, or (None, why)."""
@@ -14126,17 +14330,26 @@ def _window_mean_devs(df_dev, df_raw, spans, spec, entry, file_name, quantities,
     if 'wb' in quantities:
         # Same wet-bulb setpoint convention as the parent table and the individual %.
         wb_set = (db_set - 1.0) if db_set is not None else None
+        wb_why = 'no outdoor setpoint for this test condition'
+        if switch is not None:
+            wb_set = switch[1]
+            if db_set is not None and wb_set is None:
+                wb_why = HYBRID_SWITCH_NO_WB
         out['wb'] = _temperature_mean(
-            'wb', 'T_outdoor (WB)', wb_set, 'wb', 'wet-bulb',
-            'no outdoor setpoint for this test condition')
+            'wb', 'T_outdoor (WB)', wb_set, 'wb', 'wet-bulb', wb_why)
 
     if 'tsup' in quantities:
         # Same column choice as the Deviations Tsup plot: Ts Buh, else T_supply.
         tsup_col = get_tsup_series_column(window_dev)
-        tsup_set = _tsup_setpoint_from_entry(entry, file_name=file_name)
+        if switch is not None:
+            tsup_set = switch[2]
+            tsup_why = (HYBRID_SWITCH_NO_TSUP if switch[0] is not None
+                        else 'no supply setpoint for this test condition')
+        else:
+            tsup_set = _tsup_setpoint_from_entry(entry, file_name=file_name)
+            tsup_why = 'no supply setpoint for this test condition'
         out['tsup'] = _temperature_mean(
-            'tsup', tsup_col, tsup_set, 'tsup', 'supply temperature',
-            'no supply setpoint for this test condition')
+            'tsup', tsup_col, tsup_set, 'tsup', 'supply temperature', tsup_why)
 
     if 'dtreturn' in quantities:
         if _mean_dev_half(spec, 'dtreturn') is None:
@@ -14281,7 +14494,15 @@ def _window_dbwb(df_dev, spans, entry, file_name, half_pct=None, half_mean=None)
     for col in ('T_outdoor (DB)', 'T_outdoor (WB)'):
         if col not in window.columns:
             return _all(f'the sheet has no {col}')
-    if _entry_db_setpoint(_entry_with_hp_id(entry or {}), file_name) is None:
+    switch = _window_switch_setpoints(_entry_with_hp_id(entry or {}), file_name)
+    if switch is not None:
+        # Switch point: scored when the profile gives a dry bulb and a wet bulb,
+        # against the same target and widths as a heating letter.
+        if switch[0] is None:
+            return _all('no outdoor setpoint for this test condition')
+        if switch[1] is None:
+            return _all(HYBRID_SWITCH_NO_WB)
+    elif _entry_db_setpoint(_entry_with_hp_id(entry or {}), file_name) is None:
         # No dry-bulb set means no wet-bulb set either, so no target.
         return _all('no outdoor setpoint for this test condition')
     diff = (pd.to_numeric(window['T_outdoor (DB)'], errors='coerce')
@@ -14371,6 +14592,18 @@ def _guideline_pump_on_load(entry, row, payload) -> bool:
         row['delta_cop_last'] = None
         row['delta_cop_reason'] = GUIDELINE_PUMP_STALE
     return True
+
+
+def _guideline_switch_payload_stale(entry, payload) -> bool:
+    """True when a cached ``thp_on`` / ``tfb_off`` payload predates the switch setpoints.
+
+    Only a switch row whose profile gives a dry bulb can be stale for this. The
+    page keeps its stored numbers; Compute missing scores rescores it. Opens no sheet.
+    """
+    if (payload or {}).get('hybrid_switch_scored'):
+        return False
+    switch = _window_switch_setpoints(_entry_with_hp_id(entry or {}))
+    return switch is not None and switch[0] is not None
 
 
 def _guideline_dbwb_payload_stale(entry, payload) -> bool:
@@ -14739,6 +14972,9 @@ def _guideline_score_payload_from_row(row) -> dict:
     if row.get('pump_profile_scored'):
         # Window Q, P and COP used the row's stored profile for the pump correction.
         payload['pump_profile_scored'] = True
+    if row.get('hybrid_switch_scored'):
+        # A hybrid switch row's outdoor cells used its switch setpoints.
+        payload['hybrid_switch_scored'] = True
     return payload
 
 
@@ -15322,6 +15558,8 @@ def _guideline_score_rows_on_sheet(items, parents, file_name, data_set, df_full,
             # Pieces, evaluation means and ΔCOP below all use the row's stored
             # profile, so a page load can keep them on a row that sets a pump.
             row['pump_profile_scored'] = True
+            # A thp_on / tfb_off row's DB / WB / outlet cells used its switch setpoints.
+            row['hybrid_switch_scored'] = True
             pump_profile = _entry_pump_profile(parent)
             if ev is None:
                 row['delta_cop_reason'] = 'no evaluation window is saved'
@@ -15632,6 +15870,12 @@ def _guideline_row_sets(entry, cache=None) -> dict:
         'climate': climate,
         'application': application,
     }
+    # Switch point: the same three sets _window_mean_devs scored against.
+    switch = _window_switch_setpoints(entry, file_name)
+    if switch is not None:
+        out['db'], out['wb'], out['tsup'] = switch
+        if switch[0] is None or switch[1] is None:
+            out['dbwb'] = None
     if cache is not None:
         cache[key] = out
     return out
@@ -15751,11 +15995,13 @@ def _guideline_window_rows(rowids=None) -> dict:
                 # Window Q / P / COP scored before the profile's pump correction, on
                 # a row whose profile sets a pump: those cells stay empty.
                 pump_stale = _guideline_pump_on_load(entry, row, hit[1])
+                # Switch row scored before its switch setpoints: numbers stay as stored.
+                switch_stale = _guideline_switch_payload_stale(entry, hit[1])
                 if not _guideline_payload_has_pieces(hit[1]):
                     # Stored before the pieces: keep its numbers, piece cells n/a.
                     _guideline_pieces_missing(row)
                     n_missing += 1
-                elif cooling_flow_stale or dbwb_stale or pump_stale:
+                elif cooling_flow_stale or dbwb_stale or pump_stale or switch_stale:
                     # Flow (cooling), DB − WB or pump-corrected Q / P / COP cells empty
                     # until Compute missing scores rescores the row; every other
                     # stored number stays.
@@ -16050,7 +16296,8 @@ def api_guideline_windows_score_files():
                     and not (_entry_is_cooling(entry)
                              and _guideline_cooling_payload_stale(entry, hit[1]))
                     and not _guideline_dbwb_payload_stale(entry, hit[1])
-                    and not _guideline_pump_payload_stale(entry, hit[1])):
+                    and not _guideline_pump_payload_stale(entry, hit[1])
+                    and not _guideline_switch_payload_stale(entry, hit[1])):
                 f['n_cached'] += 1
             else:
                 f['n_missing'] += 1
@@ -16128,7 +16375,8 @@ def api_guideline_windows_compute_scores():
                         and not (_entry_is_cooling(entry)
                                  and _guideline_cooling_payload_stale(entry, hit[1]))
                         and not _guideline_dbwb_payload_stale(entry, hit[1])
-                        and not _guideline_pump_payload_stale(entry, hit[1])):
+                        and not _guideline_pump_payload_stale(entry, hit[1])
+                        and not _guideline_switch_payload_stale(entry, hit[1])):
                     # A cooling row whose flow was not scored against today's fixed
                     # cooling flow, or whose inlet predates the cooling inlet score,
                     # is rescored in full below; so is a row whose payload predates
@@ -17377,7 +17625,7 @@ def _dtreturn_outside_band(dtreturn, lower, upper, total_points):
     return count, count / total_points * 100.0
 
 
-def calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=None, hp_id=None, entry=None, df=None, dtreturn_band=None):
+def calculate_entry_deviations(file_name, data_set, start_time, end_time, warning_list=None, hp_id=None, entry=None, df=None, dtreturn_band=None, score_hybrid_switch=True):
     """Calculate deviation statistics for a single entry
     
     Args:
@@ -17394,6 +17642,8 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         dtreturn_band: Optional (lower, upper) in K for the dTreturn check, so a
             guideline interval can be scored with its own width. The parent call
             passes nothing and keeps the configured full-cycle band.
+        score_hybrid_switch: False keeps a ``thp_on`` / ``tfb_off`` row on the
+            letter path. Every caller uses the default (True).
     
     Returns:
         Dictionary with statistics or None if calculation failed
@@ -17417,9 +17667,15 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
                     conn_meta.close()
             except Exception:
                 pass
+        # Hybrid switch point (thp_on / tfb_off), read from the stored condition
+        # only: scored against the profile's switch setpoints, never a letter.
+        switch_token = (hybrid_switch_token(entry)
+                        if score_hybrid_switch
+                        and not unit_config.is_cooling_condition_set(entry.get('condition_set_id'))
+                        else None)
         # Extract test condition from stored metadata, else filename
         # Try multiple strategies to find the test condition letter (E, A, F, B, C, D, G)
-        test_condition = unit_config.condition_letter(
+        test_condition = switch_token or unit_config.condition_letter(
             entry.get('dev_test_condition') or entry.get('test_cond')
         )
         
@@ -17513,11 +17769,21 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         db_setpoint = None
         db_bands = None
         cooling_tsup_set = None
+        switch_twb = switch_tsup = None
         if cooling_unscored:
             db_setpoint, cooling_tsup_set = _cooling_setpoints(
                 entry.get('condition_set_id'), test_condition)
             if db_setpoint is not None:
                 db_bands = {'DB': (db_setpoint - DB_BAND, db_setpoint + DB_BAND)}
+        elif switch_token:
+            # The resolver's dry bulb, wet bulb and outlet with the letter bands.
+            # An empty wet bulb or outlet stays empty; tdb − 1 is never forced.
+            db_setpoint, switch_twb, switch_tsup = hybrid_switch_setpoints(
+                entry, file_name=file_name, hp_id=hp_id)
+            if db_setpoint is not None:
+                db_bands = {'DB': (db_setpoint - DB_BAND, db_setpoint + DB_BAND)}
+                if switch_twb is not None:
+                    db_bands['WB'] = (switch_twb - WB_BAND, switch_twb + WB_BAND)
         else:
             db_setpoint = unit_config.get_tdb_setpoint_for(
                 test_condition, climate=climate, application=application,
@@ -17576,8 +17842,8 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         max_wb_deviation = None
         max_wb_pos = None
         max_wb_neg = None
-        if wb_applicable and db_bands and not cooling_unscored:
-            wb_setpoint = db_setpoint - 1
+        if wb_applicable and db_bands and 'WB' in db_bands and not cooling_unscored:
+            wb_setpoint = switch_twb if switch_token else db_setpoint - 1
             if _has_valid_points(cycle_data['T_outdoor (WB)']):
                 wb_outside_band = cycle_data[
                     (cycle_data['T_outdoor (WB)'] < db_bands['WB'][0]) |
@@ -17598,11 +17864,16 @@ def calculate_entry_deviations(file_name, data_set, start_time, end_time, warnin
         # Calculate tsup_setpoint based on test condition × climate × application
         # Cooling: the letter's tsup_set (water outlet), scored as the whole-test
         # mean only — no individual outlet percentage is computed below.
-        tsup_setpoint = cooling_tsup_set if cooling_unscored else get_tsup_setpoint(
-            test_condition, file_name,
-            condition_set_id=entry.get('condition_set_id'),
-            climate=climate, application=application,
-        )
+        if cooling_unscored:
+            tsup_setpoint = cooling_tsup_set
+        elif switch_token:
+            tsup_setpoint = switch_tsup
+        else:
+            tsup_setpoint = get_tsup_setpoint(
+                test_condition, file_name,
+                condition_set_id=entry.get('condition_set_id'),
+                climate=climate, application=application,
+            )
 
         # Supply temperature violations: symmetric band around tsup_setpoint.
         # Prefer 'Ts Buh' (same column choice as the Tsup deviation plot and the mean Tsup column).
@@ -17782,6 +18053,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
     # Cooling set: DB against the cooling tdb_set, WB unset, no individual Tsup %,
     # inlet with the Interval H width; flow only against a fixed cooling flow.
     cooling_unscored = unit_config.is_cooling_condition_set((entry or {}).get('condition_set_id'))
+    # Hybrid switch point: the same setpoints calculate_entry_deviations stores.
+    switch_token = None if cooling_unscored else hybrid_switch_token(entry)
 
     # Metrics that require test_condition / DB setpoint bands
     needs_db_bands = 'db' in applicable_checks and any(m in metrics for m in ('db_outside', 'db_pct', 'max_db', 'db_extremes'))
@@ -17791,7 +18064,15 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
     test_condition = None
     db_setpoint = None
     wb_setpoint = None
-    if needs_db_bands or needs_wb_bands or needs_tsup_bands:
+    if (needs_db_bands or needs_wb_bands or needs_tsup_bands) and switch_token:
+        db_setpoint, wb_setpoint, switch_tsup = hybrid_switch_setpoints(
+            entry, file_name=file_name, hp_id=hp_id)
+        test_condition = switch_token
+        out['test_condition'] = test_condition
+        out['db_setpoint'] = db_setpoint
+        out['wb_setpoint'] = wb_setpoint
+        out['tsup_setpoint'] = switch_tsup
+    elif needs_db_bands or needs_wb_bands or needs_tsup_bands:
         # Reuse existing filename parsing logic from calculate_entry_deviations (simplified)
         parts = file_name.split('_')
         if len(parts) >= 3 and len(parts[2]) > 0 and parts[2][0] in DEVIATION_BANDS:
@@ -17840,7 +18121,9 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             if not db_has_data:
                 _note_missing_quantity(file_name, data_set, 'dry-bulb temperature', warning_list)
             # Cooling: the cooling tdb_set ± the same half-width, never the heating grid.
-            db_band = ((db_setpoint - DB_BAND, db_setpoint + DB_BAND) if cooling_unscored
+            # Hybrid switch point: its own dry bulb ± the same half-width.
+            db_band = ((db_setpoint - DB_BAND, db_setpoint + DB_BAND)
+                       if (cooling_unscored or switch_token)
                        else DEVIATION_BANDS[test_condition]['DB'])
             db_outside = cycle_data[(cycle_data['T_outdoor (DB)'] < db_band[0]) | (cycle_data['T_outdoor (DB)'] > db_band[1])]
             db_count = int(len(db_outside)) if db_has_data else None
@@ -17860,7 +18143,8 @@ def calculate_entry_deviation_metrics(file_name, data_set, start_time, end_time,
             wb_has_data = _has_valid_points(cycle_data['T_outdoor (WB)'])
             if not wb_has_data:
                 _note_missing_quantity(file_name, data_set, 'wet-bulb temperature', warning_list)
-            wb_band = DEVIATION_BANDS[test_condition]['WB']
+            wb_band = ((wb_setpoint - WB_BAND, wb_setpoint + WB_BAND) if switch_token
+                       else DEVIATION_BANDS[test_condition]['WB'])
             wb_outside = cycle_data[(cycle_data['T_outdoor (WB)'] < wb_band[0]) | (cycle_data['T_outdoor (WB)'] > wb_band[1])]
             wb_count = int(len(wb_outside)) if wb_has_data else None
             if 'wb_outside' in metrics:
@@ -18721,6 +19005,8 @@ def deviations():
             stats['climate_label'], stats['application_label'] = _entry_climate_application(entry)
             stats['slice_from_entry'] = bool(
                 str(entry.get('climate') or '').strip() and str(entry.get('application') or '').strip())
+            # Hybrid separated / combined: shown beside the badge, never scored.
+            stats['hybrid_method'] = normalize_hybrid_method(entry.get('hybrid_method'))[0]
             avg_t_mean_log = safe_float(entry.get('avg_t_mean_log'))
             if (stats['tmean_is_variable_flow'] and avg_t_mean_log is not None
                     and stats['tmean_setpoint'] is not None):
@@ -18749,6 +19035,26 @@ def deviations():
             # cooling row, whose dry-bulb set is the cooling one and whose
             # cooling capacity is scored against the cooling load below.
             db_set = None if _entry_is_cooling(entry) else stats.get('db_setpoint')
+            # A switch point's stored dry bulb is a Deviations setpoint only: the
+            # load is decided by hybrid_load_outdoor below, never by that value.
+            if hybrid_switch_token(entry):
+                db_set = None
+            # Hybrid row: hybrid_load_outdoor decides whether, and at which
+            # outdoor temperature, the load is compared. Empty method: unchanged.
+            stats['qset_reason'] = None
+            if stats.get('hybrid_method') and not _entry_is_cooling(entry):
+                if db_set is None:
+                    db_set = _entry_db_setpoint(entry, entry.get('file_name'))
+                try:
+                    hyb_profile, _ = unit_config.resolve_profile(
+                        file_name=entry.get('file_name'), hp_id=hp_id,
+                        profile_id=entry.get('profile_id'))
+                except Exception:
+                    hyb_profile = None
+                db_set, stats['qset_reason'] = hybrid_load_outdoor(
+                    stats['hybrid_method'],
+                    stats.get('test_condition') or entry.get('dev_test_condition') or entry.get('test_cond'),
+                    db_set, hyb_profile)
             ua, qset = compute_ua_and_qset(pdesign, db_set)
             stats['qset_kw'] = round(qset, 3) if qset is not None else None
             mean_q = get_mean_q_for_deviations(entry)
@@ -19006,7 +19312,8 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
     key = (file_name, str(hp_id), entry.get('profile_id'), entry.get('condition_set_id'),
            entry.get('climate'), entry.get('application'), str(tc),
            entry.get('flow_config'), entry.get('dev_db_setpoint'),
-           entry.get('dev_flow_setpoint'), entry.get('dev_flow_set_type'))
+           entry.get('dev_flow_setpoint'), entry.get('dev_flow_set_type'),
+           entry.get('hybrid_method'))
     if cache is not None and key in cache:
         return cache[key]
 
@@ -19043,7 +19350,40 @@ def _period_stat_setpoints(entry, conn=None, cache=None) -> dict:
         'flow_set_type': flow[0],
         'flow_set': flow[1],
         'variable_flow': variable_flow,
+        # Why q_set is empty for a hybrid letter the load rule does not compare;
+        # the capacity hover says this instead of the Pdesign sentence.
+        'q_reason': None,
     }
+    # Hybrid letter (not a switch point): capacity follows hybrid_load_outdoor at
+    # the letter outdoor temperature, as on Deviations. Dry bulb, wet bulb,
+    # outlet, mean water and flow stay on the letter. No method: today's Qset.
+    letter_method = normalize_hybrid_method(entry.get('hybrid_method'))[0]
+    if letter_method and not cooling and hybrid_switch_token(entry) is None:
+        outdoor, why = hybrid_load_outdoor(letter_method, tc, db_set, None)
+        if outdoor is not None:
+            out['q_set'] = compute_ua_and_qset(pdesign, outdoor)[1]
+        elif why:
+            out['q_set'] = None
+            out['q_reason'] = why
+    # Switch point: the profile's dry bulb, wet bulb and outlet (an empty one
+    # stays empty); mean water is not scored. Capacity only where
+    # hybrid_load_outdoor gives an outdoor temperature (combined, typed) —
+    # never the switch dry bulb fed straight into compute_ua_and_qset.
+    switch = _window_switch_setpoints(entry, file_name)
+    if switch is not None:
+        out['db'], out['wb'], out['tsup'] = switch
+        out['tmean'] = None
+        out['q_set'] = None
+        method = normalize_hybrid_method(entry.get('hybrid_method'))[0]
+        if method:
+            try:
+                profile, _ = unit_config.resolve_profile(
+                    file_name=file_name, hp_id=hp_id, profile_id=entry.get('profile_id'))
+            except Exception:
+                profile = None
+            outdoor, _why = hybrid_load_outdoor(method, hybrid_switch_token(entry), None, profile)
+            if outdoor is not None:
+                out['q_set'] = compute_ua_and_qset(pdesign, outdoor)[1]
     if cache is not None:
         cache[key] = out
     return out
@@ -19144,6 +19484,10 @@ def _period_stat_cell_colour(group, metric_key, value, setpoints, bands):
     elif quantity in ('flow', 'q'):
         ref = _guideline_num(sp.get('flow_set') if quantity == 'flow' else sp.get('q_set'))
         if ref is None or ref == 0:
+            # A hybrid letter the load rule does not compare names that reason,
+            # never the Pdesign sentence.
+            if quantity == 'q' and sp.get('q_reason'):
+                return ('', sp['q_reason'])
             return ('', PERIOD_STAT_COLOUR_NO_SETPOINT[quantity])
         dev = 100.0 * (val - ref) / ref
     else:
@@ -20677,22 +21021,23 @@ def recalculate_deviation_stat():
             if entry_ids:
                 placeholders = ",".join(["?"] * len(entry_ids))
                 rows = cur.execute(
-                    f"SELECT rowid, file_name, data_set, start_time, end_time, hp_id, "
-                    f"profile_id, condition_set_id FROM results WHERE rowid IN ({placeholders})",
+                    f"SELECT rowid AS rowid, * FROM results WHERE rowid IN ({placeholders})",
                     entry_ids,
                 ).fetchall()
             else:
                 rows = cur.execute(
-                    "SELECT rowid, file_name, data_set, start_time, end_time, hp_id, "
-                    "profile_id, condition_set_id FROM results",
+                    "SELECT rowid AS rowid, * FROM results",
                 ).fetchall()
+            base_keys = ('rowid', 'file_name', 'data_set', 'start_time', 'end_time',
+                         'hp_id', 'profile_id', 'condition_set_id')
 
             updated = 0
             errors = []
             from datetime import datetime
 
             for r in rows:
-                rd = dict(r)
+                full = dict(r)
+                rd = {k: full.get(k) for k in base_keys}
                 rowid = int(rd['rowid'])
                 file_name = rd.get('file_name')
                 data_set = rd.get('data_set')
@@ -20703,6 +21048,12 @@ def recalculate_deviation_stat():
                 if not all([file_name, data_set is not None, start_time is not None, end_time is not None]):
                     continue
 
+                # A hybrid switch row also needs its stored condition and slice
+                # (the same setpoints Calculate deviations stores); other rows
+                # get exactly the columns they got before.
+                if hybrid_switch_token(full):
+                    rd.update({k: full.get(k) for k in ('dev_test_condition', 'test_cond',
+                                                        'climate', 'application')})
                 try:
                     res = calculate_entry_deviation_metrics(
                         file_name, data_set, start_time, end_time,
@@ -21941,6 +22292,10 @@ def generate_scatter_plots():
                                 match = re.search(r'\s+([EAFBCD])', name_without_ext, re.IGNORECASE)
                                 if match:
                                     test_condition = match.group(1).upper()
+                    # Hybrid switch point: its strip is the stored condition
+                    # (thp_on / tfb_off), never a letter read from the filename.
+                    if not _entry_is_cooling(entry) and hybrid_switch_token(entry):
+                        test_condition = hybrid_switch_token(entry)
 
                     y_value = entry.get(y_parameter)
                     if y_value is not None:
@@ -21962,6 +22317,8 @@ def generate_scatter_plots():
                                 # Per-point condition set: the strip plot draws a cooling
                                 # point's bands from the cooling letter.
                                 'condition_set_id': entry.get('condition_set_id'),
+                                # Switch strip: whether its capacity has a load band.
+                                'hybrid_method': entry.get('hybrid_method'),
                             })
                         except (ValueError, TypeError) as e:
                             print(f"  Skipped (invalid Y value): {y_value} - {e}")
@@ -22392,6 +22749,93 @@ def _stripplot_letter_setpoints(cond, condition_set_ids, quantity):
     return centres
 
 
+def _stripplot_switch_centres(rows, cond, quantity, profile_id=None, file_name=None):
+    """Band centres of one Scatter ``thp_on`` / ``tfb_off`` strip.
+
+    ``rows`` are that strip's points. 'db' / 'wb' / 'tsup': ``hybrid_switch_setpoints``
+    on each point's own climate, application and profile; an empty value draws
+    no band. 'q': the Qset Deviations uses — only where ``hybrid_load_outdoor``
+    gives an outdoor temperature (combined, typed); a separated point or one
+    with no method gives none. One centre per distinct value.
+    """
+    pick = {'db': 0, 'wb': 1, 'tsup': 2}
+    centres, seen = [], {}
+
+    def _cell(r, col):
+        v = r.get(col) if col in rows.columns else None
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        s = str(v).strip()
+        return s or None
+
+    for _, r in rows.iterrows():
+        entry = {
+            'dev_test_condition': cond,
+            'file_name': _cell(r, 'file_name') or file_name,
+            'profile_id': _cell(r, 'profile_id') or profile_id,
+            'hp_id': _cell(r, 'hp_id'),
+            'climate': _cell(r, 'climate'),
+            'application': _cell(r, 'application'),
+            'condition_set_id': _cell(r, 'condition_set_id'),
+        }
+        method = normalize_hybrid_method(_cell(r, 'hybrid_method'))[0]
+        key = tuple(entry.values()) + (method,)
+        if key not in seen:
+            value = None
+            try:
+                if _entry_is_cooling(entry):
+                    value = None
+                elif quantity in pick:
+                    value = hybrid_switch_setpoints(entry)[pick[quantity]]
+                elif quantity == 'q' and method:
+                    profile, _ = unit_config.resolve_profile(
+                        file_name=entry['file_name'], hp_id=entry['hp_id'],
+                        profile_id=entry['profile_id'])
+                    outdoor, _why = hybrid_load_outdoor(method, cond, None, profile)
+                    if outdoor is not None:
+                        pdesign = get_pdesign_for_hp(
+                            entry['hp_id'], file_name=entry['file_name'],
+                            profile_id=entry['profile_id'])
+                        value = compute_ua_and_qset(pdesign, outdoor)[1]
+            except Exception:
+                value = None
+            seen[key] = value
+        value = seen[key]
+        if value is not None and all(abs(value - c) > 1e-9 for c in centres):
+            centres.append(value)
+    return centres
+
+
+def _stripplot_letter_heating_compared(rows, cond, letter_tdb):
+    """True when a Scatter letter strip keeps its heating-capacity band.
+
+    ``rows`` are that strip's points. A heating point (not on a cooling set) is
+    compared when it has no method, or when ``hybrid_load_outdoor`` gives an
+    outdoor temperature at the letter's dry bulb. False only when every heating
+    point has a method and none is compared. A strip with no heating point
+    returns True (the band code already draws nothing for it).
+    """
+    if rows is None or len(rows) == 0 or 'hybrid_method' not in rows.columns:
+        return True
+    has_set = 'condition_set_id' in rows.columns
+    heating_seen = False
+    for _, r in rows.iterrows():
+        set_id = r.get('condition_set_id') if has_set else None
+        if set_id is not None and not (isinstance(set_id, float) and pd.isna(set_id)):
+            if unit_config.is_cooling_condition_set(set_id):
+                continue
+        heating_seen = True
+        raw = r.get('hybrid_method')
+        if raw is not None and isinstance(raw, float) and pd.isna(raw):
+            raw = None
+        method = normalize_hybrid_method(raw)[0]
+        if not method:
+            return True
+        if hybrid_load_outdoor(method, cond, letter_tdb, None)[0] is not None:
+            return True
+    return not heating_seen
+
+
 def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, mean_wb_k=0.4, mean_tsup_k=0.5, mean_q_pct=5.0, mean_flow_pct=1.0, unit_label=None, profile_id=None):
     """Generate a stripplot for given data. Draws permissible deviation bands only for test conditions present in the data.
     mean_q_pct and mean_flow_pct are used for Q (heating capacity) and flow (mass/volume) y_parameters respectively."""
@@ -22498,7 +22942,10 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
         
         # Per-condition bands: only for test conditions present in this plot's data.
         # Pcorrwbuh/Puncorrwbuh get no bands (power, not temperature or Q). Qcorrwbuh/Quncorrwbuh get Q bands.
-        unique_conditions = set(c for c in plot_df['test_condition'].dropna().unique().tolist() if c in DEVIATION_SETPOINTS)
+        # A hybrid switch strip (thp_on / tfb_off) is not a letter; its centres
+        # come from _stripplot_switch_centres instead of DEVIATION_SETPOINTS.
+        unique_conditions = set(c for c in plot_df['test_condition'].dropna().unique().tolist()
+                                if c in DEVIATION_SETPOINTS or c in HYBRID_SWITCH_CONDS)
         from matplotlib.patches import Rectangle
         y_param_lower = y_parameter.lower()
         # Power/capacity BUH params: do not treat as WB temperature
@@ -22514,7 +22961,7 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
             # Match x-axis order (same as stripplot categories)
             cat_order = [str(l.get_text()) for l in ax.get_xticklabels()]
             for idx, cond in enumerate(cat_order):
-                if cond not in unique_conditions or cond not in DEVIATION_SETPOINTS:
+                if cond not in unique_conditions:
                     continue
                 ylo, yhi = None, None
                 setpoint_val = None  # for dashed line and set-value text
@@ -22534,13 +22981,34 @@ def generate_stripplot(data, hp_label, flow_config, y_parameter, mean_db_k=0.6, 
                       'ts buh' in y_param_lower or 'ts_buh' in y_param_lower):
                     # Tsup bands: supply temp and Ts Buh (buffer supply temp)
                     temp_quantity, temp_half = 'tsup', mean_tsup_k
-                if temp_quantity is not None:
+                if cond in HYBRID_SWITCH_CONDS:
+                    # Switch strip: the profile's dry bulb, wet bulb and outlet with the
+                    # existing mean widths; heating capacity only against the load
+                    # hybrid_load_outdoor allows. No flow band, as before.
+                    pid = profile_id
+                    if not pid and hp_label in unit_config.load_all_profiles():
+                        pid = hp_label
+                    if temp_quantity is not None and temp_half is not None:
+                        for setpoint in _stripplot_switch_centres(
+                                letter_rows, cond, temp_quantity, profile_id=pid,
+                                file_name=band_file_name):
+                            extra_bands.append((setpoint - temp_half, setpoint + temp_half, setpoint))
+                    elif is_q_param and 'cooling' not in y_param_lower and mean_q_pct >= 0:
+                        fac = mean_q_pct / 100.0
+                        for qset in _stripplot_switch_centres(
+                                letter_rows, cond, 'q', profile_id=pid, file_name=band_file_name):
+                            extra_bands.append((qset * (1 - fac), qset * (1 + fac), qset))
+                elif temp_quantity is not None:
                     if temp_half is not None:
                         for setpoint in _stripplot_letter_setpoints(cond, letter_set_ids, temp_quantity):
                             extra_bands.append((setpoint - temp_half, setpoint + temp_half, setpoint))
                 elif is_q_param:
                     # Q (heating capacity): band = Qset ± mean_q_pct%, heating points only
                     db_setpoint = next(iter(_stripplot_letter_setpoints(cond, letter_set_ids, 'q')), None)
+                    # Hybrid: no heating band when no heating point of this letter is
+                    # compared with the building load (same rule as Deviations).
+                    if not _stripplot_letter_heating_compared(letter_rows, cond, db_setpoint):
+                        db_setpoint = None
                     hp_for_design = None
                     if 'hp_id' in plot_df.columns:
                         hp_vals = plot_df['hp_id'].dropna().astype(str).str.strip()
@@ -23603,6 +24071,29 @@ def api_profiles_save():
                         f'{key} must be the motor efficiency as a fraction greater than 0 '
                         f'and at most 1 (for example 0.85, not 85)')})
                 data[key] = ie
+        # Hybrid switch temperatures (outdoor °C): typed, stored, not scored. Only a
+        # hybrid profile carries them; other unit types leave the stored keys alone.
+        # A number is stored, an empty field removes the key, anything else is refused.
+        is_hybrid = str(data.get('unit_type') or '').strip().lower() == unit_config.HYBRID_UNIT_TYPE
+        for key in unit_config.HYBRID_SWITCH_KEYS.values():
+            if key not in data:
+                continue
+            if not is_hybrid:
+                data.pop(key)
+                continue
+            raw = data[key]
+            text = '' if raw is None else str(raw).strip()
+            if text == '':
+                data.pop(key)
+                pump_clear.append(key)
+                continue
+            try:
+                num = float(text)
+            except (TypeError, ValueError):
+                num = None
+            if num is None or not np.isfinite(num):
+                return jsonify({'success': False, 'message': f'{key} must be a number in °C or empty'})
+            data[key] = num
         if isinstance(data.get('filename_patterns'), str):
             data['filename_patterns'] = [p.strip() for p in data['filename_patterns'].split(',') if p.strip()]
         if isinstance(data.get('hp_id_aliases'), str):
@@ -23661,6 +24152,33 @@ def api_profiles_save():
             'renamed': is_rename,
             'entries_updated': entries_updated,
             'message': ' '.join(bits),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/profiles/hybrid_switch_preview', methods=['POST'])
+def api_profiles_hybrid_switch_preview():
+    """Read-only: outlet / wet bulb at the typed hybrid switch temperatures.
+
+    Builds an in-memory profile from the form and runs resolve_hybrid_switch.
+    Writes nothing; the result is never stored on the profile.
+    """
+    try:
+        data = request.get_json() or {}
+        profile = {'unit_type': data.get('unit_type'), 'wb_rule': data.get('wb_rule'),
+                   'default_climate': data.get('default_climate') or None,
+                   'default_application': data.get('default_application') or None}
+        for key in unit_config.HYBRID_SWITCH_KEYS.values():
+            profile[key] = data.get(key)
+        heating_id = unit_config.get_default_condition_set_id()
+        clim, appl = unit_config.resolve_climate_application(
+            None, None, profile, heating_id)
+        return jsonify({
+            'success': True,
+            'thp_on': unit_config.resolve_hybrid_switch(profile, 'thp_on'),
+            'tfb_off': unit_config.resolve_hybrid_switch(profile, 'tfb_off'),
+            'slice': f'{clim} / {appl}',
         })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS results (
     HP_ID TEXT,
     Test_label TEXT,
     test_cond TEXT,
+    hybrid_method TEXT,
     climate TEXT,
     application TEXT,
     flow_config TEXT,
