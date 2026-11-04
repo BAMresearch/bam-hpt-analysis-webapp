@@ -108,7 +108,10 @@ def _handle_unexpected_exception(exc):
     raise from a helper called *before* a handler's own try block.
     """
     import traceback
-    traceback.print_exc()
+    try:
+        traceback.print_exc()
+    except OSError:
+        pass
     if not request.path.startswith('/api/'):
         raise exc
     return _api_error_response(exc, 500)
@@ -3047,7 +3050,7 @@ def index():
                 # Try to get it from the original query result
                 # SQLite rowid should be available, but if not, we'll need to add it
                 print(f"WARNING: rowid not found in row {i}")
-        print(f"Converted results: {results}")
+        print(f"Converted results: {len(results)} rows")
         
         # Debug: Print column names
         if results:
